@@ -1,0 +1,14 @@
+aiohttp>=3.9,<4
+Brotli>=1.1
+pure-protobuf>=3.1.2,<4
+yarl>=1.9,<2
+numpy>=1.26
+sounddevice>=0.5
+miniaudio>=1.61
+qrcode>=8.0
+comtypes>=1.4
+pycaw>=20240101
+bilibili-api-python==17.4.2
+windows-capture>=2.0,<3
+PyAudioWPatch>=0.2.12.9
+Pillow>=11
