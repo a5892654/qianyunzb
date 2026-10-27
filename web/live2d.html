@@ -23,6 +23,13 @@ html.off body{visibility:hidden}
 <canvas id="c"></canvas>
 <div id="bubble"><span class="shown"></span><span class="hid"></span></div>
 <div id="err"></div>
+<script>
+window.live2dOverlayState = {ready: false};
+addEventListener('error', e => {
+  window.live2dOverlayState.error = e.target?.tagName === 'SCRIPT'
+    ? 'Live2D 渲染库加载失败，请检查 web/vendor 文件' : 'Live2D 渲染失败：' + (e.message || '未知错误');
+}, true);
+</script>
 <script src="/static/vendor/live2dcubismcore.min.js"></script>
 <script src="/static/vendor/pixi.min.js"></script>
 <script src="/static/vendor/cubism4.min.js"></script>
@@ -43,6 +50,15 @@ let active = [];              // {id, w, target, base}
 let mouth = 0, env = null, envStart = 0, envFps = 30, fakeMouth = false;
 let clearTimer = null, bubbleTimer = null, typeTimer = null, speakId = null;
 
+// 同步渲染后读取 WebGL 画布，避免默认清空绘图缓冲后得到全透明图片。
+window.captureLive2DFrame = () => {
+  const error = window.live2dOverlayState.error || errBox.textContent;
+  if (error) return {error};
+  if (!CFG?.enabled || !model) return {ready: false};
+  app.renderer.render(app.stage);
+  return {png: app.view.toDataURL('image/png').split(',')[1]};
+};
+
 async function fetchInfo() {
   INFO = await fetch('/api/l2d/info').then(r => r.json());
   CFG = INFO.cfg;
@@ -58,6 +74,7 @@ async function loadExpr(id) {
 
 async function loadModel() {
   errBox.textContent = '';
+  delete window.live2dOverlayState.error;
   if (model) { app.stage.removeChild(model); model.destroy(); model = null; }
   active = [];
   for (const k in exprData) delete exprData[k];
@@ -243,7 +260,10 @@ function online(ok) {
 }
 setInterval(() => { if (!OVERLAY_MODE) online(!stopped && Date.now() - lastOk < 5000); }, 1000);
 addEventListener('resize', layout);
-onConfig().then(connect);
+onConfig().then(connect).catch(e => {
+  errBox.textContent = 'Live2D 初始化失败：' + e;
+  window.live2dOverlayState.error = errBox.textContent;
+});
 </script>
 </body>
 </html>

@@ -467,6 +467,7 @@ def build_web(app: App):
         config.save(app.cfg)
         if "live2d" in patch:
             app.push("l2d_config", {})
+            await app.broadcast.refresh_overlay()
         if "songs" in patch:
             app.songs._apply_volume()
         if str(app.cfg.get("room_id")) != str(old_room) and app.bili.client:

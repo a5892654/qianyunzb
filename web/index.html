@@ -69,6 +69,15 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
 .now{min-height:46px;font-size:16px;padding:10px 14px;border-radius:10px;background:linear-gradient(90deg,rgba(251,114,153,.18),rgba(35,173,229,.1));border:1px solid var(--line)}
 .now .dim{color:var(--dim);font-size:13px}
 .emo{flex-wrap:nowrap}
+.layout-stage{position:relative;width:100%;aspect-ratio:16/9;overflow:hidden;background:repeating-conic-gradient(#171d29 0% 25%,#1d2533 0% 50%) 0/32px 32px;border:1px solid var(--line);border-radius:10px}
+.layout-stage>img{position:absolute;inset:0;width:100%;height:100%;object-fit:fill}
+.layout-placeholder{position:absolute;left:14px;top:12px;right:14px;pointer-events:none;color:var(--dim);font-size:12px}
+.layout-box{position:absolute;border:2px dashed var(--pink);cursor:move;touch-action:none;user-select:none}
+.layout-box:focus-visible{outline:2px solid var(--blue);outline-offset:3px}
+.layout-box iframe{width:100%;height:100%;border:0;pointer-events:none}
+.layout-box>span{position:absolute;left:0;top:0;background:var(--pink);color:white;font-size:11px;padding:1px 6px;pointer-events:none}
+.layout-handle{position:absolute;right:-7px;bottom:-7px;width:18px;height:18px;padding:0;border:2px solid white;background:var(--pink);border-radius:4px;cursor:nwse-resize;touch-action:none}
+.layout-box[hidden],.layout-stage [hidden]{display:none}
 </style>
 </head>
 <body>
@@ -78,6 +87,7 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
   <button data-tab="dash">控制台</button>
   <button data-tab="room">直播间 / 登录</button>
   <button data-tab="broadcast" class="on">一键开播</button>
+  <button data-tab="layout">画面调整</button>
   <button data-tab="rules">回复规则</button>
   <button data-tab="fixed">固定回复</button>
   <button data-tab="songs">点歌</button>
@@ -205,14 +215,8 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
       <span style="flex:1"></span>
       <span class="hint" id="overlayState"></span>
     </div>
-    <div class="row">
-      <label class="f" style="max-width:170px">放在画面<select data-k="live2d.overlay_corner" id="overlayCorner">
-        <option value="br">右下角</option><option value="bl">左下角</option>
-        <option value="tr">右上角</option><option value="tl">左上角</option></select></label>
-      <label class="f">大小 <b data-show="live2d.overlay_size"></b><input type="range" min="0.2" max="1.4" step="0.02" data-k="live2d.overlay_size"></label>
-      <label class="f">边距 <b data-show="live2d.overlay_margin"></b><input type="range" min="0" max="0.15" step="0.005" data-k="live2d.overlay_margin"></label>
-    </div>
-    <p class="hint">图像取「Live2D 皮套」页里的取景和表情设置，开播时由软件自己渲染并合成，不需要额外窗口或 OBS。改完位置大小后重新预览即可看到效果。</p>
+    <div class="row"><button class="btn" id="openLayout">调整皮套位置和大小</button><button class="btn" id="openLive2D">选择 Live2D 模型</button></div>
+    <p class="hint">预览画面就是观众看到的画面，包含已启用的 Live2D 皮套。位置和大小可在「画面调整」中实时修改，自动保存。</p>
   </div>
   <div class="card">
     <h3>直播间资料</h3>
@@ -248,6 +252,35 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
     <div class="row"><button class="btn p" id="broadcastStart">开始直播</button><button class="btn r" id="broadcastStop" disabled>停止直播</button><span class="hint" id="broadcastTimer"></span></div>
     <div class="hint" id="broadcastError" role="status"></div>
     <div class="hint" style="margin-top:10px">开播后观众会看到预览中的内容。AI 生成配音/代打内容请在标题或直播间说明中明确标识；关闭软件会停止由千音开启的直播。</div>
+  </div>
+</section>
+
+<!-- ========== 直播画面调整 ========== -->
+<section id="layout">
+  <h2>直播画面调整</h2>
+  <div class="card">
+    <div class="row"><button class="btn" id="layoutBack">返回一键开播</button><button class="btn" id="layoutModel">选择模型 / 调整取景</button><span class="hint" id="layoutState" role="status"></span></div>
+    <div class="row"><label class="c"><input type="checkbox" data-k="live2d.overlay_in_broadcast">把 Live2D 皮套叠加到直播画面</label></div>
+    <p class="hint">拖动粉色框移动皮套，拖动右下角调整大小。下方滑块可精细调整。预览和直播中即时生效，自动保存。</p>
+    <div class="layout-stage" id="layoutStage">
+      <img id="layoutPreviewImage" alt="观众画面预览" hidden>
+      <div class="layout-placeholder" id="layoutPlaceholder">尚未启动游戏预览。可先调整皮套，再返回「一键开播」点击「预览画面和声音」查看完整画面。</div>
+      <div class="layout-box" id="layoutBox" tabindex="0" role="group" aria-label="Live2D 位置，方向键移动，按住 Shift 加快" hidden>
+        <iframe id="layoutModelPreview" title="Live2D 皮套取景" tabindex="-1"></iframe>
+        <span>Live2D · 拖动移动</span><button class="layout-handle" id="layoutResize" aria-label="调整 Live2D 大小，方向键放大或缩小"></button>
+      </div>
+    </div>
+    <div class="row" style="margin-top:14px">
+      <label class="f">左右位置 <b id="layoutXValue"></b><input type="range" id="layoutX" min="0" max="100" step="0.1" aria-label="Live2D 左右位置"></label>
+      <label class="f">上下位置 <b id="layoutYValue"></b><input type="range" id="layoutY" min="0" max="100" step="0.1" aria-label="Live2D 上下位置"></label>
+      <label class="f">大小（相对画面高度）<b id="layoutSizeValue"></b><input type="range" min="0.2" max="1.4" step="0.01" data-k="live2d.overlay_size" id="layoutSize"></label>
+    </div>
+    <div class="row">
+      <label class="f" style="max-width:180px">快速放置<select data-k="live2d.overlay_corner" id="overlayCorner"><option value="br">右下角</option><option value="bl">左下角</option><option value="tr">右上角</option><option value="tl">左上角</option></select></label>
+      <label class="f">角落边距 <b data-show="live2d.overlay_margin"></b><input type="range" min="0" max="0.15" step="0.005" data-k="live2d.overlay_margin"></label>
+      <button class="btn" id="layoutReset" style="margin-top:18px">恢复默认位置和大小</button>
+    </div>
+    <div class="hint" id="layoutSaveState" role="status"></div>
   </div>
 </section>
 
@@ -600,6 +633,8 @@ const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&
 $$('nav button[data-tab]').forEach(b => b.onclick = () => {
   $$('nav button[data-tab]').forEach(x => x.classList.toggle('on', x === b));
   $$('main section').forEach(s => s.classList.toggle('on', s.id === b.dataset.tab));
+  syncPreviewStream(!!broadcastInfo.previewing);
+  renderLayout();
 });
 
 // ---------- 回复规则卡片 ----------
@@ -637,9 +672,41 @@ function fillForm() {
   $('#qoderBox').style.display = CFG.ai.backend === 'openai' ? 'none' : '';
   $('#openaiBox').style.display = CFG.ai.backend === 'openai' ? '' : 'none';
   $('#qoderExe').placeholder = CFG._qoder_default;
+  renderLayout();
 }
-let saveTimer = null, pending = {};
+let saveTimer = null, pending = {}, saveQueue = Promise.resolve();
 function deepMerge(a, b) { for (const k in b) { if (b[k] && typeof b[k] === 'object' && !Array.isArray(b[k])) { a[k] = a[k] || {}; deepMerge(a[k], b[k]); } else a[k] = b[k]; } return a; }
+function queueConfig(p, delay = 500) {
+  deepMerge(CFG, p); deepMerge(pending, p);
+  $$('[data-k]').forEach(el => {
+    const v = getPath(p, el.dataset.k);
+    if (v === undefined) return;
+    if (el.type === 'checkbox') el.checked = !!v;
+    else if (el.type !== 'radio') el.value = v ?? '';
+  });
+  $$('[data-show]').forEach(el => el.textContent = getPath(CFG, el.dataset.show));
+  if (p.live2d) { renderLayout(); $('#layoutSaveState').textContent = '正在保存调整…'; }
+  if (!saveTimer) saveTimer = setTimeout(() => flushConfig().catch(() => {}), delay);
+}
+async function flushConfig() {
+  clearTimeout(saveTimer); saveTimer = null;
+  const p = pending; pending = {};
+  if (Object.keys(p).length) {
+    saveQueue = saveQueue.catch(() => {}).then(async () => {
+      const r = await api('/api/config', p);
+      if (!r.ok) throw new Error(r.error || '设置保存失败');
+      if (p.live2d) $('#layoutSaveState').textContent = '调整已保存，预览和直播同步生效';
+      else toast('设置已保存');
+    }).catch(error => {
+      // 保留失败的修改，下一次保存或预览时重试。
+      pending = deepMerge(p, pending);
+      $('#layoutSaveState').textContent = '保存失败：' + error.message;
+      toast('设置保存失败：' + error.message);
+      throw error;
+    });
+  }
+  await saveQueue;
+}
 function onField(el) {
   let v;
   if (el.type === 'checkbox') v = el.checked;
@@ -647,11 +714,10 @@ function onField(el) {
   else if (el.type === 'number' || el.type === 'range' || el.dataset.k === 'tts.sample_steps' || el.dataset.k === 'broadcast.area_id') v = el.value === '' ? 0 : Number(el.value);
   else v = el.value;
   const p = setPatch(el.dataset.k, v);
-  deepMerge(CFG, p); deepMerge(pending, p);
-  $$(`[data-show="${el.dataset.k}"]`).forEach(x => x.textContent = v);
+  if (el.dataset.k === 'live2d.overlay_in_broadcast' && v) p.live2d.enabled = true;
+  if (['live2d.overlay_corner', 'live2d.overlay_margin'].includes(el.dataset.k)) Object.assign(p.live2d, {overlay_x: null, overlay_y: null});
+  queueConfig(p, el.dataset.k.startsWith('live2d.overlay_') ? 120 : 500);
   if (el.dataset.k === 'ai.backend') fillForm();
-  clearTimeout(saveTimer);
-  saveTimer = setTimeout(async () => { const p = pending; pending = {}; await api('/api/config', p); toast('设置已保存'); }, 500);
 }
 document.addEventListener('change', e => { if (e.target.dataset?.k) onField(e.target); });
 document.addEventListener('input', e => { if (e.target.dataset?.k && e.target.type === 'range') onField(e.target); });
@@ -988,6 +1054,72 @@ $('#neLogout').onclick = async () => { if (confirm('退出网易云登录？')) 
 $('#sgUrl').value = `${location.origin}/songs`;
 
 let broadcastLoginRequested = false, broadcastBusy = false, broadcastAccount = null, broadcastInfo = {};
+// 布局坐标与后台合成器一致：中心相对直播画面的位置，大小相对画面高度。
+const clamp = (v, low, high) => Math.max(low, Math.min(high, v));
+let layoutDrag = null;
+function layoutRect() {
+  const c = CFG.live2d || {}, size = Number(c.overlay_size ?? 0.5), margin = Number(c.overlay_margin ?? 0.02);
+  const h = size, w = h * 9 / 16, corner = c.overlay_corner || 'br';
+  const x = c.overlay_x ?? (corner.includes('l') ? margin * 9 / 16 + w / 2 : 1 - margin * 9 / 16 - w / 2);
+  const y = c.overlay_y ?? (corner.includes('t') ? margin + h / 2 : 1 - margin - h / 2);
+  return {x, y, w, h};
+}
+function renderLayout() {
+  if (!CFG.live2d) return;
+  const c = CFG.live2d, r = layoutRect(), box = $('#layoutBox');
+  const enabled = !!(c.enabled && c.overlay_in_broadcast);
+  box.hidden = !enabled;
+  Object.assign(box.style, {left: (r.x - r.w / 2) * 100 + '%', top: (r.y - r.h / 2) * 100 + '%', width: r.w * 100 + '%', height: r.h * 100 + '%'});
+  $('#layoutX').value = r.x * 100; $('#layoutY').value = r.y * 100;
+  $('#layoutXValue').textContent = (r.x * 100).toFixed(1) + '%';
+  $('#layoutYValue').textContent = (r.y * 100).toFixed(1) + '%';
+  $('#layoutSizeValue').textContent = (r.h * 100).toFixed(0) + '%';
+  const show = !!broadcastInfo.previewing;
+  $('#layoutPreviewImage').hidden = !show;
+  $('#layoutPlaceholder').hidden = show;
+  const frame = $('#layoutModelPreview');
+  frame.hidden = show;
+  if (!show && enabled && $('#layout').classList.contains('on')) {
+    if (!frame.getAttribute('src')) frame.src = '/live2d?overlay=1';
+  } else frame.removeAttribute('src');
+  const state = broadcastInfo.overlay_error || (!c.enabled ? '请先选择并启用 Live2D 模型' : !c.overlay_in_broadcast ? '皮套叠加已关闭' : broadcastInfo.overlay ? '皮套正在叠加到观众画面' : show ? '正在准备皮套画面…' : '调整将在下次预览和开播时使用');
+  $('#layoutState').textContent = state;
+  $('#layoutState').style.color = broadcastInfo.overlay_error ? 'var(--red)' : '';
+}
+function moveLayout(patch) { queueConfig({live2d: patch}, 120); }
+$('#layoutX').oninput = () => moveLayout({overlay_x: Number($('#layoutX').value) / 100});
+$('#layoutY').oninput = () => moveLayout({overlay_y: Number($('#layoutY').value) / 100});
+$('#layoutReset').onclick = () => moveLayout({overlay_x: null, overlay_y: null, overlay_corner: 'br', overlay_size: 0.5, overlay_margin: 0.02});
+$('#openLayout').onclick = () => document.querySelector('nav button[data-tab="layout"]').click();
+$('#layoutBack').onclick = () => document.querySelector('nav button[data-tab="broadcast"]').click();
+$('#openLive2D').onclick = $('#layoutModel').onclick = () => document.querySelector('nav button[data-tab="l2d"]').click();
+$('#layoutBox').onpointerdown = e => {
+  if (e.button !== 0) return;
+  e.preventDefault();
+  layoutDrag = {pointer: e.pointerId, resize: e.target.id === 'layoutResize', startX: e.clientX, startY: e.clientY, rect: layoutRect(), stage: $('#layoutStage').getBoundingClientRect()};
+  $('#layoutBox').setPointerCapture(e.pointerId);
+};
+$('#layoutBox').onpointermove = e => {
+  if (!layoutDrag || layoutDrag.pointer !== e.pointerId) return;
+  const d = layoutDrag, dx = (e.clientX - d.startX) / d.stage.width, dy = (e.clientY - d.startY) / d.stage.height;
+  if (d.resize) {
+    const size = clamp(d.rect.h + (Math.abs(dx * 16 / 9) > Math.abs(dy) ? dx * 16 / 9 : dy), 0.2, 1.4);
+    moveLayout({overlay_size: size, overlay_x: clamp(d.rect.x + (size - d.rect.h) * 9 / 32, 0, 1), overlay_y: clamp(d.rect.y + (size - d.rect.h) / 2, 0, 1)});
+  } else moveLayout({overlay_x: clamp(d.rect.x + dx, 0, 1), overlay_y: clamp(d.rect.y + dy, 0, 1)});
+};
+function endLayoutDrag(e) {
+  if (!layoutDrag || layoutDrag.pointer !== e.pointerId) return;
+  layoutDrag = null;
+  flushConfig().catch(() => {});
+}
+$('#layoutBox').onpointerup = $('#layoutBox').onpointercancel = $('#layoutBox').onlostpointercapture = endLayoutDrag;
+$('#layoutBox').onkeydown = e => {
+  if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) return;
+  e.preventDefault();
+  const r = layoutRect(), step = e.shiftKey ? 0.05 : 0.005;
+  if (e.target.id === 'layoutResize') moveLayout({overlay_size: clamp(r.h + (['ArrowRight', 'ArrowDown'].includes(e.key) ? step : -step), 0.2, 1.4)});
+  else moveLayout({overlay_x: clamp(r.x + (e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0), 0, 1), overlay_y: clamp(r.y + (e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0), 0, 1)});
+};
 let scheduleInfo = {}, scheduleDirty = false, scheduleBusy = false;
 $('#openBroadcast').onclick = () => document.querySelector('nav button[data-tab="broadcast"]').click();
 $('#broadcastLogin').onclick = () => { broadcastLoginRequested = true; document.querySelector('nav button[data-tab="room"]').click(); $('#qrBtn').click(); };
@@ -1089,6 +1221,7 @@ $('#roomNoticeSave').onclick = () => broadcastAction(async () => {
 $('#broadcastRefreshSources').onclick = () => broadcastAction(refreshBroadcastSources);
 $('#broadcastLaunchGame').onclick = () => broadcastAction(async () => { const r = await api('/api/dtgame/launch', {}); await refreshBroadcastSources(); if (!r.ok) throw new Error(r.error || '游戏启动失败'); });
 $('#broadcastPreview').onclick = () => broadcastAction(async () => {
+  await flushConfig();
   let selection = broadcastSelection();
   $('#broadcastStatus').style.color = 'var(--yellow)';
   $('#broadcastPreview').textContent = '正在启动预览…';
@@ -1114,6 +1247,7 @@ $('#broadcastPreview').onclick = () => broadcastAction(async () => {
 });
 $('#broadcastPreviewStop').onclick = () => broadcastAction(async () => { const r = await api('/api/broadcast/preview/stop', {}); if (!r.ok) throw new Error(r.error); });
 $('#broadcastStart').onclick = () => broadcastAction(async () => {
+  await flushConfig();
   if (!confirm(`以 ${broadcastAccount?.name || '当前账号'} 公开开播？观众将看到预览画面并听到所选设备声音。`)) return;
   const r = await api('/api/broadcast/start', {...broadcastSelection(), title: $('#broadcastTitle').value.trim(), area_id: Number($('#broadcastArea').value), confirm: true});
   if (!r.ok) throw new Error(r.error);
@@ -1136,9 +1270,10 @@ async function pollBroadcast() {
     if (broadcastInfo.error) $('#broadcastError').textContent = broadcastInfo.error;
     const show = !!broadcastInfo.previewing;
     $('#broadcastPreviewImage').style.display = show ? '' : 'none'; $('#broadcastPreviewEmpty').style.display = show ? 'none' : '';
-    $('#overlayState').textContent = broadcastInfo.overlay ? '皮套正在叠加' : (broadcastInfo.overlay_error || (CFG.live2d?.enabled ? '预览或开播后叠加' : '皮套未启用'));
+    $('#overlayState').textContent = broadcastInfo.overlay ? '皮套正在叠加' : (broadcastInfo.overlay_error || (!CFG.live2d?.enabled ? '请先选择并启用 Live2D 模型' : !CFG.live2d?.overlay_in_broadcast ? '皮套叠加已关闭' : '预览或开播后叠加'));
     $('#overlayState').style.color = broadcastInfo.overlay_error ? 'var(--red)' : '';
     syncPreviewStream(show);
+    renderLayout();
     updateBroadcastButtons();
   } catch (e) { $('#broadcastError').textContent = '直播服务连接失败，请检查软件是否仍在运行。'; }
 }
@@ -1181,22 +1316,18 @@ async function saveSchedule(disable = false) {
 $('#scheduleSave').onclick = () => saveSchedule();
 $('#scheduleDisable').onclick = () => saveSchedule(true);
 setInterval(pollSchedule, 5000); pollSchedule();
-let previewStreamOn = false;
 function syncPreviewStream(show) {
-  const img = $('#broadcastPreviewImage');
-  const want = show && document.querySelector('#broadcast').classList.contains('on');
-  if (want && !previewStreamOn) {
-    previewStreamOn = true;
-    img.src = `/api/broadcast/stream.mjpg?t=${Date.now()}`;
-  } else if (!want && previewStreamOn) {
-    previewStreamOn = false;
-    img.removeAttribute('src');
+  for (const [id, section] of [['broadcastPreviewImage', 'broadcast'], ['layoutPreviewImage', 'layout']]) {
+    const img = $('#' + id), want = show && $('#' + section).classList.contains('on');
+    if (want && !img.getAttribute('src')) img.src = `/api/broadcast/stream.mjpg?t=${Date.now()}`;
+    else if (!want) img.removeAttribute('src');
   }
 }
-$('#broadcastPreviewImage').onerror = () => {
-  if (!previewStreamOn) return;
-  previewStreamOn = false;
-  setTimeout(() => { if (broadcastInfo.previewing) syncPreviewStream(true); }, 800);
+for (const id of ['broadcastPreviewImage', 'layoutPreviewImage']) $('#' + id).onerror = () => {
+  const img = $('#' + id);
+  if (!img.getAttribute('src')) return;
+  img.removeAttribute('src');
+  setTimeout(() => syncPreviewStream(!!broadcastInfo.previewing), 800);
 };
 setInterval(pollBroadcast, 1000);
 loadConfig().then(() => { loadWeights(); loadDevices(); loadL2d(); api('/api/songs/state').then(renderSongs); refreshBroadcastAccount(); refreshBroadcastSources().catch(e => $('#broadcastError').textContent = e.message); loadBroadcastAreas().catch(e => $('#broadcastError').textContent = e.message); pollBroadcast(); });

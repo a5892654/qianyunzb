@@ -267,7 +267,7 @@ async def test_routes():
 
 
 def test_ui_source():
-    html = Path("C:/gamedata/wt_src/WhaleTalk--main/web/index.html").read_text(encoding="utf-8")
+    html = (Path(__file__).resolve().parents[1] / "web" / "index.html").read_text(encoding="utf-8")
     check('id="roomCoverFile"' in html and "image/jpeg,image/png" in html, "ui_cover_file_input")
     cover_img = html.split('<img id="roomCoverPreview"')[1].split(">")[0]
     check('referrerpolicy="no-referrer"' in cover_img, "ui_cover_img_bypasses_hotlink_guard")

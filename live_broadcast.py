@@ -1,4 +1,5 @@
 import asyncio
+import math
 import time
 
 from live_capture import CaptureError, WindowStreamCapture, sources
@@ -19,18 +20,28 @@ class Broadcast:
         self.started_at = 0.0
         self.watch_task = None
         self.overlay: Live2DOverlay | None = None
+        self.overlay_error = ""
 
     @property
     def running(self):
         return bool(self.capture.output_running or (self.platform and self.platform.started_room_id))
 
-    def overlay_settings(self) -> tuple[str, float, float] | None:
+    def overlay_settings(self) -> tuple[str, float, float, float | None, float | None] | None:
         """每帧调用：开关关掉时返回 None，合成器据此跳过叠加。"""
         l2d = self.app.cfg.get("live2d", {})
         if not l2d.get("enabled") or not l2d.get("overlay_in_broadcast", True):
             return None
-        return (str(l2d.get("overlay_corner", "br")), float(l2d.get("overlay_size", 0.5)),
-                float(l2d.get("overlay_margin", 0.02)))
+
+        def number(key, default, low, high):
+            value = float(l2d.get(key, default))
+            if not math.isfinite(value) or not low <= value <= high:
+                raise ValueError("Live2D 位置或大小超出范围，请重新调整")
+            return value
+
+        return (str(l2d.get("overlay_corner", "br")), number("overlay_size", 0.5, 0.2, 1.4),
+                number("overlay_margin", 0.02, 0, 0.15),
+                number("overlay_x", 0.5, 0, 1) if l2d.get("overlay_x") is not None else None,
+                number("overlay_y", 0.5, 0, 1) if l2d.get("overlay_y") is not None else None)
 
     def overlay_problem(self) -> str:
         """空串表示要叠加皮套；"off" 表示不需要；其余为不可用原因。"""
@@ -44,12 +55,21 @@ class Broadcast:
         return ""
 
     async def prepare_overlay(self) -> None:
-        """预览/开播前把皮套渲染器拉起来；失败只提示，不影响直播。"""
+        """预览/配置变化时准备渲染器，保留失败原因供界面展示和开播校验。"""
         problem = self.overlay_problem()
         if problem == "off":
+            await asyncio.to_thread(self.stop_overlay)
+            self.overlay_error = ""
             return
         if problem:
+            await asyncio.to_thread(self.stop_overlay)
+            self.overlay_error = problem
             self.app.push("log", {"level": "warn", "msg": problem})
+            return
+        try:
+            self.overlay_settings()
+        except (TypeError, ValueError) as error:
+            self.overlay_error = str(error)
             return
         port = int(self.app.cfg.get("web_port", 8787))
         url = f"http://127.0.0.1:{port}/live2d?overlay=1"
@@ -57,15 +77,25 @@ class Broadcast:
         self.overlay = overlay
         try:
             await asyncio.to_thread(overlay.start, url, OVERLAY_BOX)
-        except OverlayError as error:
+        except (OverlayError, OSError) as error:
+            self.overlay_error = str(error)
             self.app.push("log", {"level": "warn", "msg": f"皮套叠加未启用：{error}"})
-            self.stop_overlay()
+            await asyncio.to_thread(self.stop_overlay)
             return
-        self.capture.compositor = OverlayCompositor(overlay, self.overlay_settings)
-        self.app.push("log", {"level": "info", "msg": "皮套已叠加到直播画面"})
+        self.overlay_error = ""
+        self.capture.compositor_error = ""
+        if getattr(self.capture, "compositor", None) is None:
+            self.capture.compositor = OverlayCompositor(overlay, self.overlay_settings)
+            self.app.push("log", {"level": "info", "msg": "皮套已叠加到直播画面"})
+
+    async def refresh_overlay(self) -> None:
+        async with self.lock:
+            if self.capture.previewing:
+                await self.prepare_overlay()
 
     def stop_overlay(self) -> None:
         self.capture.compositor = None
+        self.capture.compositor_error = ""
         overlay, self.overlay = self.overlay, None
         if overlay is not None:
             overlay.stop()
@@ -180,7 +210,8 @@ class Broadcast:
             if self.running:
                 return {"ok": False, "error": "请先停止直播，再关闭预览"}
             await asyncio.to_thread(self.capture.stop_preview)
-            self.stop_overlay()
+            await asyncio.to_thread(self.stop_overlay)
+            self.overlay_error = ""
             self.phase = "idle"
             self.error = ""
             return {"ok": True}
@@ -206,6 +237,8 @@ class Broadcast:
                 if not devices["ffmpeg_ready"]:
                     raise CaptureError("找不到直播编码器，暂不能开播")
                 await self.prepare_overlay()
+                if self.overlay_error:
+                    raise OverlayError(self.overlay_error)
                 self.phase, self.error = "starting", ""
                 self.platform = BiliBroadcastPlatform(self.app.cfg.get("bili_cookie", ""))
                 result = await self.platform.begin(title.strip(), area)
@@ -215,7 +248,7 @@ class Broadcast:
                 self.watch_task = asyncio.create_task(self._watch())
                 self.app.push("log", {"level": "info", "msg": f"B站直播已开始，直播间 {result['room_id']}"})
                 return {"ok": True, "room_id": result["room_id"]}
-            except (PlatformError, CaptureError, ValueError, OSError) as error:
+            except (PlatformError, CaptureError, OverlayError, ValueError, OSError) as error:
                 self.error = str(error)
                 await asyncio.to_thread(self.capture.stop_output)
                 if self.platform and self.platform.started_room_id:
@@ -257,14 +290,14 @@ class Broadcast:
                 return {"ok": False, "error": self.error}
             self.phase = "preview" if self.capture.previewing else "idle"
             if not self.capture.previewing:
-                self.stop_overlay()
+                await asyncio.to_thread(self.stop_overlay)
             self.error = ""
             return {"ok": True}
 
     async def close(self):
         result = await self.stop()
         await asyncio.to_thread(self.capture.stop_preview)
-        self.stop_overlay()
+        await asyncio.to_thread(self.stop_overlay)
         return result
 
     def status(self):
@@ -272,9 +305,15 @@ class Broadcast:
         if state.get("error") and not self.running:
             self.phase = "error"
         overlay = self.overlay
+        enabled = bool(self.app.cfg.get("live2d", {}).get("enabled") and
+                       self.app.cfg.get("live2d", {}).get("overlay_in_broadcast", True))
+        overlay_error = (self.overlay_error or (overlay.error if overlay else "") or
+                         getattr(self.capture, "compositor_error", "")) if enabled else ""
+        ready = bool(enabled and not overlay_error and getattr(self.capture, "compositor", None) and
+                     overlay and overlay.frame() is not None)
         return {**state, "phase": self.phase, "error": self.error or state.get("error", ""),
-                "running": self.running, "overlay": bool(getattr(self.capture, "compositor", None)),
-                "overlay_error": overlay.error if overlay else "",
+                "running": self.running, "overlay": ready,
+                "overlay_error": overlay_error,
                 "seconds": time.monotonic() - self.started_at if self.running and self.started_at else 0}
 
     def frame(self):

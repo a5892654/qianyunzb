@@ -232,6 +232,7 @@ class WindowStreamCapture:
         self._enc_evt = threading.Event()
         self._capture_closed = threading.Event()
         self._frame: bytes | None = None          # 720p BGRA
+        self._source_frame: np.ndarray | None = None  # 最新游戏画面，合成时复制，避免残影
         self._digest = ""                          # 低清帧指纹（黑屏/变化检测）
         self._mean = 0.0
         self._jpeg: bytes | None = None
@@ -251,6 +252,7 @@ class WindowStreamCapture:
         self._conn: socket.socket | None = None
         self._threads: list[threading.Thread] = []
         self.compositor = None  # 直播时叠加皮套（live_overlay.OverlayCompositor）
+        self.compositor_error = ""
 
     # ---------------- 预览 ----------------
 
@@ -262,6 +264,7 @@ class WindowStreamCapture:
                 raise CaptureError("预览已在运行")
             self.error = ""
             self._frame = self._jpeg = None
+            self._source_frame = None
             self.latest = self._jpeg_at = 0.0
             self._capture_closed.clear()
         hwnd = int(hwnd)
@@ -382,26 +385,31 @@ class WindowStreamCapture:
             scaled = cv2.resize(buf, (nw, nh), interpolation=cv2.INTER_AREA)
             x0, y0 = (nw - OUT_W) // 2, (nh - OUT_H) // 2
             canvas = scaled[y0:y0 + OUT_H, x0:x0 + OUT_W]
-            compositor = self.compositor
-            if compositor is not None:
-                try:
-                    compositor.apply(canvas)
-                except Exception:
-                    self.compositor = None  # 叠加层出问题就退回纯游戏画面，别中断直播
-            data = canvas.tobytes()
-            tiny = cv2.resize(canvas, (16, 9),
-                              interpolation=cv2.INTER_AREA)
-            digest = hashlib.md5(tiny.tobytes()).hexdigest()
+            tiny = cv2.resize(canvas, (16, 9), interpolation=cv2.INTER_AREA)
             rgb = tiny[2:-2, 3:-3, :3]
             mean = float(rgb.mean()) if float(rgb.std()) > 3.0 else 0.0
-            now = time.monotonic()
-            with self._frame_cv:
-                self._frame = data
-                self._digest, self._mean = digest, mean
-                self.latest = now
-                self._frame_cv.notify_all()
+            with self._lock:
+                self._source_frame = canvas.copy()
+                self._mean = mean
+                self.latest = time.monotonic()
         except Exception as exc:
             self._fail(_safe(f"帧处理异常: {exc}"))
+
+    def _compose_frame(self, source: np.ndarray) -> None:
+        canvas = source.copy()
+        compositor = self.compositor
+        if compositor is not None:
+            try:
+                compositor.apply(canvas)
+            except Exception as exc:
+                self.compositor_error = f"Live2D 画面合成失败：{exc}"
+                self.compositor = None
+        data = canvas.tobytes()
+        tiny = cv2.resize(canvas, (16, 9), interpolation=cv2.INTER_AREA)
+        digest = hashlib.md5(tiny.tobytes()).hexdigest()
+        with self._frame_cv:
+            self._frame, self._digest = data, digest
+            self._frame_cv.notify_all()
 
     def _on_closed(self, *_args) -> None:
         self._capture_closed.set()
@@ -432,14 +440,21 @@ class WindowStreamCapture:
             self._fail(_safe(f"音频读取异常: {exc}"))
 
     def _jpeg_worker(self) -> None:
+        # 独立刷新最终画面：游戏静止时皮套仍能动，关掉或移动皮套不会残留旧画面。
         last_digest = ""
         while not self._audio_stop.is_set() and self.previewing:
-            with self._lock:
-                frame, digest = self._frame, self._digest
-            if not frame or not digest or digest == last_digest:
-                time.sleep(0.005)
-                continue
+            if self._audio_stop.wait(1 / FPS):
+                break
             try:
+                with self._lock:
+                    source = self._source_frame
+                if source is None:
+                    continue
+                self._compose_frame(source)
+                with self._lock:
+                    frame, digest = self._frame, self._digest
+                if digest == last_digest:
+                    continue
                 bgra = np.frombuffer(frame, np.uint8).reshape(OUT_H, OUT_W, 4)
                 bgr = cv2.cvtColor(bgra, cv2.COLOR_BGRA2BGR)
                 ok, encoded = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 70])
@@ -743,6 +758,7 @@ class WindowStreamCapture:
                 pass
         with self._lock:
             self._frame = self._jpeg = None
+            self._source_frame = None
             self.latest = self.audio_level = 0.0
             self._crop = None
             self.error = ""

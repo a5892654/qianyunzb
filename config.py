@@ -204,6 +204,8 @@ DEFAULTS = {
         "overlay_corner": "br",
         "overlay_size": 0.5,
         "overlay_margin": 0.02,
+        "overlay_x": None,  # 画面中心比例；None 沿用角落和边距
+        "overlay_y": None,
         "bubble": True,
         "bubble_x": 0.28,
         "bubble_y": 0.12,

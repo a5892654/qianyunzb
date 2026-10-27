@@ -1,7 +1,7 @@
 """把 Live2D 皮套渲染成带透明通道的 RGBA 帧，供直播画面叠加使用。
 
-用无头 Edge 打开 /live2d 页面，通过 CDP screencast 取帧：浏览器合成器直接
-输出带 alpha 的 PNG，比截屏（WGC 只能抓到被遮挡后停止刷新的窗口）可靠。
+用无头 Edge 打开 /live2d 页面，通过 CDP 读取 WebGL 画布的透明 PNG。
+直接读取画布可保留 alpha，不依赖浏览器截屏是否输出透明通道。
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from procutil import bind_to_app
 _EDGE_CANDIDATES = ("ProgramFiles(x86)", "ProgramFiles", "LOCALAPPDATA")
 _MAX_EDGE_MS = 40000
 _BLANK_GRACE_S = 8.0
-_MIN_DECODE_GAP_S = 1 / 30
+_FRAME_INTERVAL_S = 1 / 30
 
 
 class OverlayError(RuntimeError):
@@ -51,29 +51,6 @@ def _decode_png(raw: bytes) -> np.ndarray | None:
     return image
 
 
-def _trim(image: np.ndarray, box: tuple[int, int, int, int] | None = None
-          ) -> tuple[np.ndarray, tuple[int, int, int, int]] | None:
-    """裁到包围盒。box 给定时沿用该固定框，避免头发飘动导致每帧尺寸不一、
-    合成时人物跟着抖动；框外的像素补成全透明。"""
-    alpha = image[..., 3]
-    if box is None:
-        rows = np.flatnonzero(alpha.max(axis=1) > 8)
-        if not rows.size:
-            return None
-        cols = np.flatnonzero(alpha.max(axis=0) > 8)
-        box = (int(cols[0]), int(rows[0]), int(cols[-1]) + 1, int(rows[-1]) + 1)
-    x0, y0, x1, y1 = box
-    height, width = alpha.shape[:2]
-    x0, y0 = max(0, x0), max(0, y0)
-    x1, y1 = min(width, x1), min(height, y1)
-    if x1 <= x0 or y1 <= y0:
-        return None
-    layer = np.zeros((y1 - y0, x1 - x0, 4), np.uint8)
-    crop = image[y0:y1, x0:x1]
-    layer[:crop.shape[0], :crop.shape[1]] = crop
-    return layer, (x0, y0, x1, y1)
-
-
 class Live2DOverlay:
     """后台线程把 Live2D 渲染成 RGBA 帧；调用方只取最新一帧。"""
 
@@ -87,7 +64,6 @@ class Live2DOverlay:
         self._proc: subprocess.Popen | None = None
         self._ready = threading.Event()
         self._viewport = 720
-        self._box: tuple[int, int, int, int] | None = None  # 首次测得的包围盒，之后固定复用
         self.width = 0
         self.height = 0
 
@@ -100,15 +76,16 @@ class Live2DOverlay:
     def alive(self) -> bool:
         return bool(self._thread and self._thread.is_alive() and not self._error)
 
-    def start(self, url: str, box: int, timeout: float = 25.0) -> None:
+    def start(self, url: str, box: int, timeout: float = 45.0) -> None:
         if self.alive:
             return
+        if self._thread:
+            self.stop()
         edge = find_edge()
         if not edge:
             raise OverlayError("找不到 Microsoft Edge，无法渲染 Live2D 皮套")
         self._url = url
         self._viewport = int(box)
-        self._box = None
         self._stop.clear()
         self._ready.clear()
         with self._lock:
@@ -189,7 +166,7 @@ class Live2DOverlay:
             ws_url = await self._wait_target(port, proc)
             if not ws_url:
                 raise OverlayError("Live2D 渲染窗口没有响应")
-            await self._screencast(ws_url)
+            await self._capture_frames(ws_url)
         finally:
             if proc.poll() is None:
                 try:
@@ -215,94 +192,70 @@ class Live2DOverlay:
                 await asyncio.sleep(0.4)
         return None
 
-    async def _screencast(self, ws_url: str) -> None:
+    async def _capture_frames(self, ws_url: str) -> None:
         import aiohttp
 
         width = height = self._viewport
         msg_id = 0
 
-        async def send(ws, method: str, params: dict | None = None) -> None:
+        async def command(ws, method: str, params: dict | None = None):
             nonlocal msg_id
             msg_id += 1
             await ws.send_str(json.dumps({"id": msg_id, "method": method, "params": params or {}}))
+            async with asyncio.timeout(5):
+                while not self._stop.is_set():
+                    msg = await ws.receive()
+                    if msg.type is not aiohttp.WSMsgType.TEXT:
+                        raise OverlayError("Live2D 渲染进程已断开")
+                    data = json.loads(msg.data)
+                    if data.get("id") != msg_id:
+                        continue
+                    if "error" in data:
+                        raise OverlayError("Live2D 渲染命令失败：" + data["error"].get("message", method))
+                    return data.get("result", {})
+            return {}
 
         async with aiohttp.ClientSession() as session:
             async with session.ws_connect(ws_url, max_msg_size=32 * 1024 * 1024,
                                           heartbeat=10) as ws:
-                await send(ws, "Page.enable")
-                await send(ws, "Emulation.setDeviceMetricsOverride",
+                await command(ws, "Page.enable")
+                await command(ws, "Emulation.setDeviceMetricsOverride",
                            {"width": width, "height": height, "deviceScaleFactor": 1, "mobile": False})
-                await send(ws, "Emulation.setDefaultBackgroundColorOverride",
+                await command(ws, "Emulation.setDefaultBackgroundColorOverride",
                            {"color": {"r": 0, "g": 0, "b": 0, "a": 0}})
-                await send(ws, "Page.navigate", {"url": self._url})
-                await asyncio.sleep(3.0)   # 等模型加载完再开录，首帧就是有效画面
-                await send(ws, "Page.startScreencast",
-                           {"format": "png", "maxWidth": width, "maxHeight": height, "everyNthFrame": 1})
-                try:
-                    await self._pump(ws, session, send)
-                finally:
-                    try:
-                        await send(ws, "Page.stopScreencast")
-                    except Exception:
-                        pass
-
-    async def _pump(self, ws, session, send) -> None:
-        import aiohttp
-
-        idle_since = time.monotonic()
-        decoded_at = 0.0
-        blank_since: float | None = None
-        while not self._stop.is_set():
-            try:
-                msg = await asyncio.wait_for(ws.receive(), timeout=2.0)
-            except asyncio.TimeoutError:
-                now = time.monotonic()
-                if blank_since is not None and now - blank_since > _BLANK_GRACE_S:
-                    self._fail("Live2D 画面一直是空白，请检查模型文件和皮套设置")
-                    return
-                if now - idle_since > 12:
-                    self._fail("Live2D 渲染长时间没有新画面")
-                    return
-                continue
-            if msg.type is aiohttp.WSMsgType.TEXT:
-                data = json.loads(msg.data)
-                if data.get("method") != "Page.screencastFrame":
-                    continue
-                params = data["params"]
-                idle_since = time.monotonic()
-                await send(ws, "Page.screencastFrameAck", {"sessionId": params["sessionId"]})
-                # 浏览器渲染远快于直播帧率；丢帧只保留最新，省掉解码开销和 GIL 争抢
-                now = time.monotonic()
-                if now - decoded_at < _MIN_DECODE_GAP_S:
-                    continue
-                decoded_at = now
-                image = _decode_png(base64.b64decode(params["data"]))
-                if image is None:
-                    continue
-                # 页面加载模型前会是整帧透明，宽限一段时间再判定失败
-                result = _trim(image, self._box)
-                if result is None:
-                    if blank_since is None:
-                        blank_since = time.monotonic()
-                    elif time.monotonic() - blank_since > _BLANK_GRACE_S:
-                        self._fail("Live2D 画面一直是空白，请检查模型文件和皮套设置")
-                        return
-                    continue
+                await command(ws, "Page.navigate", {"url": self._url})
+                deadline = time.monotonic() + _MAX_EDGE_MS / 1000
                 blank_since = None
-                trimmed, box = result
-                with self._lock:
-                    self._frame = trimmed
-                    self._frame_at = time.monotonic()
-                    self.width, self.height = box[2] - box[0], box[3] - box[1]
-                    if self._box is None:
-                        self._box = box
-                if not self._ready.is_set():
-                    self._ready.set()
-            elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
-                self._fail("Live2D 渲染进程已断开")
-                return
-            else:
-                return
+                while not self._stop.is_set():
+                    started = time.monotonic()
+                    result = await command(ws, "Runtime.evaluate", {
+                        "expression": "window.captureLive2DFrame ? window.captureLive2DFrame() : (window.live2dOverlayState || {})",
+                        "returnByValue": True,
+                    })
+                    if result.get("exceptionDetails"):
+                        raise OverlayError("Live2D 画布读取失败，请检查模型与渲染库")
+                    value = result.get("result", {}).get("value") or {}
+                    if value.get("error"):
+                        raise OverlayError(str(value["error"]))
+                    png = value.get("png")
+                    if png:
+                        image = _decode_png(base64.b64decode(png))
+                        if image is None:
+                            raise OverlayError("Live2D 画布没有输出透明 PNG")
+                        if not np.any(image[..., 3] > 8):
+                            blank_since = blank_since or started
+                            if started - blank_since > _BLANK_GRACE_S:
+                                raise OverlayError("Live2D 画面为空白，请在皮套页调整取景或检查模型")
+                        else:
+                            blank_since = None
+                            # 保留整张画布，避免首次包围盒裁掉后续动作和位置变化。
+                            with self._lock:
+                                self._frame, self._frame_at = image, time.monotonic()
+                                self.height, self.width = image.shape[:2]
+                            self._ready.set()
+                    elif time.monotonic() > deadline:
+                        raise OverlayError("Live2D 模型加载超时，请检查模型文件和渲染库")
+                    await asyncio.sleep(max(0.001, _FRAME_INTERVAL_S - (time.monotonic() - started)))
 
 
 class OverlayCompositor:
@@ -332,7 +285,7 @@ class OverlayCompositor:
         settings = self.settings()
         if not settings:
             return
-        position, size, margin = settings
+        position, size, margin, *coords = settings
         height, width = frame.shape[:2]
         target_h = max(48, min(height * 2, int(round(height * float(size)))))
         layer = self._resize(layer, target_h)
@@ -340,8 +293,10 @@ class OverlayCompositor:
         pad = int(round(height * float(margin)))
         x0 = pad if "l" in position else width - lw - pad
         y0 = pad if "t" in position else height - lh - pad
-        x0 = max(0, min(x0, width - 1))
-        y0 = max(0, min(y0, height - 1))
+        if coords and coords[0] is not None:
+            x0 = int(round(width * coords[0] - lw / 2))
+        if len(coords) > 1 and coords[1] is not None:
+            y0 = int(round(height * coords[1] - lh / 2))
         bx0, by0, bx1, by1 = self._box
         cx0, cy0 = max(0, x0 + bx0), max(0, y0 + by0)
         cx1, cy1 = min(width, x0 + bx1), min(height, y0 + by1)
