@@ -24,6 +24,7 @@ from live_schedule import DailyBroadcastSchedule
 from pipeline import Pipeline
 from songs import SongManager
 from tts import GsvEngine, Player
+from wishlist import WishlistActions, validate_settings as validate_wishlist_settings
 
 os.makedirs(config.LOG_DIR, exist_ok=True)
 logging.basicConfig(
@@ -61,6 +62,7 @@ class App:
         self.bili = BiliLive(self.on_event, lambda m: self.push("log", {"level": "info", "msg": m}))
         self.pipe = Pipeline(self)
         self.songs = SongManager(self)
+        self.wishlist = WishlistActions(self)
         self.qr = QrLogin()
         self.dt = None
         self.dt_task = None
@@ -348,6 +350,7 @@ class App:
 
     async def shutdown(self):
         await self.schedule.close()
+        await self.wishlist.close()
         # 先让直播画面立刻隐藏，再收拾后台
         log.info("通知 %d 个显示页面退出", len(self.ws))
         for ws in list(self.ws):
@@ -521,6 +524,8 @@ def build_web(app: App):
         c["_logged_in"] = bool(app.cfg.get("bili_cookie"))
         c.pop("bili_cookie", None)
         c["songs"]["_ne_logged_in"] = bool(c["songs"].pop("netease_cookie", ""))
+        if isinstance(c.get("wishlist"), dict):
+            c["wishlist"].pop("_completed", None)
         return web.json_response(c)
 
     @routes.post("/api/config")
@@ -532,6 +537,14 @@ def build_web(app: App):
         if isinstance(patch.get("songs"), dict):
             patch["songs"].pop("netease_cookie", None)
             patch["songs"].pop("_ne_logged_in", None)
+        if "wishlist" in patch:
+            try:
+                if not isinstance(patch["wishlist"], dict):
+                    raise ValueError("心愿单动作设置无效")
+                patch["wishlist"].pop("_completed", None)
+                validate_wishlist_settings({**config.DEFAULTS["wishlist"], **app.cfg.get("wishlist", {}), **patch["wishlist"]})
+            except ValueError as error:
+                return web.json_response({"ok": False, "error": str(error)}, status=400)
         old_room = app.cfg.get("room_id")
         app.cfg = config.merge(app.cfg, patch)
         config.save(app.cfg)
@@ -540,6 +553,8 @@ def build_web(app: App):
             await app.broadcast.refresh_overlay()
         if "songs" in patch:
             app.songs._apply_volume()
+        if "wishlist" in patch:
+            app.wishlist.push()
         if str(app.cfg.get("room_id")) != str(old_room) and app.bili.client:
             asyncio.create_task(app.connect())
         return ok()
@@ -814,7 +829,23 @@ def build_web(app: App):
         except Exception as e:
             return web.json_response({"ok": False, "error": str(e) or type(e).__name__})
 
+    # ---------- 心愿单达成动作 ----------
+    @routes.get("/api/wishlist/state")
+    async def wishlist_state(_):
+        return web.json_response(app.wishlist.state())
+
+    @routes.post("/api/wishlist/test")
+    async def wishlist_test(_):
+        return web.json_response(await app.wishlist.test())
+
     # ---------- 点歌 ----------
+    song_login = {"generation": 0, "key": None}
+
+    def reset_song_login():
+        song_login["generation"] += 1
+        song_login["key"] = None
+        return song_login["generation"]
+
     @routes.get("/songs")
     async def songs_page(_):
         return page("songs.html")
@@ -853,22 +884,45 @@ def build_web(app: App):
     async def songs_qr(_):
         import qrcode
         import qrcode.image.svg
-        key, url = await app.songs.ne.qr_key()
-        img = qrcode.make(url, image_factory=qrcode.image.svg.SvgPathImage, box_size=8)
-        return ok(svg=img.to_string(encoding="unicode"), key=key)
+        generation = reset_song_login()
+        try:
+            key, url = await app.songs.ne.qr_key()
+            if generation != song_login["generation"]:
+                raise RuntimeError("二维码已更新，请使用最新二维码")
+            song_login["key"] = key
+            img = qrcode.make(url, image_factory=qrcode.image.svg.SvgPathImage, box_size=8)
+            return ok(svg=img.to_string(encoding="unicode"), key=key)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e) or "生成网易云二维码失败，请重试"})
 
     @routes.post("/api/songs/qrpoll")
     async def songs_qrpoll(request):
-        key = (await request.json())["key"]
-        code, msg, cookie = await app.songs.ne.qr_poll(key)
-        if code == 803 and cookie:
-            app.cfg["songs"]["netease_cookie"] = cookie
-            config.save(app.cfg)
-            await app.songs.refresh_account()
-        return ok(code=code, msg=msg)
+        try:
+            key = (await request.json()).get("key")
+            generation = song_login["generation"]
+            if not key or key != song_login["key"]:
+                raise RuntimeError("二维码已更新或已结束，请重新扫码")
+            code, msg, cookie = await app.songs.ne.qr_poll(key)
+            if generation != song_login["generation"] or key != song_login["key"]:
+                raise RuntimeError("二维码已更新或已结束，请重新扫码")
+            if code == 803:
+                if not cookie:
+                    raise RuntimeError("网易云未返回登录凭证，请重新扫码")
+                song_login["key"] = None
+                app.cfg["songs"]["netease_cookie"] = cookie
+                config.save(app.cfg)
+                await app.songs.refresh_account()
+                if not app.songs.account:
+                    msg = "登录信息已保存；" + (app.songs.account_error or "暂未获取到账号信息，请稍后重试")
+            elif code == 800:
+                song_login["key"] = None
+            return ok(code=code, msg=msg, account=app.songs.account if code == 803 else None)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e) or "查询网易云扫码状态失败，请重试"})
 
     @routes.post("/api/songs/cookie")
     async def songs_cookie(request):
+        reset_song_login()
         app.cfg["songs"]["netease_cookie"] = ((await request.json()).get("cookie") or "").strip()
         config.save(app.cfg)
         await app.songs.refresh_account()

@@ -1,6 +1,8 @@
 import json
 import logging
 import re
+import time
+from http.cookies import SimpleCookie
 
 import aiohttp
 
@@ -9,26 +11,37 @@ log = logging.getLogger("song")
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
 BASE = "https://music.163.com"
+# 与网易云当前二维码登录接口保持一致，生成和轮询必须使用同一类型。
+# 参考：https://github.com/neteasecloudmusicapienhanced/api-enhanced/blob/master/module/login_qr_check.js
+QR_TYPE = 3
 
 
 class NetEase:
     def __init__(self, get_cookie):
         self.get_cookie = get_cookie
 
-    def _headers(self):
+    def _headers(self, authenticated=True):
         h = {"User-Agent": UA, "Referer": BASE + "/"}
-        cookie = (self.get_cookie() or "").strip()
+        cookie = (self.get_cookie() or "").strip() if authenticated else ""
         if cookie:
             if "=" not in cookie:
                 cookie = f"MUSIC_U={cookie}"
             h["Cookie"] = cookie + "; os=pc"
         return h
 
-    async def _get(self, path, params=None, raw=False):
-        async with aiohttp.ClientSession(headers=self._headers()) as s:
-            async with s.get(BASE + path, params=params, timeout=aiohttp.ClientTimeout(total=15)) as r:
-                data = await r.json(content_type=None)
-                return (data, r) if raw else data
+    async def _get(self, path, params=None, raw=False, anonymous=False):
+        try:
+            async with aiohttp.ClientSession(headers=self._headers(authenticated=not anonymous)) as s:
+                async with s.get(BASE + path, params=params, timeout=aiohttp.ClientTimeout(total=15)) as r:
+                    r.raise_for_status()
+                    data = await r.json(content_type=None)
+                    if not isinstance(data, dict):
+                        raise ValueError("网易云返回了无效数据，请稍后重试")
+                    return (data, r) if raw else data
+        except TimeoutError as e:
+            raise RuntimeError("连接网易云超时，请检查网络后重试") from e
+        except (aiohttp.ClientError, ValueError) as e:
+            raise RuntimeError("连接网易云失败或返回异常，请稍后重试") from e
 
     async def search(self, kw, limit=15):
         d = await self._get("/api/search/get/web", {"s": kw, "type": 1, "limit": limit, "offset": 0})
@@ -90,19 +103,41 @@ class NetEase:
 
     # ---------- 登录 ----------
     async def qr_key(self):
-        d = await self._get("/api/login/qrcode/unikey", {"type": 1})
-        key = d["unikey"]
+        d = await self._get("/api/login/qrcode/unikey",
+                            {"type": QR_TYPE, "timestamp": time.time_ns() // 1_000_000}, anonymous=True)
+        key = d.get("unikey")
+        if str(d.get("code")) != "200" or not isinstance(key, str) or not key:
+            raise RuntimeError("生成网易云二维码失败，请稍后重新扫码")
         return key, f"https://music.163.com/login?codekey={key}"
 
     async def qr_poll(self, key):
-        d, r = await self._get("/api/login/qrcode/client/login", {"key": key, "type": 1}, raw=True)
-        code = d.get("code")
-        msg = {800: "二维码已过期", 801: "等待扫码", 802: "已扫码，请在手机上确认", 803: "登录成功"}.get(code, d.get("message", str(code)))
+        d, r = await self._get("/api/login/qrcode/client/login",
+                               {"key": key, "type": QR_TYPE, "timestamp": time.time_ns() // 1_000_000},
+                               raw=True, anonymous=True)
+        try:
+            code = int(d.get("code"))
+        except (TypeError, ValueError):
+            code = None
+        messages = {800: "二维码已过期，请重新扫码", 801: "等待扫码", 802: "已扫码，请在手机上确认", 803: "登录成功"}
+        if code not in messages:
+            raise RuntimeError(f"网易云扫码状态异常（{code or '未知'}），请重新扫码")
+        msg = messages[code]
         cookie = ""
         if code == 803:
-            cookie = "; ".join(f"{k}={v.value}" for k, v in r.cookies.items() if v.value)
-            if "MUSIC_U" not in cookie and d.get("cookie"):
-                cookie = "; ".join(p.split(";")[0] for p in re.split(r";\s*(?=[A-Za-z_]+=)", d["cookie"]) if "=" in p)
+            cookies = {}
+            # 兼容重定向响应头及返回体中的 Set-Cookie，过滤 Path / Expires 等属性。
+            for response in (*r.history, r):
+                cookies.update({k: v.value for k, v in response.cookies.items() if v.value})
+            body_cookie = d.get("cookie") or ""
+            for value in body_cookie if isinstance(body_cookie, list) else [body_cookie]:
+                parsed = SimpleCookie()
+                parsed.load(value)
+                for k, v in parsed.items():
+                    if v.value:
+                        cookies.setdefault(k, v.value)
+            if not cookies.get("MUSIC_U"):
+                raise RuntimeError("已确认扫码，但网易云未返回登录凭证，请重新扫码或手动粘贴 MUSIC_U")
+            cookie = "; ".join(f"{k}={v}" for k, v in cookies.items())
         return code, msg, cookie
 
     async def account(self):

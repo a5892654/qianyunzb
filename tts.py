@@ -334,6 +334,13 @@ class GsvEngine:
         return pcm, sr
 
 
+def decode_audio_file(filename):
+    """读取准备好的 AI 翻唱或音效，不经过 TTS 生成。"""
+    import miniaudio
+    decoded = miniaudio.decode_file(str(filename), output_format=miniaudio.SampleFormat.SIGNED16)
+    return np.frombuffer(decoded.samples, dtype=np.int16).reshape(-1, decoded.nchannels), decoded.sample_rate
+
+
 def _decode_wav(data: bytes):
     """音频字节 → (pcm int16, 采样率)。ComfyUI 的 SaveAudio 出的是 flac，也兼容 wav。"""
     if data[:4] == b"fLaC":

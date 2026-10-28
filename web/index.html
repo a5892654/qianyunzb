@@ -63,6 +63,7 @@ code{background:var(--panel2);padding:1px 5px;border-radius:4px;color:var(--yell
 .seg input{display:none}
 .seg input:checked+span{color:var(--pink);font-weight:600}
 #qrbox svg{background:#fff;padding:8px;border-radius:8px;width:200px;height:200px}
+#neQrSvg{flex-shrink:0}#neQrSvg svg{display:block;width:100%;height:100%}
 .toast{position:fixed;right:20px;bottom:20px;background:var(--panel2);border:1px solid var(--pink);padding:10px 16px;border-radius:10px;opacity:0;transition:.25s;pointer-events:none;max-width:420px}
 .toast.on{opacity:1}
 pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;padding:10px;max-height:260px;overflow:auto;font-size:12px;white-space:pre-wrap;margin:0}
@@ -526,6 +527,31 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
     </div>
   </div>
   <div class="card">
+    <h3>心愿单达成动作</h3>
+    <div class="row">
+      <label class="c"><input type="checkbox" data-k="wishlist.enabled">心愿单达成时自动执行</label>
+      <label class="f" style="max-width:330px">执行什么<select data-k="wishlist.action" id="wishAction">
+        <option value="audio">AI 唱歌 / 播放本地音频</option><option value="song">播放网易云歌曲</option>
+        <option value="say">朗读自定义台词</option><option value="ai">按提示让 AI 发言</option>
+      </select></label>
+      <label class="f" style="max-width:150px">表情 / 情绪<input data-k="wishlist.emotion" placeholder="开心"></label>
+    </div>
+    <div data-wish-action="audio">
+      <p class="hint">选择准备好的 AI 翻唱或音频，达成时自动播放，皮套跟随声音对口型。支持 WAV、MP3、FLAC、OGG。</p>
+      <div class="row"><label class="f">音频文件<input data-k="wishlist.audio_file" placeholder="选择 AI 翻唱音频文件"></label><button class="btn" data-pick="wishlist.audio_file" data-kind="audio">选择音频</button></div>
+    </div>
+    <div data-wish-action="song" hidden>
+      <p class="hint">按歌名和歌手在网易云搜索，达成后加入点歌队列；请保持“启用点歌”开启。</p>
+      <label class="f">歌名 / 歌名 歌手<input data-k="wishlist.song_query" placeholder="填写要播放的歌曲"></label>
+    </div>
+    <div data-wish-action="say" hidden><label class="f">自定义台词<textarea data-k="wishlist.text" placeholder="心愿单达成啦！谢谢大家的支持！"></textarea></label></div>
+    <div data-wish-action="ai" hidden><label class="f">AI 提示词<textarea data-k="wishlist.prompt" placeholder="描述心愿单达成后，希望主播说什么、做怎样的互动"></textarea></label></div>
+    <p class="hint">台词和 AI 提示词可用 <code>{wish}</code>（心愿单名称）、<code>{room}</code>（直播间号）。同一心愿单每天只自动执行一次，重连和重启会保留记录。</p>
+    <div class="row" style="margin-top:12px"><button class="btn b" id="wishTest">测试动作（会播放）</button><span id="wishStatus" class="hint">等待心愿单消息</span></div>
+    <div id="wishItems" class="hint" style="margin-top:8px"></div>
+    <div id="wishResult" class="hint" style="margin-top:8px"></div>
+  </div>
+  <div class="card">
     <h3>点歌规则</h3>
     <p class="hint">观众先送“点歌礼物”拿到点歌券，再发弹幕 <code>点歌:歌名</code>（也支持 <code>点歌 歌名 歌手</code>）。送“插队礼物”拿到插队券：已经在排队的歌会立刻置顶，还没点歌的话下一首点的歌直接置顶。礼物名填 <code>*</code> 表示任意礼物都算。</p>
     <div class="row">
@@ -699,6 +725,7 @@ function fillForm() {
   $('#qoderBox').style.display = CFG.ai.backend === 'openai' ? 'none' : '';
   $('#openaiBox').style.display = CFG.ai.backend === 'openai' ? '' : 'none';
   $('#qoderExe').placeholder = CFG._qoder_default;
+  renderWishFields();
   renderLayout();
 }
 let saveTimer = null, pending = {}, saveQueue = Promise.resolve();
@@ -745,6 +772,7 @@ function onField(el) {
   if (['live2d.overlay_corner', 'live2d.overlay_margin'].includes(el.dataset.k)) Object.assign(p.live2d, {overlay_x: null, overlay_y: null});
   queueConfig(p, el.dataset.k.startsWith('live2d.overlay_') ? 120 : 500);
   if (el.dataset.k === 'ai.backend') fillForm();
+  if (el.dataset.k === 'wishlist.action') renderWishFields();
 }
 document.addEventListener('change', e => { if (e.target.dataset?.k) onField(e.target); });
 document.addEventListener('input', e => { if (e.target.dataset?.k && e.target.type === 'range') onField(e.target); });
@@ -787,6 +815,7 @@ function handle(m) {
     case 'speak': $('#nowSpeaking').innerHTML = `🔊 ${esc(m.text)}${m.synth_s ? ` <span class="dim">（合成 ${m.synth_s}s）</span>` : ''}`; replyEls[m.id]?.classList.add('speaking'); break;
     case 'speak_end': $('#nowSpeaking').innerHTML = '<span class="dim">当前没有在说话</span>'; replyEls[m.id]?.classList.remove('speaking'); break;
     case 'songs': renderSongs(m); break;
+    case 'wishlist': renderWishlist(m); break;
   }
 }
 function setStatus(s) {
@@ -1039,6 +1068,37 @@ document.addEventListener('click', e => {
   $$(`[data-for="${e.target.dataset.for}"]`).forEach(x => x.classList.toggle('p', x === e.target));
 });
 
+// ---------- 心愿单达成动作 ----------
+let wishTesting = false;
+function renderWishFields() {
+  const action = CFG.wishlist?.action || 'audio';
+  $$('[data-wish-action]').forEach(element => { element.hidden = element.dataset.wishAction !== action; });
+}
+function renderWishlist(state) {
+  const latest = state.latest, status = {'-1': '尚未设置', 0: '尚未开始', 1: '进行中', 2: '已达成', 3: '本次未达成'};
+  $('#wishStatus').textContent = state.busy ? '正在安排心愿单动作…' : (latest ? `${latest.wish_name} · ${status[latest.status] || '等待更新'}` : (state.enabled ? '已启用，等待直播间推送心愿单消息' : '尚未启用自动执行'));
+  $('#wishItems').textContent = (latest?.items || []).map(item => `${item.name} ${item.completed || latest.status === 2 ? '已达成' : `${item.current} / ${item.target}`}`).join('　·　');
+  const result = state.last_result;
+  $('#wishResult').textContent = result ? `${result.time}　${result.ok ? '✓' : '执行失败：'} ${result.message}` : '';
+  $('#wishResult').style.color = result && !result.ok ? 'var(--red)' : '';
+  $('#wishTest').disabled = wishTesting || !!state.busy;
+}
+async function pollWishlist() {
+  try { renderWishlist(await api('/api/wishlist/state')); } catch {}
+}
+$('#wishTest').onclick = async () => {
+  wishTesting = true; $('#wishTest').disabled = true; $('#wishResult').textContent = '正在保存设置并测试动作…';
+  try {
+    await flushConfig();
+    const result = await api('/api/wishlist/test', {});
+    if (!result.ok) throw new Error(result.error || '动作执行失败');
+    toast(result.message || '动作已安排');
+    await pollWishlist();
+  } catch (error) { $('#wishResult').textContent = error.message; $('#wishResult').style.color = 'var(--red)'; toast(error.message); }
+  finally { wishTesting = false; $('#wishTest').disabled = false; }
+};
+setInterval(() => { if ($('#songs').classList.contains('on')) pollWishlist(); }, 3000);
+
 // ---------- 点歌 ----------
 const SG_TPL = [['add', '点歌成功'], ['similar', '找到相似版本'], ['pin', '插队成功'], ['play', '开始播放'], ['fail', '没找到歌'], ['need', '没有点歌券'], ['full', '歌单排满']];
 $('#sgTpl').innerHTML = SG_TPL.map(([k, l]) => `<div class="row"><label class="c" style="width:130px"><input type="checkbox" data-k="songs.announce_${k}">${l}</label><input data-k="songs.tpl_${k}" style="flex:1"></div>`).join('');
@@ -1058,7 +1118,7 @@ function renderSongs(st) {
       <span style="flex:1">${esc(r.name)}</span><span style="width:110px">点歌券 <b>${r.song}</b></span><span style="width:110px">插队券 <b>${r.pin}</b></span>
       <span class="btn sm" data-give="${esc(r.key)}" data-gs="1">+点歌</span><span class="btn sm" data-give="${esc(r.key)}" data-gp="1">+插队</span><span class="btn sm r" data-give="${esc(r.key)}" data-gs="-99" data-gp="-99">清零</span></div>`).join('') : '暂无';
   const a = st.account;
-  $('#neState').textContent = a ? `（已登录：${a.nickname}${a.vip ? ' · VIP' : ' · 非VIP'}）` : (CFG.songs?._ne_logged_in ? '（登录已失效，请重新登录）' : '（未登录）');
+  $('#neState').textContent = a ? `（已登录：${a.nickname}${a.vip ? ' · VIP' : ' · 非VIP'}）` : (CFG.songs?._ne_logged_in ? `（${st.account_error || '正在确认登录状态…'}）` : '（未登录）');
 }
 document.addEventListener('click', async e => {
   const d = e.target.dataset || {};
@@ -1076,19 +1136,82 @@ $('#sgSearch').onclick = async () => {
   $('#sgResults').innerHTML = r.songs.map(s => `<div class="row" style="margin-bottom:4px"><span style="flex:1">${esc(s.name)} - ${esc(s.artist)} <span class="hint">${fmtT(s.dur)}</span></span>${s.playable ? `<span class="btn sm p" data-addsong="${esc(JSON.stringify(s))}">加入</span>` : '<span class="hint">不能播放</span>'}</div>`).join('') || '没有结果';
 };
 $('#sgQ').onkeydown = e => { if (e.key === 'Enter') $('#sgSearch').click(); };
-let neTimer = null;
+let neTimer = null, neAttempt = 0;
+function stopNeLogin() { clearTimeout(neTimer); neTimer = null; return ++neAttempt; }
+async function neApi(url, body) {
+  const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 40000);
+  try {
+    const response = await fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json', 'X-BVB': '1'}, body: JSON.stringify(body), signal: controller.signal, cache: 'no-store'});
+    let result;
+    try { result = await response.json(); }
+    catch { throw new Error(`服务返回异常（HTTP ${response.status}），请重试`); }
+    if (!response.ok || !result?.ok) throw new Error(result?.error || `请求失败（HTTP ${response.status}），请重试`);
+    return result;
+  } catch (error) {
+    if (error.name === 'AbortError') throw new Error('连接超时，请检查网络后重试');
+    if (error instanceof TypeError) throw new Error('无法连接服务，请检查程序是否正在运行');
+    throw error;
+  } finally { clearTimeout(timer); }
+}
+async function refreshNeState() {
+  await loadConfig();
+  renderSongs(await api('/api/songs/state'));
+}
 $('#neQrBtn').onclick = async () => {
-  clearInterval(neTimer);
-  const r = await api('/api/songs/qr', {});
-  $('#neQrBox').style.display = 'flex'; $('#neQrSvg').innerHTML = r.svg; $('#neQrMsg').textContent = '请用网易云音乐手机 App 扫码';
-  neTimer = setInterval(async () => {
-    const p = await api('/api/songs/qrpoll', {key: r.key});
-    $('#neQrMsg').textContent = p.msg;
-    if (p.code === 803 || p.code === 800) { clearInterval(neTimer); if (p.code === 803) { setTimeout(() => $('#neQrBox').style.display = 'none', 1500); loadConfig(); } }
-  }, 2000);
+  const attempt = stopNeLogin();
+  $('#neQrBox').style.display = 'flex'; $('#neQrSvg').innerHTML = ''; $('#neQrMsg').textContent = '正在生成二维码…';
+  try {
+    const r = await neApi('/api/songs/qr', {});
+    if (attempt !== neAttempt) return;
+    if (!r.key || !r.svg) throw new Error('未获取到二维码，请重试');
+    $('#neQrSvg').innerHTML = r.svg; $('#neQrMsg').textContent = '请用网易云音乐手机 App 扫码，并在手机上确认登录';
+    const deadline = Date.now() + 180000;
+    let failures = 0;
+    const poll = async () => {
+      if (attempt !== neAttempt) return;
+      if (Date.now() >= deadline) { $('#neQrMsg').textContent = '二维码已过期，请点击“扫码登录”重试'; return; }
+      try {
+        const p = await neApi('/api/songs/qrpoll', {key: r.key});
+        if (attempt !== neAttempt) return;
+        const code = Number(p.code);
+        if (![800, 801, 802, 803].includes(code)) throw new Error('扫码状态异常，请重新扫码');
+        failures = 0;
+        $('#neQrMsg').textContent = p.msg;
+        if (code === 800) return;
+        if (code === 803) {
+          try { await refreshNeState(); }
+          catch { if (attempt === neAttempt) $('#neQrMsg').textContent = '登录信息已保存，请刷新页面查看账号状态'; }
+          if (attempt !== neAttempt) return;
+          toast(p.account ? '登录成功：' + p.account.nickname : p.msg);
+          if (p.account) neTimer = setTimeout(() => { if (attempt === neAttempt) $('#neQrBox').style.display = 'none'; }, 1500);
+          return;
+        }
+      } catch (error) {
+        if (attempt !== neAttempt) return;
+        if (++failures >= 3) { $('#neQrMsg').textContent = error.message + '；请点击“扫码登录”重试'; return; }
+        $('#neQrMsg').textContent = '查询失败，正在重试：' + error.message;
+      }
+      neTimer = setTimeout(poll, 2000);
+    };
+    neTimer = setTimeout(poll, 1000);
+  } catch (error) {
+    if (attempt === neAttempt) { $('#neQrMsg').textContent = error.message; toast(error.message); }
+  }
 };
-$('#neCookieBtn').onclick = async () => { const r = await api('/api/songs/cookie', {cookie: $('#neCookie').value}); $('#neCookie').value = ''; toast(r.account ? '登录成功：' + r.account.nickname : 'Cookie 无效'); loadConfig(); };
-$('#neLogout').onclick = async () => { if (confirm('退出网易云登录？')) { await api('/api/songs/cookie', {cookie: ''}); loadConfig(); } };
+$('#neCookieBtn').onclick = async () => {
+  stopNeLogin(); $('#neQrBox').style.display = 'none';
+  try {
+    const r = await neApi('/api/songs/cookie', {cookie: $('#neCookie').value});
+    $('#neCookie').value = ''; await refreshNeState();
+    toast(r.account ? '登录成功：' + r.account.nickname : '未能验证登录，请检查 Cookie 和网络');
+  } catch (error) { toast(error.message); }
+};
+$('#neLogout').onclick = async () => {
+  if (!confirm('退出网易云登录？')) return;
+  stopNeLogin(); $('#neQrBox').style.display = 'none';
+  try { await neApi('/api/songs/cookie', {cookie: ''}); await refreshNeState(); toast('已退出网易云登录'); }
+  catch (error) { toast(error.message); }
+};
 $('#sgUrl').value = `${location.origin}/songs`;
 
 let broadcastLoginRequested = false, broadcastBusy = false, broadcastAccount = null, broadcastInfo = {};

@@ -155,6 +155,15 @@ DEFAULTS = {
             "一款类杀戮尖塔的卡牌Roguelike。你说话自然、口语化，像真人边打边念叨。"
         ),
     },
+    "wishlist": {
+        "enabled": False,
+        "action": "audio",
+        "audio_file": "",
+        "song_query": "",
+        "text": "心愿单达成啦！谢谢大家的支持，爱你们！",
+        "prompt": "直播间心愿单“{wish}”已经达成，请开心地感谢大家，用两三句话庆祝。",
+        "emotion": "开心",
+    },
     "songs": {
         "enabled": True,
         "require_gift": True,

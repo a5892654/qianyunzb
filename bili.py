@@ -59,6 +59,39 @@ class _Handler(blivedm.BaseHandler):
 
     _CMD_CALLBACK_DICT["LIKE_INFO_V3_CLICK"] = _like
 
+    def _wishlist(self, client, command):
+        # WIDGET_WISH_LIST / WIDGET_WISH_INFO 的顶层 wish_status=2 才是整单达成。
+        # wish_status_info 是状态说明表，其中始终包含“达成”，不能用它判断完成。
+        # 消息样例：https://janson20.github.io/bilibili-api-collect-mirror/docs/live/message_stream.html
+        d = command.get("data")
+        if not isinstance(d, dict):
+            return
+        try:
+            sid, status = int(d.get("sid", 0)), int(d.get("wish_status", -1))
+        except (TypeError, ValueError):
+            return
+        if sid <= 0 or status not in (-1, 0, 1, 2, 3):
+            return
+        items = []
+        wishes = d.get("wish") or []
+        for item in wishes if isinstance(wishes, list) else []:
+            if not isinstance(item, dict):
+                continue
+            try:
+                target = max(0, int(item.get("target_num") or 0))
+                current = max(0, int(item.get("current_num") or 0))
+                done = int(item.get("wish_status") or 0) == 2
+            except (TypeError, ValueError):
+                continue
+            items.append({"name": str(item.get("gift_name") or "礼物")[:80],
+                          "current": current, "target": target, "completed": done})
+        self.emit({"type": "wishlist", "room_id": client.room_id, "wish_id": str(sid),
+                   "wish_name": str(d.get("wish_name") or "直播心愿单")[:80],
+                   "status": status, "items": items, "wish_ts": d.get("ts")})
+
+    _CMD_CALLBACK_DICT["WIDGET_WISH_LIST"] = _wishlist
+    _CMD_CALLBACK_DICT["WIDGET_WISH_INFO"] = _wishlist
+
     def _on_danmaku(self, client, m: wm.DanmakuMessage):
         self.emit({"type": "danmaku", "uid": m.uid, "name": m.uname, "text": m.msg,
                    "emoticon": m.dm_type == 1, "guard_level": m.privilege_type})
