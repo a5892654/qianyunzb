@@ -30,7 +30,20 @@ def make_app():
     return app
 
 
-class PlayerLifecycleTests(unittest.IsolatedAsyncioTestCase):
+class ConfigWriteGuardMixin:
+    """假 cfg 绝不能落盘：一旦写进真实 config.json，用户的登录 cookie、皮套、
+    AI 接口配置会全被默认值盖掉。"""
+
+    def _guard_config_writes(self):
+        patcher = patch("main.config.save")
+        self.save = patcher.start()
+        self.addCleanup(patcher.stop)
+
+
+class PlayerLifecycleTests(ConfigWriteGuardMixin, unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self._guard_config_writes()
+
     async def test_start_marks_pending_player_running(self):
         app = make_app()
         self.assertTrue(app.start_dt()["ok"])
@@ -58,6 +71,26 @@ class PlayerLifecycleTests(unittest.IsolatedAsyncioTestCase):
     async def test_pause_idempotent(self):
         self.assertTrue((await make_app().stop_dt())["ok"])
 
+    async def test_recent_chars_persist_across_restarts(self):
+        """换角色这件事必须跨重启记住：进程一开就忘了上一局是谁，又会连着点同一个人。"""
+        app = make_app()
+        app._remember_chars(["奈尔", "爱丽丝"])
+        self.assertEqual(app.cfg["dtgame"]["recent_chars"], ["奈尔", "爱丽丝"])
+        self.save.assert_called_once()
+        self.save.reset_mock()
+        app._remember_chars(["奈尔", "爱丽丝"])     # 没变就别反复写盘
+        self.save.assert_not_called()
+
+    async def test_player_starts_with_saved_chars(self):
+        app = make_app()
+        app.cfg["dtgame"]["recent_chars"] = ["奈尔"]
+        with patch("main.DTPlayer") as made:
+            app.start_dt()
+        self.assertEqual(list(made.call_args.kwargs["chars"]), ["奈尔"])
+        made.call_args.kwargs["on_chars"](["奈尔", "安洁莉亚"])
+        self.assertEqual(app.cfg["dtgame"]["recent_chars"], ["奈尔", "安洁莉亚"])
+        await app.stop_dt()
+
     async def test_existing_game_does_not_restart(self):
         app = make_app()
         app.dt = Mock(running=True)
@@ -83,14 +116,16 @@ class PlayerLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((await app.resume_dt())["ok"])
         self.assertEqual(bridge.continue_run.call_count, 2)
 
-    async def test_missing_save_requires_confirmation(self):
+    async def test_missing_save_starts_new_run_by_itself(self):
+        """没有可续的存档时别再要人确认：直接开新局，并在日志里说清楚。"""
         app = make_app()
         bridge = app._dt_bridge.return_value
         bridge.screen.return_value = {"screen": "menu"}
         bridge.continue_run.return_value = {"ok": False, "no_save": True, "error": "没有存档"}
-        app.start_dt = Mock()
-        self.assertEqual((await app.resume_dt())["code"], "no_save")
-        app.start_dt.assert_not_called()
+        app.start_dt = Mock(return_value={"ok": True})
+        self.assertTrue((await app.resume_dt())["ok"])
+        app.start_dt.assert_called_once()
+        self.assertIn("自动开始新出征", str(app.push.call_args_list))
 
     async def test_timeout_is_not_missing_save(self):
         app = make_app()
@@ -103,18 +138,65 @@ class PlayerLifecycleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["error"], "请处理账号验证")
         app.start_dt.assert_not_called()
 
-    async def test_hall_requires_new_run_confirmation(self):
+    async def test_hall_starts_new_run_by_itself(self):
+        """战斗中没有落盘点，重启后回到大厅是常态：自己开新局，别停在原地等人点。"""
         app = make_app()
         app._dt_bridge.return_value.screen.return_value = {"screen": "hall"}
-        app.start_dt = Mock()
-        self.assertEqual((await app.resume_dt())["code"], "no_save")
-        app.start_dt.assert_not_called()
+        app.start_dt = Mock(return_value={"ok": True})
+        self.assertTrue((await app.resume_dt())["ok"])
+        app.start_dt.assert_called_once()
+        self.assertIn("自动开始新出征", str(app.push.call_args_list))
 
-    async def test_confirmed_new_run_can_start(self):
+    async def test_new_run_flag_still_tries_continue(self):
         app = make_app()
         app._dt_bridge.return_value.screen.return_value = {"screen": "hall"}
         app.start_dt = Mock(return_value={"ok": True})
         self.assertTrue((await app.resume_dt(new_run=True))["ok"])
+        self.assertEqual(app._dt_bridge.return_value.continue_run.call_count, 0)
+
+    async def test_schedule_prep_launches_game_then_resumes(self):
+        app = make_app()
+        app._bridge_alive = Mock(return_value=False)
+        app.game.launch_and_wait = AsyncMock(return_value={"ok": True})
+        app.resume_dt = AsyncMock(return_value={"ok": True})
+        result = await app.ensure_game_and_dt()
+        self.assertTrue(result["ok"] and result["launched"])
+        app.game.launch_and_wait.assert_awaited_once()
+        app.resume_dt.assert_awaited_once()
+
+    async def test_schedule_prep_keeps_running_game_and_skips_launch(self):
+        app = make_app()
+        app.resume_dt = AsyncMock(return_value={"ok": True, "already": True})
+        result = await app.ensure_game_and_dt()
+        self.assertTrue(result["ok"] and not result.get("launched"))
+        app.game.launch_and_wait.assert_not_called()
+
+    async def test_schedule_prep_tolerates_dt_failure_but_warns(self):
+        """代打起不来（比如模型没配）只警告：直播画面还是要照常开出去。"""
+        app = make_app()
+        app.game.launch_and_wait = AsyncMock(return_value={"ok": True})
+        app.resume_dt = AsyncMock(return_value={"ok": False, "error": "还没填 API Key"})
+        self.assertTrue((await app.ensure_game_and_dt())["ok"])
+        self.assertIn("还没填 API Key", str(app.push.call_args_list))
+
+    async def test_schedule_prep_fails_when_game_cannot_launch(self):
+        app = make_app()
+        app._bridge_alive = Mock(return_value=False)
+        app.game.launch_and_wait = AsyncMock(return_value={"ok": False, "error": "找不到 Godot"})
+        app.resume_dt = AsyncMock()
+        result = await app.ensure_game_and_dt()
+        self.assertFalse(result["ok"])
+        self.assertIn("找不到 Godot", result["error"])
+        app.resume_dt.assert_not_awaited()
+
+    async def test_schedule_prep_does_not_launch_when_auto_launch_off(self):
+        app = make_app()
+        app._bridge_alive = Mock(return_value=False)
+        app.cfg["dtgame"]["auto_launch"] = False
+        result = await app.ensure_game_and_dt()
+        self.assertFalse(result["ok"])
+        self.assertIn("自动启动", result["error"])
+        app.game.launch_and_wait.assert_not_called()
 
     async def test_bad_model_rejected_before_launch(self):
         app = make_app()
@@ -140,9 +222,60 @@ class PlayerLifecycleTests(unittest.IsolatedAsyncioTestCase):
         app.start_dt.assert_called_once()
 
 
-class ApiTests(unittest.IsolatedAsyncioTestCase):
+class CharacterRotationTests(unittest.TestCase):
+    """代打换角色：模型没有跨局记忆，不记着上一局是谁，她可以连点十局同一个人。"""
+
+    ROSTER = {"character_select": {"characters": [
+        {"slot": 0, "id": "a", "name": "奈尔"},
+        {"slot": 1, "id": "b", "name": "爱丽丝"},
+        {"slot": 2, "id": "c", "name": "安洁莉亚"}]}}
+
+    def player(self, used):
+        from dtgame.player import Player
+        p = Player({"openai_base": "http://127.0.0.1:1/v1", "openai_model": "m"},
+                   Mock(), narrate=False)
+        p.log_push = Mock()
+        p.chars = list(used)
+        return p
+
+    def test_remembers_each_run_once(self):
+        p = self.player([])
+        for _ in range(3):
+            p._remember_character({"run": {"character": "奈尔"}})
+        p._remember_character({"run": {"character": "爱丽丝"}})
+        self.assertEqual(p.chars, ["奈尔", "爱丽丝"])
+
+    def test_title_form_is_the_same_character(self):
+        """选角界面写「奈尔」，局内状态写「龙枪骑士·奈尔」，不能算成两个人。"""
+        p = self.player(["奈尔"])
+        p._remember_character({"run": {"character": "龙枪骑士·奈尔"}})
+        self.assertEqual(p.chars, ["奈尔"])
+        self.assertEqual(p._swap_if_repeat(self.ROSTER, 0, ""), 1)
+
+    def test_hint_names_who_to_avoid_and_who_is_fresh(self):
+        tip = self.player(["奈尔", "爱丽丝"])._rotation(self.ROSTER)
+        self.assertIn("奈尔", tip)
+        self.assertIn("必须换", tip)
+        self.assertIn("安洁莉亚", tip)          # 没上过的要被点名
+
+    def test_repeat_pick_gets_swapped(self):
+        p = self.player(["奈尔"])
+        self.assertEqual(p._swap_if_repeat(self.ROSTER, 0, ""), 1)
+        self.assertIn("换成", str(p.log_push.call_args_list))
+        p.log_push.reset_mock()
+        self.assertEqual(p._swap_if_repeat(self.ROSTER, 2, ""), 2)   # 本来就换了就不动
+        p.log_push.assert_not_called()
+
+    def test_no_swap_when_everyone_already_used(self):
+        p = self.player(["奈尔", "爱丽丝", "安洁莉亚"])
+        self.assertEqual(p._swap_if_repeat(self.ROSTER, 0, ""), 0)
+        p.log_push.assert_not_called()
+
+
+class ApiTests(ConfigWriteGuardMixin, unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         from aiohttp.test_utils import TestClient, TestServer
+        self._guard_config_writes()
         self.app = make_app()
         self.client = TestClient(TestServer(build_web(self.app)))
         await self.client.start_server()

@@ -44,6 +44,7 @@ def make(iso="2026-10-01 07:00", **st):
     br.stop_preview = AsyncMock(return_value={"ok": True})
     br.start, br.stop = AsyncMock(return_value={"ok": True, "room_id": 42}), AsyncMock(return_value={"ok": True})
     app = types.SimpleNamespace(broadcast=br, pushes=[], connect=AsyncMock(),
+                                ensure_game_and_dt=AsyncMock(return_value={"ok": True}),
                                 cfg={"bili_cookie": "FAKE-SESSDATA", "room_id": 0, "audio": {},
                                      "broadcast": {"title": "千音", "area_id": 591, "schedule": sch}})
     app.push = lambda k, d: app.pushes.append((k, dict(d)))
@@ -312,11 +313,69 @@ async def phase_api():
     finally:
         await client.close()
 
+async def s20_auto_start_game_and_dt():
+    # 到点必须先把游戏/代打拉起来，再找采集源、预览、开播（顺序要看得见）
+    s, a, now = make(enabled=True)
+    seq = []
+    async def note_game(): seq.append("game"); return {"ok": True}
+    async def note_preview(_sel): seq.append("preview"); return {"ok": True}
+    async def note_start(_data): seq.append("start"); return {"ok": True, "room_id": 42}
+    a.ensure_game_and_dt.side_effect, a.broadcast.preview.side_effect = note_game, note_preview
+    a.broadcast.start.side_effect = note_start
+    await fire(s, now, "2026-10-01 08:00")
+    req(seq == ["game", "preview", "start"] and s.last_result["ok"], "定时开播未按 游戏→预览→开播 走: " + str(seq))
+
+    # 游戏起不来 → 一律不碰平台
+    s2, a2, now2 = make(enabled=True)
+    a2.ensure_game_and_dt.return_value = {"ok": False, "error": "定时开播未执行：游戏启动失败（找不到 Godot）"}
+    await fire(s2, now2, "2026-10-01 08:00")
+    req(a2.broadcast.preview.await_count == 0 and a2.broadcast.start.await_count == 0
+        and s2.last_result["ok"] is False and "游戏启动失败" in s2.last_result["message"],
+        "游戏起不来时仍尝试了预览/开播")
+
+    # 刚启动的游戏窗口晚一点才出现：重试到出现为止，并且真的开了播
+    s3, a3, now3 = make(enabled=True)
+    s3.WINDOW_TRIES = 4
+    a3.ensure_game_and_dt.return_value = {"ok": True, "launched": True}
+    a3.broadcast.sources.side_effect = [src(miss=True), src(miss=True), src(), src()]
+    await fire(s3, now3, "2026-10-01 08:00")
+    req(a3.broadcast.sources.await_count == 3 and a3.broadcast.start.await_count == 1
+        and s3.last_result["ok"], "刚启动的窗口没有重试等待: " + str(a3.broadcast.sources.await_count))
+
+    # 重试到底仍找不到窗口 → 明确失败，不开播
+    s4, a4, now4 = make(enabled=True)
+    s4.WINDOW_TRIES = 2
+    a4.ensure_game_and_dt.return_value = {"ok": True, "launched": True}
+    a4.broadcast.sources.side_effect = lambda: src(miss=True)
+    await fire(s4, now4, "2026-10-01 08:00")
+    req(a4.broadcast.sources.await_count == 2 and a4.broadcast.start.await_count == 0
+        and s4.last_result["ok"] is False and "窗口" in s4.last_result["message"], "窗口始终缺失应失败且不重试到开播")
+
+    # 重试期间被取消：立刻收手，不继续等也不开播
+    s5, a5, now5 = make(enabled=True)
+    s5.WINDOW_TRIES = 8
+    a5.ensure_game_and_dt.return_value = {"ok": True, "launched": True}
+    a5.broadcast.sources.side_effect = lambda: src(miss=True)
+    async def abort_soon():
+        await asyncio.sleep(0.3); s5.abort_start = True
+    t = asyncio.create_task(abort_soon())
+    await fire(s5, now5, "2026-10-01 08:00"); await t
+    req(a5.broadcast.start.await_count == 0 and a5.broadcast.sources.await_count <= 2
+        and s5.last_result["ok"] and "取消" in s5.last_result["message"], "取消后仍在等窗口/开播")
+
+    # 本来就在跑（没启动）→ 不该白等十秒
+    s6, a6, now6 = make(enabled=True)
+    a6.broadcast.sources.side_effect = lambda: src(miss=True)
+    await fire(s6, now6, "2026-10-01 08:00")
+    req(a6.broadcast.sources.await_count == 1, "游戏没启动却重试等了窗口")
+
+
 SUITES = [s01_disabled, s02_day_start_stop, s03_cross_midnight, s04_minute_and_rollback, s05_restart_ledger,
           s06_init_save_minute_and_missed, s07_skip_and_stop_noop, s08_sources_bad, s09_resolve_new_ids,
           s10_fail_once, s11_save_rejects, s12_save_enabled_ok, s13_disable_keeps_live,
           s14_stop_now_during_slow_preview, s15_abort_after_start_ok, s16_close_cancels_pending,
-          s17_sleep_past_stop_cancels_start, s18_begin_overrun_stops_once, s19_account_change_disables_plan]
+          s17_sleep_past_stop_cancels_start, s18_begin_overrun_stops_once, s19_account_change_disables_plan,
+          s20_auto_start_game_and_dt]
 
 async def amain():
     t0 = time.time()

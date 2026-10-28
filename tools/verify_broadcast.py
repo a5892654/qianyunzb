@@ -98,6 +98,18 @@ class CaptureError(RuntimeError):
     pass
 
 
+class FaceAuthRequiredError(PlatformError):
+    """和 live_platform 里的同名异常同形：带 qr，且仍是 PlatformError 的子类。"""
+
+    def __init__(self, message, qr=""):
+        super().__init__(message)
+        self.qr = qr
+
+
+# 和 live_capture 的输出尺寸一致（fake 不做真实采集，只把数字传给上层断言）
+OUT_W, OUT_H = 1920, 1080
+
+
 class Controller:
     """可编程的 mock 后端，记录所有对平台/采集的调用。"""
 
@@ -205,7 +217,7 @@ class FakeCapture:
     def snapshot(self):
         return {"previewing": self.previewing, "output_running": self.output_running,
                 "audio_level": self.audio_level, "error": self.error,
-                "width": 1280, "height": 720, "fps": 30}
+                "width": OUT_W, "height": OUT_H, "fps": 30}
 
     def frame_jpeg(self):
         return controller.frame
@@ -227,11 +239,15 @@ def install_fakes():
     import live_broadcast / main 只会拿到 mock，不加载真实采集。"""
     mod_p = types.ModuleType("live_platform")
     mod_p.PlatformError = PlatformError
+    mod_p.FaceAuthRequiredError = FaceAuthRequiredError
     mod_p.BiliBroadcastPlatform = FakePlatform
     mod_c = types.ModuleType("live_capture")
     mod_c.CaptureError = CaptureError
     mod_c.WindowStreamCapture = FakeCapture
     mod_c.sources = sources
+    mod_c.OUT_W, mod_c.OUT_H = OUT_W, OUT_H   # live_broadcast 从这里取源画面尺寸
+    mod_c.fit_borderless_client = lambda hwnd, w, h: (w, h)
+    mod_c.close_window = lambda hwnd: None
     sys.modules["live_platform"] = mod_p
     sys.modules["live_capture"] = mod_c
 
@@ -316,6 +332,20 @@ async def phase_a():
             pe = friendly(exc)
             ok = ("999999" in str(pe) or "code=" in str(pe)) and "secret-data" not in str(pe)
             record("A._friendly 未知 code→通用文案不带原始数据", PASS if ok else FAIL, str(pe))
+        try:
+            pe = friendly(ResponseCodeException(60024, "本次开播需要完成人脸验证"))
+            ok = ("人脸验证" in str(pe)) and ("本次开播需要完成人脸验证" in str(pe)) and pe.code == 60024
+            record("A._friendly 60024→人工提示并附 B站原话", PASS if ok else FAIL, str(pe))
+            # 短到不会被截断救场：必须靠过滤规则本身挡下推流信息
+            leaked = str(friendly(ResponseCodeException(60024, "见 rtmp://a KEY=SECRET")))
+            assert_true("rtmp" not in leaked.lower() and "SECRET" not in leaked and "见" not in leaked,
+                        "推流信息被回显: " + leaked[:120])
+            dirty = str(friendly(ResponseCodeException(60013, "带\x00控制符\t" + "啊" * 300)))
+            assert_true("\x00" not in dirty and "\t" not in dirty and len(dirty) < 200,
+                        "B站原话没被清洗/截断: " + dirty[:120])
+            record("A._friendly B站原话过滤推流信息并清洗截断", PASS)
+        except Exception as exc3:
+            record("A._friendly 60024 原话回显", FAIL if isinstance(exc3, AssertionError) else SKIP, repr(exc3))
         try:
             net = NetworkException(412, "Forbidden")
             pe = friendly(net)
@@ -715,13 +745,30 @@ async def t_b17_stop_immediately_after_start():
         record("B17 start 后立即 stop 正常收口", PASS)
 
 
+async def t_b18_preview_reuses_same_session():
+    """重复点「预览」不该停掉正在用的采集会话：生产实测 stop 后立刻 start 会把整个
+    服务崩掉（WGC 拆会话时访问违例），而用户什么都没换，本来就不该重来一遍。"""
+    controller.reset()
+    app, b = fresh_broadcast()
+    await ok_preview(b)
+    r = await b.preview(sel())
+    assert_true(r.get("ok"), "同参数重复预览应成功: " + str(r))
+    assert_eq(controller.stop_preview_calls, 0, "同参数重复预览不该停掉正在用的采集会话")
+    assert_eq(controller.preview_calls, [(1111, 2222)], "同参数重复预览不该重开采集")
+    r2 = await b.preview(sel(hwnd=9999))
+    assert_true(r2.get("ok"), "换窗口应正常切换: " + str(r2))
+    assert_eq(controller.stop_preview_calls, 1, "换窗口要先停旧会话")
+    assert_eq(len(controller.preview_calls), 2, "换窗口要重开采集")
+    record("B18 同参数重复预览复用采集会话，换窗口才重启", PASS)
+
+
 BROADCAST_TESTS = [
     t_b01_no_confirm, t_b02_bad_selection, t_b03_bad_title_area, t_b04_no_preview,
     t_b05_preview_mismatch, t_b06_black_screen, t_b07_live_happy_and_no_leak,
     t_b08_concurrent_start, t_b09_other_stream_never_end, t_b10_encoder_fail,
     t_b11_stop_keeps_game_and_tts, t_b12_stop_fail_retry, t_b13_watch_stops_own_live,
     t_b14_start_stop_race, t_b15_preview_no_login, t_b16_preview_locked_while_live,
-    t_b17_stop_immediately_after_start,
+    t_b17_stop_immediately_after_start, t_b18_preview_reuses_same_session,
 ]
 
 

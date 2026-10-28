@@ -22,6 +22,9 @@ from dtgame import view
 
 log = logging.getLogger("dtplay")
 
+# 本局最多复活两次（玩家设定）：第三次阵亡就结束本局回大厅开新局。
+MAX_REVIVES = 2
+
 _SAY_STRIP = re.compile(r"[\"'“”‘’「」『』【】\[\]{}()（）#*_`>|]")
 
 
@@ -79,15 +82,24 @@ SYSTEM = """你在直播玩《恶魔之塔 Zero》——一款类杀戮尖塔的
   Boss魂与章节奖励需要选择奖励，不能当成只有继续按钮；选完奖励再前往下一幕。
   设置窗口只选「关闭」，不要改变画质、屏幕适配或放弃本次爬塔。
 
+战斗内弹窗（界面还是战斗，但屏幕上挡着「选择一项 / 弃一张牌 / 抽牌预览」）：
+  这时读出来是 dialog，卡已经打出去了，效果要等你选完才结算。
+  用 {"action":"overlay","slot":控件序号,"op":"button"} 按窗口列出的「控件 slot」选一项，
+  选项文案就是效果本身，照当前能量/格挡/血量/虚血挑最划算的那个。
+  这种时候不要再发 play/end，那只会撞同一个窗口。
+
 选角：
   {"action":"character","slot":序号}
   选角色你自己拿主意，按当前阵容和心情直接点一个，不要停下来等确认。
+  但观众要看换人：状态里给了「选角提醒」时必须照办，别连着几局点同一个人。
 
 每个 JSON 都要带一个 "say" 字段，是你此刻对着观众说的一句口语中文，
 不超过 30 字，像真人打牌时随口念叨，不要念数值、不要解说规则。
 
 手牌后面标 ✕ 的牌当前打不出来，括号里是原因，别选它。
+敌人标了 ✕不可选中 的（已阵亡或隐匿）别当目标，系统会自动改成能选的那个。
 道具写了「现在用不了：…」的同理，原因没变就别再撞同一个 slot。
+本局最多复活两次，第三次阵亡就回大厅开新局，别跟观众承诺无限复活。
 
 决策要点：
 - 优先算清能不能挡住这一回合的伤害，再考虑输出。
@@ -102,13 +114,14 @@ class Player:
     AI_FAIL_LIMIT = 5
 
     def __init__(self, cfg_ai: dict, bridge: GameBridge, speak=None, log_push=None,
-                 narrate: bool = True, pipe=None):
+                 narrate: bool = True, pipe=None, emotions=None, chars=(), on_chars=None):
         self.cfg = cfg_ai
         self.bridge = bridge
         self.speak = speak or (lambda text, emotion="": None)
         self.log_push = log_push or (lambda level, msg: None)
         self.narrate = narrate
         self.pipe = pipe
+        self.emotions = emotions or (lambda: [])
         self._pending_speech = None
         self.history: list[dict] = []
         self.running = False
@@ -118,13 +131,80 @@ class Player:
         self.ai_fails = 0
         self.dead_waits = 0
         self.last_say = ""
+        self.chars: list[str] = []   # 最近几局的角色（短名），用来逼她换人
+        for x in (chars or []):
+            key = self._char_key(x)
+            if key and (not self.chars or self.chars[-1] != key):
+                self.chars.append(key)
+        del self.chars[:-8]
+        self.on_chars = on_chars or (lambda names: None)
+
+    def _system_prompt(self) -> str:
+        options = [{"name": e["name"], "motion": e.get("motion", ""), "keywords": e.get("keywords", "")}
+                   for e in self.emotions() if e.get("name")]
+        if not options:
+            return SYSTEM
+        return SYSTEM + (
+            '\n【Live2D 表情与动作】每个决策 JSON 除 say 外，必须带独立的 "emotion" 字段，'
+            '值从下面的 name 中原样选择一个，不能为空，不要把标签写进 say。'
+            '根据这句话的语气和游戏局势主动选择：得手时开心、拿奖励时期待、受挫时生气、意外时惊讶等。'
+            '吃饭、困倦、token 类动作只在台词和情境合适时选，不要在每次出牌时乱吃乱睡；不要机械地固定选同一项。'
+            '\n当前皮套的可选项：' + json.dumps(options, ensure_ascii=False)
+        )
 
     # ---------- 模型 ----------
+    @staticmethod
+    def _char_key(name: str) -> str:
+        """角色名归一：选角界面给「奈尔」，局内状态给「龙枪骑士·奈尔」，得算同一个人。"""
+        return str(name or "").split("·")[-1].strip()
+
+    def _remember_character(self, state: dict) -> None:
+        """记下每局用的角色：模型没有跨局记忆，不记就会一直点同一个。"""
+        name = self._char_key((state.get("run") or {}).get("character"))
+        if name and (not self.chars or self.chars[-1] != name):
+            self.chars.append(name)
+            del self.chars[:-8]
+            self.on_chars(list(self.chars))
+
+    def _rotation(self, state: dict) -> str:
+        roster = [str(c.get("name") or "").strip()
+                  for c in (state.get("character_select") or {}).get("characters") or []]
+        roster = [n for n in roster if n]
+        if not roster:
+            return ""
+        used = self.chars[-4:]
+        if not used:
+            return "选角提醒：这是第一次记录，从名单里挑一个你有话说的角色。"
+        fresh = [n for n in roster if self._char_key(n) not in self.chars]
+        tip = (f"选角提醒：最近几局已经用过 {'、'.join(used)}，这次必须换一个，"
+               f"别再点上一局那个。对着观众说一句为什么换她。")
+        if fresh:
+            tip += " 还没上过的：" + "、".join(fresh) + "，优先从这里挑。"
+        return tip
+
+    def _swap_if_repeat(self, state: dict, slot: int, cid: str) -> int:
+        """提醒说了还不听就换：连着点上一局那个角色，观众看到的就是一个人一直打。"""
+        chars = (state.get("character_select") or {}).get("characters") or []
+        if not chars or not self.chars:
+            return slot
+        picked = next((c for c in chars
+                       if (cid and str(c.get("id", "")) == cid)
+                       or int(c.get("slot", -1)) == slot), None)
+        name = self._char_key((picked or {}).get("name"))
+        if not name or name != self.chars[-1]:
+            return slot
+        fresh = [c for c in chars
+                 if self._char_key(c.get("name")) and self._char_key(c.get("name")) not in self.chars]
+        if not fresh:
+            return slot
+        self.log_push("info", f"AI 又想点上一局的{name}，这一局换成{fresh[0]['name']}")
+        return int(fresh[0].get("slot", slot))
+
     async def _ask(self, state_text: str) -> dict:
         base = str(self.cfg.get("openai_base", "")).rstrip("/")
         if not base or not self.cfg.get("openai_model"):
             raise RuntimeError("未配置 OpenAI 兼容接口（base / model）")
-        msgs = [{"role": "system", "content": SYSTEM}]
+        msgs = [{"role": "system", "content": self._system_prompt()}]
         msgs.extend(self.history[-6:])
         msgs.append({"role": "user", "content": state_text})
         payload = {
@@ -205,7 +285,9 @@ class Player:
                 return self.bridge.overlay(int(act.get("slot", -1)), str(act.get("op", "")),
                                            body["window_id"], body["revision"])
             elif screen == "character_select" and a == "character":
-                return self.bridge.pick_character(int(act.get("slot", -1)), str(act.get("id", "")))
+                slot = self._swap_if_repeat(state, int(act.get("slot", -1)),
+                                            str(act.get("id", "")))
+                return self.bridge.pick_character(slot, str(act.get("id", "")))
         except (BridgeError, ValueError, TypeError) as e:
             return {"ok": False, "error": str(e)}
         return {"ok": False, "error": f"界面 {screen} 不支持动作 {a}"}
@@ -236,6 +318,7 @@ class Player:
     async def step(self) -> dict:
         """走一步：读状态、问模型、执行。返回 {screen, action, ok, say}。"""
         state = await asyncio.to_thread(self.bridge.state)
+        self._remember_character(state)
         screen = state.get("screen")
         if state.get("busy"):
             return {"screen": screen, "ok": True, "action": {"action": "wait"}, "say": ""}
@@ -256,10 +339,16 @@ class Player:
             r = await asyncio.to_thread(self.bridge.close_loot, True)
             return {"screen": screen, "action": {"action": "close_loot"},
                     "ok": bool(r.get("ok")), "error": r.get("error", ""), "say": ""}
-        # 死亡面板：复活回篝火，不需要模型决策。
+        # 死亡面板：本局前两次阵亡从篝火复活，第三次结束本局回大厅开新局。
         if screen == "death":
-            r = await asyncio.to_thread(self.bridge.revive)
-            return {"screen": screen, "action": {"action": "revive"},
+            revives = int((state.get("run") or {}).get("revives", 0))
+            if revives < MAX_REVIVES:
+                r = await asyncio.to_thread(self.bridge.revive)
+                action = "revive"
+            else:
+                r = await asyncio.to_thread(self.bridge.return_to_hall)
+                action = "return_to_hall"
+            return {"screen": screen, "action": {"action": action},
                     "ok": bool(r.get("ok")), "error": r.get("error", ""), "say": ""}
         # 本局结算页：「返回大厅」在危险词名单里，普通窗口读出来是空按钮列表，
         # 模型根本没有可点的东西，只能由代码按下去，然后 _boot 会接着开下一局。
@@ -280,6 +369,8 @@ class Player:
                     "ok": bool(r.get("ok")), "error": r.get("error", ""), "say": ""}
 
         text = view.render(state)
+        if screen == "character_select":
+            text += "\n" + self._rotation(state)
         try:
             act = await self._ask(text)
         except Exception as e:
@@ -302,6 +393,12 @@ class Player:
 
         say = str(act.pop("say", "") or "").strip()
         say = _clean_say(say)
+        emotion = str(act.pop("emotion", "") or "").strip()
+        allowed_emotions = {e["name"] for e in self.emotions() if e.get("name")}
+        if emotion not in allowed_emotions:
+            emotion = ""
+            if allowed_emotions and say:
+                self.log_push("warn", "代打未选择有效皮套情绪，本句将按台词关键词匹配")
 
         # 先出牌再说话：画面是"因"，台词是"果"。
         # 反过来的话（之前就是）声音还在合成，牌早打完了，观感就是音画脱节。
@@ -317,7 +414,7 @@ class Player:
             self.last_say = say
             if self.narrate:
                 try:
-                    job = self.speak(say)
+                    job = self.speak(say, emotion)
                     if job is not None:
                         # 流式下 ~0.4s 就开口，但模型思考下一手也要 2~3 秒，
                         # 所以这里不阻塞等待——让播报和下一步决策并行。

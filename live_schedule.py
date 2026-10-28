@@ -8,6 +8,9 @@ _CLOCK = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d\Z")
 
 
 class DailyBroadcastSchedule:
+    # 刚启动的游戏窗口要一两秒才出现在枚举里，重试这么多秒（测试里会调小）
+    WINDOW_TRIES = 10
+
     def __init__(self, app, clock=datetime.now):
         self.app = app
         self.clock = clock
@@ -147,10 +150,21 @@ class DailyBroadcastSchedule:
                 self.active_action = ""
 
     async def start_broadcast(self):
-        sources = await self.app.broadcast.sources()
-        windows = [w for w in sources.get("windows", []) if w["title"] == self.settings["window_title"]]
-        devices = [a for a in sources.get("audio", []) if a["name"] == self.settings["audio_name"]]
-        if not sources.get("ok") or len(windows) != 1 or len(devices) != 1:
+        prep = await self.app.ensure_game_and_dt()
+        if not prep.get("ok"):
+            return {"ok": False, "error": prep.get("error") or "定时开播未执行：游戏没能启动"}
+        # 刚把游戏拉起来时窗口要一两秒才出现在枚举里；本来就在跑就不用白等
+        for attempt in range(self.WINDOW_TRIES if prep.get("launched") else 1):
+            sources = await self.app.broadcast.sources()
+            windows = [w for w in sources.get("windows", []) if w["title"] == self.settings["window_title"]]
+            devices = [a for a in sources.get("audio", []) if a["name"] == self.settings["audio_name"]]
+            if sources.get("ok") and len(windows) == 1 and len(devices) == 1:
+                break
+            if self.closing or self.abort_start or not self.settings["enabled"]:
+                return {"ok": True, "message": "已取消本次定时开播"}
+            if attempt + 1 < self.WINDOW_TRIES:
+                await asyncio.sleep(1)
+        else:
             return {"ok": False, "error": "定时开播未执行：游戏窗口或声音设备不存在、已最小化或存在重名"}
         if self.closing or self.abort_start or not self.settings["enabled"] or not self.within_broadcast_window():
             return {"ok": True, "message": "已取消本次定时开播"}

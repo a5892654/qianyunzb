@@ -64,6 +64,8 @@ class GameProcess:
             return {"ok": False, "error": "找不到 Godot 可执行文件，请在设置里指定 godot.exe 路径"}
         if not self.project_dir or not os.path.exists(os.path.join(self.project_dir, "project.godot")):
             return {"ok": False, "error": f"项目目录无效：{self.project_dir}"}
+        # 实测加 --resolution 1920x1080 没用：游戏启动时会按自己「设置 → 分辨率」重设窗口大小，
+        # 命令行那次请求被盖掉。要 1080p 就得改游戏内的分辨率设置。
         args = [godot, "--path", self.project_dir]
         if self.cfg.get("headless"):
             args.insert(1, "--headless")

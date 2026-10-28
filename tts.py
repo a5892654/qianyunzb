@@ -374,6 +374,9 @@ class Player:
         self.sr = 48000
         self.voice = None
         self.vpos = 0
+        self.vheard = 0
+        self.vstart = None
+        self._lat_cache = None
         self.voice_vol = 0.8
         self.voice_done = threading.Event()
         self.voice_done.set()
@@ -438,6 +441,7 @@ class Player:
         self.stream = sd.OutputStream(samplerate=sr, channels=2, dtype="float32", device=idx,
                                       callback=self._callback, latency="high")
         self.stream.start()
+        self._lat_cache = None
         self.dev_name = device_name
 
     def _callback(self, outdata, frames, _time, _status):
@@ -460,6 +464,9 @@ class Player:
                 n = min(frames, len(self.voice) - self.vpos)
                 out[:n] += self.voice[self.vpos:self.vpos + n] * self.voice_vol
                 self.vpos += n
+                # feed_stream 会把已播掉的部分丢掉并重置 vpos，所以口型要另计累计量。
+                # 缓冲区被抽空时 n=0，这个钟也会停住——正是我们想要的：声音卡住嘴也别往前跑。
+                self.vheard += n
                 # 流式时缓冲区被抽空只是「暂时没到货」，不算播完；真正收尾由 end_stream 决定。
                 if self.vpos >= len(self.voice) and not self.streaming:
                     self.voice = None
@@ -482,9 +489,38 @@ class Player:
         with self.lock:
             self.voice_vol = max(0, min(200, volume)) / 100.0
             self.voice_done.clear()
+            self.vheard = 0
+            self.vstart = None
             pids, level = self.duck_pids, self.duck_level
         if pids and level < 1.0:
             duckaudio.duck(pids, level)
+
+    def voice_clock(self):
+        """此刻真正在响的语音位置（秒）。口型照它对齐：
+        按"消息发出的墙上时间"推会先天抢跑——首块音频要等 TTS，声卡缓冲还有 latency 那一截。
+        起播时 PortAudio 会连着回调把缓冲灌满，vheard 瞬间跳前约一个 latency，
+        所以再用"不超过起播以来经过的时间"兜住，嘴就不会在开头抢跑。"""
+        with self.lock:
+            heard = self.vheard / self.sr - self._out_latency_cached()
+            now = time.monotonic()
+            if heard > 0 and self.vstart is None:
+                self.vstart = now
+            if self.vstart is not None:
+                heard = min(heard, now - self.vstart)
+        return max(0.0, heard)
+
+    def _out_latency_cached(self):
+        """输出延迟取一次就缓存：它是设备属性，别在混音回调锁里现问 PortAudio。"""
+        if self._lat_cache is None:
+            self._lat_cache = self._out_latency()
+        return self._lat_cache
+
+    def _out_latency(self):
+        try:
+            lat = self.stream.latency if self.stream is not None else 0.0
+        except Exception:
+            return 0.0
+        return float(lat[1] if isinstance(lat, tuple) else lat)
 
     def _wait_done(self):
         while not self.voice_done.wait(0.05):

@@ -2,6 +2,25 @@ import glob
 import json
 import os
 
+# One sub-folder per skin; a skin is any folder containing a *.model3.json.
+LIBRARY_DIR = os.environ.get("WHALETALK_L2D_LIBRARY", r"E:\cli\live2d-models")
+
+
+def list_library(root=None):
+    root = root or LIBRARY_DIR
+    items = []
+    if not os.path.isdir(root):
+        return items
+    for name in sorted(os.listdir(root), key=str.lower):
+        d = os.path.join(root, name)
+        if not os.path.isdir(d):
+            continue
+        files = sorted(glob.glob(os.path.join(d, "**", "*.model3.json"), recursive=True))
+        if not files:
+            continue
+        items.append({"key": name, "dir": d, "model_file": _rel(d, files[0])})
+    return items
+
 
 def safe_path(base, rel):
     base = os.path.realpath(base)

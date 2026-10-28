@@ -358,6 +358,7 @@ class Pipeline:
         while True:
             item = await self.play_q.get()
             self.current = item
+            clock = asyncio.create_task(self._voice_clock(item["id"]))
             try:
                 if self._stream_mode():
                     await self._play_stream(item, loop)
@@ -366,9 +367,21 @@ class Pipeline:
             except Exception as e:
                 self.app.push("log", {"level": "error", "msg": f"播放失败：{e}"})
             finally:
+                clock.cancel()
                 self.current = None
                 self._spoken_ids.add(item["id"])
                 # 只留最近的一批，避免长时间直播把集合撑大
                 if len(self._spoken_ids) > 256:
                     self._spoken_ids = set(sorted(self._spoken_ids)[-128:])
                 self.app.push("speak_end", {"id": item["id"]})
+
+    async def _voice_clock(self, item_id):
+        """每 0.25 秒报一次「现在声音播到第几秒」，皮套照它对口型。
+        浏览器自己按消息到达的墙上时间推会抢跑：首块音频要等 TTS（实测 ~0.4s），
+        声卡 latency=high 再压 ~0.18s；中途断流时这个钟也会停住，嘴就不会空跑。"""
+        try:
+            while True:
+                await asyncio.sleep(0.25)
+                self.app.push("speak_pos", {"id": item_id, "pos": round(self.app.player.voice_clock(), 3)})
+        except asyncio.CancelledError:
+            pass

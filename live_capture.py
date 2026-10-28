@@ -25,7 +25,10 @@ except Exception:  # pragma: no cover - 依赖缺失时接口仍可读
 from procutil import bind_to_app as _bind_to_app
 
 FFMPEG_PATH = r"C:/rg/ffmpeg.exe"
-OUT_W, OUT_H, FPS = 1280, 720, 30
+# 直播姬画布默认 1920x1080；我们只出 720p 的话它还得再放大一次，等于糊上加糊。
+OUT_W, OUT_H, FPS = 1920, 1080, 30
+# 预览/源画面走 MJPEG，q70 的块状糊在 1080p 全屏后很明显；这里每帧只多 1ms 左右。
+JPEG_QUALITY = 82
 _MIN_W, _MIN_H = 160, 90
 _FRAME_WAIT_S = 8.0
 _ENC_READY_S = 15.0
@@ -42,6 +45,22 @@ _user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
 _user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
 _user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
 _user32.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
+_user32.MoveWindow.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                               ctypes.c_int, ctypes.c_int, wintypes.BOOL]
+_user32.MoveWindow.restype = wintypes.BOOL
+_user32.GetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int]
+_user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
+_user32.SetWindowLongPtrW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_ssize_t]
+_user32.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+_user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                                 ctypes.c_int, ctypes.c_int, wintypes.UINT]
+_user32.SetWindowPos.restype = wintypes.BOOL
+_user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+_user32.PostMessageW.restype = wintypes.BOOL
+_WM_CLOSE = 0x0010
+_GWL_STYLE = -16
+_WS_CAPTION, _WS_THICKFRAME, _WS_BORDER, _WS_DLGFRAME = 0x00C00000, 0x00040000, 0x00800000, 0x00400000
+_SWP_NOSIZE, _SWP_NOMOVE, _SWP_NOZORDER, _SWP_NOACTIVATE, _SWP_FRAMECHANGED = 0x1, 0x2, 0x8, 0x20, 0x20
 _GW_OWNER = 4
 
 
@@ -65,6 +84,63 @@ def _client_crop(hwnd: int) -> dict | None:
     return {"left": left / win_w, "top": top / win_h,
             "width": client_w / win_w, "height": client_h / win_h,
             "window_aspect": win_w / win_h, "client_aspect": client_w / client_h}
+
+
+def close_window(hwnd: int) -> None:
+    """发 WM_CLOSE 让窗口自己关。源画面那个进程会 re-exec，terminate 只杀得到外壳。"""
+    _user32.PostMessageW(wintypes.HWND(hwnd), _WM_CLOSE, 0, 0)
+
+
+def client_size(hwnd: int) -> tuple[int, int]:
+    r = wintypes.RECT()
+    if not _user32.GetClientRect(wintypes.HWND(hwnd), ctypes.byref(r)):
+        return (0, 0)
+    return (max(0, r.right - r.left), max(0, r.bottom - r.top))
+
+
+def strip_caption(hwnd: int) -> None:
+    """去掉标题条和可调边框。
+
+    窗口采集（WGC）采的是整个窗口——实测采集帧尺寸等于 DWM 的扩展边框矩形，比客户区
+    多了标题条那几十像素，所以源画面窗口不改无框的话，直播姬会把「千音源画面」那条
+    标题栏一起播出去。
+    """
+    h = wintypes.HWND(hwnd)
+    frame = _WS_CAPTION | _WS_THICKFRAME | _WS_BORDER | _WS_DLGFRAME
+    style = _user32.GetWindowLongPtrW(h, _GWL_STYLE)
+    if not style & frame:
+        return
+    _user32.SetWindowLongPtrW(h, _GWL_STYLE, style & ~frame)
+    _user32.SetWindowPos(h, None, 0, 0, 0, 0, _SWP_FRAMECHANGED | _SWP_NOMOVE
+                         | _SWP_NOSIZE | _SWP_NOZORDER | _SWP_NOACTIVATE)
+
+
+def fit_borderless_client(hwnd: int, w: int, h: int) -> tuple[int, int]:
+    """把窗口变成一块干净的采集画布：先去掉标题条，再把客户区闭环校正到 w x h。"""
+    strip_caption(hwnd)
+    return fit_client(hwnd, w, h)
+
+
+def fit_client(hwnd: int, w: int, h: int, tries: int = 4) -> tuple[int, int]:
+    """把窗口客户区闭环校正到 w x h（进程坐标系），返回调整后的客户区尺寸。
+
+    浏览器 --window-size 要的是逻辑像素，150% 缩放时按 1920 请求会拿到 2880 再被屏幕
+    钳掉，画面先被网页拉伸、再被直播姬缩小，观众看到的就是糊。边框宽度算不准（DPI
+    虚拟化下每次换算都有零头），所以改成量一次、把差值补上、再量，直到对上。
+    MoveWindow 实测比 SetWindowPos 可靠（后者对 Edge 窗口返回成功但尺寸不动）。
+    """
+    for _ in range(tries):
+        cw, ch = client_size(hwnd)
+        if (cw, ch) == (w, h):
+            return (cw, ch)
+        win = wintypes.RECT()
+        if not cw or not ch or not _user32.GetWindowRect(wintypes.HWND(hwnd), ctypes.byref(win)):
+            return (0, 0)
+        _user32.MoveWindow(wintypes.HWND(hwnd), win.left, win.top,
+                           (win.right - win.left) + (w - cw),
+                           (win.bottom - win.top) + (h - ch), True)
+    return client_size(hwnd)
+
 _forbidden_classes = {"Progman", "WorkerW", "Shell_TrayWnd",
                       "Windows.UI.Core.CoreWindow", "Button"}
 # 自动默认只认游戏窗口；这些标题绝不自动选（允许用户手选）。
@@ -231,11 +307,13 @@ class WindowStreamCapture:
         self._stop_evt = threading.Event()
         self._enc_evt = threading.Event()
         self._capture_closed = threading.Event()
-        self._frame: bytes | None = None          # 720p BGRA
+        self._frame: bytes | None = None          # OUT_W x OUT_H BGRA
         self._source_frame: np.ndarray | None = None  # 最新游戏画面，合成时复制，避免残影
+        self._raw_size: tuple[int, int] | None = None  # 采集帧原始尺寸（物理像素）
         self._digest = ""                          # 低清帧指纹（黑屏/变化检测）
         self._mean = 0.0
         self._jpeg: bytes | None = None
+        self._jpeg_seq = 0
         self._jpeg_at = 0.0
         self._jpeg_thread: threading.Thread | None = None
         self._audio_q: queue.Queue = queue.Queue(maxsize=96)
@@ -366,6 +444,8 @@ class WindowStreamCapture:
             if buf.ndim != 3 or buf.shape[2] != 4:
                 return
             h, w = buf.shape[:2]
+            with self._lock:
+                self._raw_size = (w, h)
             if w < 2 or h < 2:
                 return
             crop = self._crop
@@ -382,7 +462,9 @@ class WindowStreamCapture:
                     h, w = buf.shape[:2]
             s = max(OUT_W / w, OUT_H / h)
             nw, nh = max(OUT_W, int(round(w * s))), max(OUT_H, int(round(h * s)))
-            scaled = cv2.resize(buf, (nw, nh), interpolation=cv2.INTER_AREA)
+            # INTER_AREA 放大会退化成最近邻（边缘发硬），只有缩小时才拿它抗锯齿
+            scaled = cv2.resize(buf, (nw, nh),
+                                interpolation=cv2.INTER_AREA if s < 1 else cv2.INTER_LINEAR)
             x0, y0 = (nw - OUT_W) // 2, (nh - OUT_H) // 2
             canvas = scaled[y0:y0 + OUT_H, x0:x0 + OUT_W]
             tiny = cv2.resize(canvas, (16, 9), interpolation=cv2.INTER_AREA)
@@ -442,9 +524,17 @@ class WindowStreamCapture:
     def _jpeg_worker(self) -> None:
         # 独立刷新最终画面：游戏静止时皮套仍能动，关掉或移动皮套不会残留旧画面。
         last_digest = ""
+        step = 1 / FPS
+        # 先睡 33ms 再干活会把周期变成「33ms + 编码耗时」，实测掉到 ~16fps。
+        # 改成按固定截止时间追帧，编码时间落在同一个周期里，才能跑到采集帧率。
+        next_t = time.monotonic()
         while not self._audio_stop.is_set() and self.previewing:
-            if self._audio_stop.wait(1 / FPS):
+            delay = next_t - time.monotonic()
+            if delay > 0 and self._audio_stop.wait(delay):
                 break
+            next_t += step
+            if next_t < time.monotonic() - step:
+                next_t = time.monotonic()          # 落后太多就重新对齐，不追补旧帧
             try:
                 with self._lock:
                     source = self._source_frame
@@ -457,19 +547,50 @@ class WindowStreamCapture:
                     continue
                 bgra = np.frombuffer(frame, np.uint8).reshape(OUT_H, OUT_W, 4)
                 bgr = cv2.cvtColor(bgra, cv2.COLOR_BGRA2BGR)
-                ok, encoded = cv2.imencode(".jpg", bgr, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                ok, encoded = cv2.imencode(".jpg", bgr,
+                                           [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
                 if ok:
-                    with self._lock:
+                    with self._frame_cv:
                         self._jpeg = encoded.tobytes()
                         self._jpeg_at = time.monotonic()
+                        self._jpeg_seq += 1
+                        self._frame_cv.notify_all()
             except Exception as exc:
                 self._fail(_safe(f"预览编码异常: {exc}"))
                 return
             last_digest = digest
 
+    def wait_jpeg(self, after_seq: int, timeout: float = 0.5):
+        """等一帧比 after_seq 更新的预览 JPEG，返回 (序号, bytes)；超时或停止返回 None。
+        生产 30fps、消费也 30fps 轮询的话平均只能捡到一半，所以预览和源画面走事件等待。"""
+        deadline = time.monotonic() + timeout
+        with self._frame_cv:
+            while True:
+                if self._jpeg is not None and self._jpeg_seq > after_seq:
+                    return self._jpeg_seq, self._jpeg
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or self._audio_stop.is_set() or not self.previewing:
+                    return None
+                self._frame_cv.wait(remaining)
+
     def frame_jpeg(self) -> bytes | None:
         with self._lock:
             return self._jpeg
+
+    def pixel_scale(self) -> float:
+        """显示器缩放倍数（1.0 / 1.25 / 1.5 …）。
+
+        采集帧一直是物理像素（实测等于 DWM 的扩展边框矩形），但进程不能开 DPI 感知
+        （一开，WGC 采 Edge/Chromium 窗口就在 ntdll 里访问违例崩掉整个服务），所以窗口
+        尺寸读到的是虚拟化后的逻辑值，只能拿两者一除换算。宽度上采集帧只比客户区多
+        几个像素的边框，误差 0.2% 左右，够用。
+        """
+        with self._lock:
+            raw, hwnd = self._raw_size, self.hwnd
+        if not raw or not hwnd:
+            return 1.0
+        cw, _ch = client_size(hwnd)
+        return raw[0] / cw if cw > 1 else 1.0
 
     def snapshot(self) -> dict:
         with self._lock:
@@ -477,7 +598,7 @@ class WindowStreamCapture:
                     "output_running": self.output_running,
                     "audio_level": self.audio_level,
                     "error": self.error, "width": OUT_W, "height": OUT_H,
-                    "fps": FPS}
+                    "capture_size": list(self._raw_size or []), "fps": FPS}
 
     # ---------------- 输出 ----------------
 
@@ -509,7 +630,7 @@ class WindowStreamCapture:
                "-ar", str(self._audio_rate), "-ac", str(self._audio_ch),
                "-i", f"tcp://127.0.0.1:{port}",
                "-c:v", "h264_nvenc", "-preset", "p4", "-tune", "ll",
-               "-b:v", "4000k", "-maxrate", "4000k", "-bufsize", "8000k",
+               "-b:v", "6000k", "-maxrate", "6000k", "-bufsize", "12000k",
                "-g", "60", "-pix_fmt", "yuv420p",
                "-c:a", "aac", "-b:a", "128k", "-ar", "48000",
                "-f", "flv", "-flvflags", "no_duration_filesize", target]

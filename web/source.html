@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>千音源画面</title>
+<style>
+html,body{margin:0;height:100%;background:#000;overflow:hidden}
+#f{position:fixed;inset:0;width:100%;height:100%;object-fit:fill}
+#sub{position:fixed;inset:0;width:100%;height:100%;border:0;background:transparent;pointer-events:none}
+#tip{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);color:#7c8698;
+  font:15px/1.7 "Microsoft YaHei UI","PingFang SC",sans-serif;text-align:center;display:none}
+</style>
+</head>
+<body>
+<img id="f" alt="千音合成画面">
+<iframe id="sub" src="/overlay" title="字幕"></iframe>
+<div id="tip">等待画面…<br>千音里点「开启源画面」后这里就会出现合成画面</div>
+<script>
+const img = document.getElementById('f'), tip = document.getElementById('tip');
+img.onload = () => { tip.style.display = 'none'; };
+img.onerror = () => { tip.textContent = '画面已停止，请回千音重新开启源画面'; tip.style.display = 'block'; };
+// 加时间戳：预览重启后 mjpg 是同一个地址，不带参数的话 Edge 会接着显示旧连接
+img.src = '/api/broadcast/stream.mjpg?t=' + Date.now();
+setTimeout(() => { if (!img.complete || !img.naturalWidth) tip.style.display = 'block'; }, 4000);
+</script>
+</body>
+</html>

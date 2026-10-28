@@ -262,6 +262,20 @@ class ContractTests(unittest.TestCase):
         self.assertIn("设置窗口只选「关闭」", SYSTEM)
         self.assertIn("Boss魂与章节奖励需要选择奖励", SYSTEM)
 
+    def test_system_prompt_uses_current_skin_emotions(self):
+        emotions = [{"name": "开心", "motion": "idle", "keywords": "拿下"}]
+        player = Player({}, Mock(), emotions=lambda: emotions)
+        prompt = player._system_prompt()
+        self.assertIn('"emotion"', prompt)
+        self.assertIn('"name": "开心"', prompt)
+        self.assertIn('"keywords": "拿下"', prompt)
+        self.assertIn("不要把标签写进 say", prompt)
+        emotions[:] = [{"name": "困倦", "motion": "sleep"}]
+        self.assertIn('"name": "困倦"', player._system_prompt())
+        self.assertNotIn('"name": "开心"', player._system_prompt())
+        emotions.clear()
+        self.assertEqual(player._system_prompt(), SYSTEM)
+
     def test_system_prompt_character_is_self_chosen(self):
         """选角不再等人确认：提示里要写明白是模型自己拿主意，否则它会停在选角页。"""
         self.assertIn('{"action":"character","slot":序号}', SYSTEM)
@@ -365,7 +379,33 @@ class PlayerTests(unittest.IsolatedAsyncioTestCase):
         result = await player.step()
         self.assertTrue(result["closed"])
         self.assertEqual(result["screen_after"], "map")
-        speak.assert_called_once_with("领到了")
+        speak.assert_called_once_with("领到了", "")
+
+    async def test_emotion_is_forwarded_without_entering_game_action(self):
+        player, bridge, speak = self.make_player()
+        player.emotions = lambda: [{"name": "期待", "motion": "idle"}]
+        player._ask.return_value["emotion"] = "期待"
+        result = await player.step()
+        speak.assert_called_once_with("领到了", "期待")
+        self.assertNotIn("emotion", result["action"])
+        bridge.event.assert_called_once_with(0, "one", "v1")
+
+    async def test_invalid_or_missing_emotion_uses_keyword_fallback(self):
+        for value in (None, "不在当前皮套中的表情"):
+            with self.subTest(emotion=value):
+                player, bridge, speak = self.make_player()
+                player.emotions = lambda: [{"name": "期待"}]
+                player.log_push = Mock()
+                player._ask.return_value["emotion"] = value
+                await player.step()
+                speak.assert_called_once_with("领到了", "")
+                player.log_push.assert_called_once_with("warn", "代打未选择有效皮套情绪，本句将按台词关键词匹配")
+
+    async def test_disabled_skin_does_not_forward_emotion(self):
+        player, bridge, speak = self.make_player()
+        player._ask.return_value["emotion"] = "期待"
+        await player.step()
+        speak.assert_called_once_with("领到了", "")
 
     async def test_busy_window_does_not_ask_or_click(self):
         player, bridge, speak = self.make_player()
@@ -397,6 +437,56 @@ class PlayerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["ok"])
         self.assertIn("确认死亡", result["error"])
         player._ask.assert_not_awaited()
+
+    def death_player(self, revives, revive_result, hall_result):
+        bridge = Mock()
+        bridge.state.return_value = {"screen": "death", "run": {"revives": revives},
+                                      "death": {"panel": "DefeatPanel", "texts": [], "buttons": []}}
+        bridge.revive = Mock(return_value=revive_result)
+        bridge.return_to_hall = Mock(return_value=hall_result)
+        player = Player({}, bridge, narrate=False)
+        player._ask = AsyncMock()
+        return player, bridge
+
+    async def test_death_revives_within_budget(self):
+        player, bridge = self.death_player(0, {"ok": True, "revives": 1},
+                                           {"ok": True})
+        result = await player.step()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["action"]["action"], "revive")
+        bridge.revive.assert_called_once()
+        bridge.return_to_hall.assert_not_called()
+        player._ask.assert_not_awaited()
+
+    async def test_death_after_two_revives_returns_to_hall(self):
+        player, bridge = self.death_player(2, {"ok": True, "revives": 3},
+                                           {"ok": True, "screen_after": "hall"})
+        result = await player.step()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["action"]["action"], "return_to_hall")
+        bridge.return_to_hall.assert_called_once()
+        bridge.revive.assert_not_called()
+        player._ask.assert_not_awaited()
+
+    def test_view_marks_untargetable_enemies(self):
+        state = battle_state()
+        state["battle"]["enemies"] = [
+            {"name": "灰烬骑士", "hp": 30, "max_hp": 30, "alive": True, "targetable": True,
+             "stealth": 0, "intent": {"type": "attack", "name": "重劈", "value": 12, "hits": 1}},
+            {"name": "倒下的小怪", "hp": 0, "max_hp": 30, "alive": False, "targetable": False,
+             "stealth": 0, "intent": {"type": "attack", "name": "-", "value": 0, "hits": 1}},
+            {"name": "潜行者", "hp": 20, "max_hp": 20, "alive": True, "targetable": False,
+             "stealth": 2, "intent": {"type": "attack", "name": "背刺", "value": 6, "hits": 1}},
+        ]
+        text = view.render(state)
+        self.assertIn("✕不可选中(已阵亡)", text)
+        self.assertIn("✕不可选中(隐匿)", text)
+        self.assertIn("[0] 灰烬骑士 30/30", text)
+
+    def test_system_prompt_says_death_starts_new_run(self):
+        self.assertIn("最多复活两次", SYSTEM)
+        self.assertIn("第三次阵亡就回大厅", SYSTEM)
+        self.assertIn("✕不可选中", SYSTEM)
 
     def make_run_end_player(self, reply):
         bridge = Mock()

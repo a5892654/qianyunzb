@@ -1,8 +1,10 @@
 """B站本人直播间的正常授权开播接口。"""
 
 import asyncio
+import hashlib
 import ipaddress
 import re
+import time
 import urllib.parse
 
 from bili import parse_cookie
@@ -15,6 +17,13 @@ from bilibili_api.utils.picture import Picture
 LiveRoom = bili_live.LiveRoom
 
 ROOM_UPDATE_URL = "https://api.live.bilibili.com/room/v1/Room/update"
+START_LIVE_URL = "https://api.live.bilibili.com/room/v1/Room/startLive"
+LIVE_TS_URL = "https://api.bilibili.com/x/report/click/now"
+# 直播姬通道的开播形态（社区 IHateLivehime 实测可用）：缺 version/build/ts
+# 会被 B站按 60024 拒绝；用静态旧版本走二维码认证，最新版会转 60043 外部验证
+START_CLIENT = {"version": "7.47.0.10269", "build": "10269"}
+START_APPKEY = "aae92bc66f3edfab"
+START_APPSEC = "af125a0d5279fd576c1b4418a3e8276d"
 PRE_LIVE_INFO_URL = "https://api.live.bilibili.com/xlive/app-blink/v1/preLive/UpdatePreLiveInfo"
 TIMEOUT_SECONDS = 15.0
 PICTURE_TIMEOUT_SECONDS = 30.0
@@ -25,13 +34,14 @@ MANUAL_HINTS = {
     -412: "触发 B站风控（-412），请在浏览器完成人工验证后再试",
     -101: "B站登录状态无效或未登录，请重新扫码登录",
     60013: "账号未完成实名认证，请先在 B站完成实名认证后再开播",
-    60024: "开播需要人脸验证，请在直播姬中完成人脸验证后重试",
+    60024: "开播需要人脸认证，请按界面提示用B站App扫码完成验证",
     60034: "该分区目前仅支持直播姬开播，请手动在直播姬开始直播",
     60037: "B站限制该账号通过网页开播，请在直播姬或网页端人工处理",
     65530: "B站登录已过期，请重新扫码登录后再试",
 }
 NO_ROOM_HINT = "该账号还没有个人直播间，请先在 B站直播中心开通直播间"
 _CTRL_RE = re.compile(r"[\x00-\x1f\x7f]")
+_SECRETISH_RE = re.compile(r"rtmp|flv|push|stream_key|live_key|https?://|ws://", re.I)
 
 
 class PlatformError(Exception):
@@ -46,8 +56,28 @@ class PlatformError(Exception):
         return self.message
 
 
+class FaceAuthRequiredError(PlatformError):
+    """60024：本次开播需要人脸认证。qr 是B站官方返回的认证二维码地址，
+    扫码完成的是B站自己的实名验证流程，验证通过后该通道才能开播。"""
+
+    def __init__(self, message: str, qr: str):
+        super().__init__(message, 60024)
+        self.qr = qr
+
+
+def _bili_msg(exc) -> str:
+    """B站自己回的那句话。错误码含义要靠它核对（同一个码在不同接口意思可能不一样）。
+    只取 msg 且必须是字符串，去控制符后截断——raw 里可能带推流地址，绝不能进文案。"""
+    raw = getattr(exc, "msg", None)
+    if not isinstance(raw, str):
+        return ""
+    text = _CTRL_RE.sub("", raw).strip()[:60]
+    # B站偶尔把推流地址/密钥塞在 message 里，宁可只报错误码，也不能把它显示出去
+    return "" if _SECRETISH_RE.search(text) else text
+
+
 def _friendly(exc: Exception) -> PlatformError:
-    """把底层异常转换为精简 PlatformError，普通错误只输出 code 与通用文案。"""
+    """把底层异常转换为精简 PlatformError：人工提示 + 错误码 + B站原话。"""
     if isinstance(exc, PlatformError):
         return exc
     if isinstance(exc, asyncio.TimeoutError):
@@ -57,10 +87,9 @@ def _friendly(exc: Exception) -> PlatformError:
             code = int(exc.code)
         except (TypeError, ValueError):
             code = 0
-        hint = MANUAL_HINTS.get(code)
-        if hint:
-            return PlatformError(hint, code)
-        return PlatformError("B站接口请求失败（code=%s），请稍后重试" % code, code)
+        detail = _bili_msg(exc)
+        hint = MANUAL_HINTS.get(code) or "B站接口请求失败（code=%s），请稍后重试" % code
+        return PlatformError(hint + ("（B站：%s）" % detail if detail else ""), code)
     if isinstance(exc, NetworkException):
         if getattr(exc, "status", 0) == 412:
             return PlatformError(MANUAL_HINTS[-412], 412)
@@ -117,6 +146,11 @@ def _validate_push_url(addr: str, code: str) -> str:
         raise PlatformError("开播接口返回的推流地址为 IP 字面量，已拒绝使用")
     base = addr if addr.endswith("/") else addr + "/"
     return base + code.lstrip("/")
+
+
+def _app_sign(params: dict) -> str:
+    body = urllib.parse.urlencode(sorted(params.items()))
+    return hashlib.md5((body + START_APPSEC).encode()).hexdigest()
 
 
 def _notice_text(info: dict) -> str:
@@ -178,6 +212,8 @@ class BiliBroadcastPlatform:
                 result["live_status"] = int(info["live_status"])
                 result["title"] = str(info.get("title") or "")
                 result["cover"] = str(info.get("cover") or "")
+                # room_info.cover 有时指向已清理的动态链（会 404），keyframe 通常还在
+                result["cover_fallback"] = str(info.get("keyframe") or info.get("user_cover") or "")
                 result["notice"] = _notice_text(info)
                 result["area_name"] = str(info.get("area_name") or "")
             except Exception as error:
@@ -222,6 +258,36 @@ class BiliBroadcastPlatform:
         self.started_room_id = 0
         return True
 
+    async def _server_ts(self) -> str:
+        try:
+            async with asyncio.timeout(TIMEOUT_SECONDS):
+                data = await Api(url=LIVE_TS_URL, method="GET").result
+            return str(int((data or {}).get("now") or 0) or int(time.time()))
+        except Exception:
+            return str(int(time.time()))
+
+    async def _start_live(self, room_id: int, area_id: int) -> dict:
+        """以直播姬通道形态调 startLive；B站要求人脸认证时抛 FaceAuthRequiredError。"""
+        data = {"appkey": START_APPKEY, "area_v2": area_id,
+                "build": START_CLIENT["build"], "csrf": self.credential.bili_jct,
+                "platform": "pc_link", "room_id": room_id,
+                "ts": await self._server_ts(), "version": START_CLIENT["version"]}
+        data["sign"] = _app_sign(data)
+        try:
+            async with asyncio.timeout(TIMEOUT_SECONDS):
+                return await Api(url=START_LIVE_URL, method="POST", verify=True,
+                                 no_csrf=True, credential=self.credential).update_data(
+                    **data).result
+        except ResponseCodeException as exc:
+            if int(exc.code or 0) == 60024:
+                qr = str(((exc.raw or {}).get("data") or {}).get("qr") or "")
+                raise FaceAuthRequiredError(
+                    "开播需要人脸认证：请用B站App扫描界面上的二维码完成验证，"
+                    "验证通过后再点开始直播", qr) from None
+            raise _friendly(exc) from None
+        except Exception as exc:
+            raise _friendly(exc) from None
+
     async def begin(self, title: str, area_id: int) -> dict:
         """用户点击开播后调用：改标题 -> 开播，仅内存返回 {room_id, url}。"""
         if not str(title or "").strip():
@@ -239,17 +305,15 @@ class BiliBroadcastPlatform:
             raise PlatformError(info.get("error") or NO_ROOM_HINT)
         self.room = LiveRoom(room_id, credential=self.credential)
         await self._update_title(room_id, str(title).strip())
-        try:
-            async with asyncio.timeout(TIMEOUT_SECONDS):
-                resp = await self.room.start(int(area_id))
-        except Exception as exc:
-            raise _friendly(exc) from None
+        resp = await self._start_live(room_id, int(area_id))
         self.started_room_id = room_id  # start 成功即登记，回滚只针对此房间
         data = resp if isinstance(resp, dict) else {}
         if data.get("need_face_auth") or data.get("need_auth"):
             # 不篡改验证字段、不绕道其他平台：关回自己刚开的房间后交人工处理
             await self._stop_started_room()
-            raise PlatformError("开播被要求人脸/身份验证，请在直播姬完成验证后重试")
+            raise FaceAuthRequiredError(
+                "开播被要求人脸认证：请用B站App扫描界面上的二维码完成验证后重试",
+                str(data.get("qr") or ""))
         rtmp = data.get("rtmp") or {}
         addr = str(rtmp.get("addr") or rtmp.get("url") or "")
         key = str(rtmp.get("code") or rtmp.get("key") or "")

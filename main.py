@@ -10,7 +10,7 @@ import sys
 import time
 import webbrowser
 
-from aiohttp import web, WSMsgType
+from aiohttp import web, WSMsgType, ClientSession
 
 import config
 import live2d
@@ -183,6 +183,13 @@ class App:
             return False, str(e)
         return True, ""
 
+    def _remember_chars(self, names) -> None:
+        """换角色要跨重启记住：进程一开就忘了上一局是谁，又会连着点同一个人。"""
+        if list(self.cfg["dtgame"].get("recent_chars") or []) == list(names):
+            return
+        self.cfg["dtgame"]["recent_chars"] = list(names)
+        config.save(self.cfg)
+
     def start_dt(self) -> dict:
         """只建 Player 并丢进事件循环，游戏启动/体检放到 async 那一侧做。"""
         if self.dt and self.dt.running:
@@ -199,6 +206,9 @@ class App:
             log_push=lambda level, msg: self.push("log", {"level": level, "msg": msg}),
             narrate=bool(c.get("narrate", True)),
             pipe=self.pipe,
+            emotions=lambda: self.cfg["live2d"].get("emotions", []) if self.cfg["live2d"].get("enabled") else [],
+            chars=c.get("recent_chars") or (),
+            on_chars=lambda names: self._remember_chars(names),
         )
         p.running = True
         self.dt = p
@@ -302,15 +312,39 @@ class App:
                         if time.monotonic() >= deadline:
                             break
                         await asyncio.sleep(0.5)
-                    if not result.get("ok"):
-                        return {"ok": False, "code": "no_save" if result.get("no_save") else "resume_pending",
+                    if not result.get("ok") and not result.get("no_save"):
+                        # 账号验证这类卡住必须人看一眼，自动开局等于把弹窗绕过去了
+                        return {"ok": False, "code": "resume_pending",
                                 "error": result.get("error") or "继续游戏未完成，请查看游戏窗口提示"}
-                    screen = (await asyncio.to_thread(bridge.screen)).get("screen")
-                if screen == "hall" and not new_run:
-                    return {"ok": False, "code": "no_save", "error": "当前在出征大厅，需要确认开始新出征"}
+                    if result.get("ok"):
+                        screen = (await asyncio.to_thread(bridge.screen)).get("screen")
+                    else:
+                        self.push("log", {"level": "info", "msg": "没有可继续的存档，自动开始新出征"})
+                elif screen == "hall" and not new_run:
+                    # 战斗中没有落盘点，重启后回到大厅是常态：直接开新局，别停在原地等人点
+                    self.push("log", {"level": "info", "msg": "上次停在出征大厅，自动开始新出征"})
                 return self.start_dt()
             except BridgeError as error:
                 return {"ok": False, "error": str(error)}
+
+    async def ensure_game_and_dt(self) -> dict:
+        """定时开播前把游戏拉起来、代打开跑。
+
+        游戏起不来是真开不了播（没画面可采）；代打起不来只警告，直播照常——
+        模型没配好不该让观众看不到画面。
+        """
+        launched = False
+        if not await asyncio.to_thread(self._bridge_alive):
+            if not self.cfg.get("dtgame", {}).get("auto_launch", True):
+                return {"ok": False, "error": "定时开播未执行：游戏没在跑，且代打的自动启动是关的"}
+            res = await self.game.launch_and_wait(self._bridge_alive)
+            if not res.get("ok"):
+                return {"ok": False, "error": "定时开播未执行：游戏启动失败（%s）" % (res.get("error") or "")}
+            launched = True
+        r = await self.resume_dt()
+        if not r.get("ok") and not r.get("already"):
+            self.push("log", {"level": "warn", "msg": "代打没有自动开起来，先照常开播：" + str(r.get("error"))})
+        return {"ok": True, "launched": launched}
 
     async def shutdown(self):
         await self.schedule.close()
@@ -394,6 +428,10 @@ def build_web(app: App):
     async def overlay(_):
         return page("overlay.html")
 
+    @routes.get("/source")
+    async def source_page(_):
+        return page("source.html")
+
     @routes.get("/live2d")
     async def live2d_page(_):
         return page("live2d.html")
@@ -422,6 +460,38 @@ def build_web(app: App):
             exprs, motions, err = [], [], str(e)
         return web.json_response({"cfg": l2d, "expressions": exprs, "motions": motions, "error": err,
                                   "model_files": live2d.list_model_files(l2d["model_dir"])})
+
+    @routes.get("/api/l2d/library")
+    async def l2d_library(_):
+        l2d = app.cfg["live2d"]
+        cur = os.path.basename(os.path.normpath(l2d.get("model_dir") or ""))
+        return web.json_response({"root": live2d.LIBRARY_DIR, "models": live2d.list_library(), "current": cur})
+
+    @routes.post("/api/l2d/switch")
+    async def l2d_switch(request):
+        d = await request.json()
+        key = str(d.get("key") or "")
+        target = next((x for x in live2d.list_library() if x["key"] == key), None)
+        if not target:
+            return web.json_response({"ok": False, "error": "模型库中找不到：" + key}, status=404)
+        l2d = app.cfg["live2d"]
+        profiles = l2d.setdefault("profiles", {})
+        cur = os.path.basename(os.path.normpath(l2d.get("model_dir") or ""))
+        kept = ("model_file", "idle_motion", "emotions", "scale", "x", "y")
+        if cur:
+            profiles[cur] = {k: l2d.get(k) for k in kept}
+        # Expression and motion ids are model-specific, so each skin remembers its own set.
+        prof = profiles.get(key) or {}
+        l2d["model_dir"] = target["dir"]
+        l2d["model_file"] = target["model_file"]
+        l2d["idle_motion"] = prof.get("idle_motion", "")
+        l2d["emotions"] = prof.get("emotions", [])
+        for k in ("scale", "x", "y"):
+            if k in prof:
+                l2d[k] = prof[k]
+        config.save(app.cfg)
+        app.push("l2d_config", {})
+        return ok(key=key)
 
     @routes.post("/api/l2d/test")
     async def l2d_test(request):
@@ -529,7 +599,28 @@ def build_web(app: App):
 
     @routes.get("/api/broadcast/account")
     async def broadcast_account(_):
-        return web.json_response(await app.broadcast.account())
+        result = await app.broadcast.account()
+        app.room_cover_urls = [u for u in (result.get("cover"), result.get("cover_fallback")) if u]
+        return web.json_response(result)
+
+    @routes.get("/api/broadcast/room/cover.jpg")
+    async def broadcast_room_cover_image(_):
+        # B站封面链会失效或防盗链，这里由服务端带 Referer 代取，并回退到 keyframe。
+        headers = {"Referer": "https://live.bilibili.com/", "User-Agent": "Mozilla/5.0"}
+        async with ClientSession() as session:
+            for url in getattr(app, "room_cover_urls", []):
+                try:
+                    async with session.get(url, headers=headers, timeout=8) as r:
+                        if r.status != 200:
+                            continue
+                        data = await r.read()
+                        if not data:
+                            continue
+                        return web.Response(body=data, content_type=r.headers.get("Content-Type", "image/jpeg"),
+                                            headers={"Cache-Control": "max-age=60"})
+                except Exception:
+                    continue
+        return web.Response(status=404)
 
     @routes.get("/api/broadcast/areas")
     async def broadcast_areas(_):
@@ -582,16 +673,17 @@ def build_web(app: App):
             "Content-Type": "multipart/x-mixed-replace; boundary=frame",
             "Cache-Control": "no-store"})
         await response.prepare(request)
-        last = None
+        last_seq = 0
         try:
             while app.broadcast.capture.previewing:
-                data = app.broadcast.frame()
-                if data and data != last:
-                    header = ("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n"
-                              % len(data)).encode()
-                    await response.write(header + data + b"\r\n")
-                    last = data
-                await asyncio.sleep(1 / 30)
+                # 事件等待而不是轮询：30fps 生产 + 30fps 轮询会平均漏掉一半帧
+                got = await asyncio.to_thread(app.broadcast.capture.wait_jpeg, last_seq, 0.5)
+                if got is None:
+                    continue
+                last_seq, data = got
+                header = ("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n"
+                          % len(data)).encode()
+                await response.write(header + data + b"\r\n")
         except (asyncio.CancelledError, ConnectionResetError, RuntimeError):
             pass
         return response
@@ -611,6 +703,35 @@ def build_web(app: App):
     async def broadcast_preview_stop(_):
         return web.json_response(await app.broadcast.stop_preview())
 
+    @routes.post("/api/broadcast/source")
+    async def broadcast_source(request):
+        return web.json_response(await app.broadcast.start_source(await request.json()))
+
+    @routes.post("/api/broadcast/source/stop")
+    async def broadcast_source_stop(_):
+        return web.json_response(await app.broadcast.stop_source())
+
+    async def _auto_stop_after(seconds, line):
+        """开播计时到点：先让皮套把告别语说完，再停播。"""
+        try:
+            await asyncio.sleep(seconds)
+            if not app.broadcast.running:
+                return
+            if line:
+                job = app.pipe.say_job_id(line, "")
+                for _ in range(50):  # 最多再等 25 秒，避免 TTS 出错把停播卡住
+                    if app.pipe.spoken_done(job):
+                        break
+                    await asyncio.sleep(0.5)
+                await asyncio.sleep(1.2)
+            log.info("auto stop: 已播 %d 分钟，自动停播", seconds // 60)
+            app.push("notice", {"text": "已到设定时长，自动停播"})
+            await app.schedule.stop_now()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            log.exception("auto stop failed")
+
     @routes.post("/api/broadcast/start")
     async def broadcast_start(request):
         result = await app.broadcast.start(await request.json())
@@ -618,10 +739,21 @@ def build_web(app: App):
             app.cfg["room_id"] = result["room_id"]
             config.save(app.cfg)
             asyncio.create_task(app.connect())
+            minutes = int(app.cfg.get("broadcast", {}).get("auto_stop_minutes") or 0)
+            task = getattr(app, "auto_stop_task", None)
+            if task and not task.done():
+                task.cancel()
+            if minutes > 0:
+                line = (app.cfg.get("broadcast", {}).get("auto_stop_line") or "").strip()
+                app.auto_stop_task = asyncio.create_task(_auto_stop_after(minutes * 60, line))
+                log.info("auto stop armed: %d 分钟后停播", minutes)
         return web.json_response(result)
 
     @routes.post("/api/broadcast/stop")
     async def broadcast_stop(_):
+        task = getattr(app, "auto_stop_task", None)
+        if task and not task.done():
+            task.cancel()
         return web.json_response(await app.schedule.stop_now())
 
     @routes.post("/api/test_event")

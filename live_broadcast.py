@@ -1,12 +1,32 @@
 import asyncio
 import math
+import os
+import subprocess
+import sys
 import time
 
-from live_capture import CaptureError, WindowStreamCapture, sources
+from live_capture import (CaptureError, OUT_H, OUT_W, WindowStreamCapture,
+                          close_window, fit_borderless_client, sources)
 from live_overlay import Live2DOverlay, OverlayCompositor, OverlayError, find_edge
-from live_platform import BiliBroadcastPlatform, PlatformError
+from live_platform import (BiliBroadcastPlatform, FaceAuthRequiredError,
+                           PlatformError)
 
+# 皮套视口保持 720：默认布局只占画面高度 0.49，1080p 下叠上去是缩小而不是放大，
+# 而实测 1080 视口会把皮套从 21fps 拖到 13.5fps（每帧 PNG 大了 2.25 倍）。
 OVERLAY_BOX = 720
+# 源画面窗口：给直播姬「窗口采集」用的那个窗口，标题要独特、好认
+SOURCE_TITLE = "千音源画面"
+SOURCE_W, SOURCE_H = OUT_W, OUT_H
+SOURCE_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                             "tools", "source_window.py")
+_SOURCE_FIT_S = 6.0      # 等源画面窗口出现的最长时间
+
+
+def source_python() -> str:
+    """源画面窗口要 import webview，只有项目 .venv 那个解释器装了它。"""
+    venv = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        ".venv", "Scripts", "python.exe")
+    return venv if os.path.isfile(venv) else sys.executable
 
 
 class Broadcast:
@@ -21,6 +41,13 @@ class Broadcast:
         self.watch_task = None
         self.overlay: Live2DOverlay | None = None
         self.overlay_error = ""
+        self.source_proc = None
+        self.source_hwnd = 0
+        self.source_owns_preview = False
+
+    @property
+    def source_open(self) -> bool:
+        return bool(self.source_proc and self.source_proc.poll() is None)
 
     @property
     def running(self):
@@ -193,6 +220,17 @@ class Broadcast:
                 return {"ok": False, "error": "直播期间不能切换采集源，请先停止直播"}
             try:
                 hwnd, audio = self.selection(data)
+                if hwnd == self.source_hwnd:
+                    # 源画面窗口里放的就是这条采集链的输出，采它等于让自己喂自己，
+                    # WGC 在这种回环里会连崩带停整个服务。
+                    raise ValueError("「%s」窗口就是千音输出的画面，不能采集它自己" % SOURCE_TITLE)
+                if (self.capture.previewing and self.capture.hwnd == hwnd
+                        and self.capture.audio_device == audio):
+                    # 同一个窗口+设备重复点预览很常见（换皮套设置、界面重进都会点）。
+                    # 停掉正在用的 WGC 会话再重开，实测会把整个服务崩掉，没必要冒这个险。
+                    await self.prepare_overlay()
+                    self.phase, self.error = "preview", ""
+                    return {"ok": True, "already": True}
                 self.error = ""
                 if self.capture.previewing:
                     await asyncio.to_thread(self.capture.stop_preview)
@@ -216,10 +254,101 @@ class Broadcast:
             self.error = ""
             return {"ok": True}
 
+    async def start_source(self, data) -> dict:
+        """开一个「源画面」窗口：里面就是千音要播的完整画面（游戏+皮套+字幕）。
+
+        存在的理由：B站对网页/API 开播通道要人脸认证（60024），而直播姬那条通道不用。
+        所以这里不去伪造客户端绕认证，而是把画面做成一个普通窗口，让直播姬自己采集、
+        自己开播；千音只负责画面合成、配音和弹幕互动，完全不碰平台开播接口。
+        """
+        if self.running:
+            return {"ok": False, "error": "千音正在直播，不需要源画面窗口"}
+        was_previewing = bool(self.capture.previewing)
+        res = await self.preview(data)
+        if not res.get("ok"):
+            return res
+        if self.source_open:
+            return {"ok": True, "already": True, "title": SOURCE_TITLE}
+        port = int(self.app.cfg.get("web_port", 8787))
+        url = f"http://127.0.0.1:{port}/source?w={SOURCE_W}&h={SOURCE_H}"
+        # 窗口尺寸先按显示器缩放折算成逻辑像素，零头交给 fit_borderless_client 闭环补齐
+        scale = await asyncio.to_thread(self.capture.pixel_scale) or 1.0
+        cmd = [source_python(), SOURCE_SCRIPT, url, SOURCE_TITLE,
+               str(round(SOURCE_W / scale)), str(round(SOURCE_H / scale)), "60", "60"]
+        # 上一轮残留的同名窗口先记下：按 pid 认不出我们自己的窗口（子进程会 re-exec，
+        # 窗口归属在孙进程上），只能认「新出现的窗口」。
+        stale = {w["hwnd"] for w in (await asyncio.to_thread(sources)).get("windows", [])
+                 if w.get("title") == SOURCE_TITLE}
+        try:
+            self.source_proc = subprocess.Popen(
+                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        except OSError as error:
+            if not was_previewing:
+                await self.stop_preview()
+            return {"ok": False, "error": f"源画面窗口启动失败：{error}"}
+        self.source_owns_preview = not was_previewing
+        client = await self.fit_source_window(scale, stale)
+        if self.source_proc.poll() is not None or client == (0, 0):
+            err = "源画面窗口没能起来（多半是这台机器没有 WebView2 运行时）"
+            await self.stop_source()
+            self.app.push("log", {"level": "warn", "msg": err})
+            return {"ok": False, "error": err}
+        self.app.push("log", {"level": "info",
+                              "msg": f"源画面窗口已开启：在直播姬里添加「窗口采集」选择「{SOURCE_TITLE}」，"
+                                     f"音频选系统声音（游戏声和千音配音都从这里走）"})
+        if client != (SOURCE_W, SOURCE_H):
+            self.app.push("log", {"level": "warn",
+                                  "msg": f"源画面窗口客户区是 {client[0]}x{client[1]}，"
+                                         f"和输出 {SOURCE_W}x{SOURCE_H} 不一致，画面会被再缩放一次；"
+                                         f"直播姬里请把采集尺寸设为不缩放"})
+        return {"ok": True, "title": SOURCE_TITLE, "width": SOURCE_W, "height": SOURCE_H,
+                "client": list(client or [0, 0])}
+
+    async def fit_source_window(self, scale: float = 1.0, stale=()) -> tuple[int, int]:
+        """等源画面窗口出现，把客户区精确调到输出尺寸，让直播姬采到的每个像素都是原生像素。
+
+        窗口只能按逻辑像素设，所以设的是 SOURCE_W/scale，回报给界面时再乘回缩放。
+        `stale` 是开窗口前就在屏幕上的同名窗口（上一轮服务崩掉留下的），那些不归我们管。
+        """
+        target = (max(2, round(SOURCE_W / scale)), max(2, round(SOURCE_H / scale)))
+        got = (0, 0)
+        deadline = time.monotonic() + _SOURCE_FIT_S
+        while True:
+            for w in (await asyncio.to_thread(sources)).get("windows", []):
+                if w.get("title") != SOURCE_TITLE or w["hwnd"] in stale:
+                    continue
+                got = await asyncio.to_thread(fit_borderless_client, w["hwnd"], *target)
+                self.source_hwnd = w["hwnd"]
+                return (round(got[0] * scale), round(got[1] * scale))
+            if time.monotonic() >= deadline:
+                return got
+            await asyncio.sleep(0.25)
+
+    async def stop_source(self) -> dict:
+        proc, self.source_proc = self.source_proc, None
+        hwnd, self.source_hwnd = self.source_hwnd, 0
+        if proc and proc.poll() is None:
+            try:
+                proc.terminate()
+                await asyncio.to_thread(proc.wait, 5)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+        if hwnd:
+            # 那个进程会 re-exec，terminate 只杀得到外壳，窗口得自己关一次
+            await asyncio.to_thread(close_window, hwnd)
+        owns, self.source_owns_preview = self.source_owns_preview, False
+        return await self.stop_preview() if owns else {"ok": True}
+
     async def start(self, data):
         async with self.lock:
             if self.running:
                 return {"ok": False, "error": "千音已经在直播，请勿重复开播"}
+            if self.source_open:
+                return {"ok": False, "error": "源画面窗口还开着（直播姬在用），请先点「关闭源画面」再用千音开播"}
             try:
                 hwnd, audio = self.selection(data)
                 if data.get("confirm") is not True:
@@ -250,6 +379,8 @@ class Broadcast:
                 return {"ok": True, "room_id": result["room_id"]}
             except (PlatformError, CaptureError, OverlayError, ValueError, OSError) as error:
                 self.error = str(error)
+                # 开播失败只弹在界面上，事后查不到；写进日志才能看清 B站到底回了什么
+                self.app.push("log", {"level": "warn", "msg": f"开播失败：{self.error}"})
                 await asyncio.to_thread(self.capture.stop_output)
                 if self.platform and self.platform.started_room_id:
                     try:
@@ -296,6 +427,7 @@ class Broadcast:
 
     async def close(self):
         result = await self.stop()
+        await self.stop_source()
         await asyncio.to_thread(self.capture.stop_preview)
         await asyncio.to_thread(self.stop_overlay)
         return result
@@ -312,7 +444,8 @@ class Broadcast:
         ready = bool(enabled and not overlay_error and getattr(self.capture, "compositor", None) and
                      overlay and overlay.frame() is not None)
         return {**state, "phase": self.phase, "error": self.error or state.get("error", ""),
-                "running": self.running, "overlay": ready,
+                "running": self.running, "overlay": ready, "source": self.source_open,
+                "source_title": SOURCE_TITLE if self.source_open else "",
                 "overlay_error": overlay_error,
                 "seconds": time.monotonic() - self.started_at if self.running and self.started_at else 0}
 

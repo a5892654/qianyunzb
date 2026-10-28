@@ -7,7 +7,10 @@ const {chromium} = require('playwright');
 
 const root = path.resolve(__dirname, '..');
 const cfg = JSON.parse(execFileSync(path.join(root, '.venv/Scripts/python.exe'), ['-c', 'import config,json; print(json.dumps(config.DEFAULTS))'], {cwd: root, encoding: 'utf8'}));
-Object.assign(cfg.live2d, {enabled: true, model_file: 'fixture.model3.json'});
+Object.assign(cfg.live2d, {enabled: true, model_file: 'fixture.model3.json', emotions: [
+  {name: '生气', expressions: [], motion: '', keywords: ''},
+  {name: '开心', expressions: ['stars'], motion: 'nod', keywords: ''},
+]});
 let previewing = false;
 const requests = [], errors = [];
 function merge(a, b) {
@@ -34,7 +37,7 @@ function merge(a, b) {
       if (url.pathname === '/api/config') {
         if (body) { assert.equal(req.headers()['x-bvb'], '1'); merge(cfg, body); response = {ok: true}; }
         else response = cfg;
-      } else if (url.pathname === '/api/l2d/info') response = {cfg: cfg.live2d, expressions: [], motions: [], model_files: [cfg.live2d.model_file]};
+      } else if (url.pathname === '/api/l2d/info') response = {cfg: cfg.live2d, expressions: [{id: 'stars', label: '星星眼'}], motions: [{id: 'nod', label: '点头'}], model_files: [cfg.live2d.model_file]};
       else if (url.pathname === '/api/tts/weights') response = {gpt: [], sovits: []};
       else if (url.pathname === '/api/audio/devices') response = [];
       else if (url.pathname === '/api/songs/state') response = {current: null, queue: [], credits: []};
@@ -49,6 +52,19 @@ function merge(a, b) {
     });
     await page.goto('http://127.0.0.1:18787/');
     await page.waitForFunction(() => document.querySelector('#l2dModelFile').options.length === 1);
+    await page.click('nav [data-tab="l2d"]');
+    for (const [index, emotion] of cfg.live2d.emotions.entries()) {
+      const sent = page.waitForRequest(req => req.url().endsWith('/api/l2d/test'));
+      await page.click(`[data-etest="${index}"]`);
+      assert.deepEqual((await sent).postDataJSON(), {emotion: emotion.name, expressions: emotion.expressions, motion: emotion.motion, text: `（${emotion.name}）`});
+    }
+    for (const [selector, expected] of [['[data-texpr="stars"]', {expressions: ['stars']}], ['[data-tmotion="nod"]', {motion: 'nod'}]]) {
+      const sent = page.waitForRequest(req => req.url().endsWith('/api/l2d/test'));
+      await page.click(selector);
+      assert.deepEqual((await sent).postDataJSON(), expected);
+    }
+    console.log('PASS emotion preview sends the name; raw expression and motion previews stay independent');
+    await page.click('nav [data-tab="broadcast"]');
     await page.click('#broadcastPreview');
     await page.waitForFunction(() => !!document.querySelector('#broadcastPreviewImage').getAttribute('src'));
     assert.ok(await page.locator('#overlayState').textContent().then(text => text.includes('正在叠加')));

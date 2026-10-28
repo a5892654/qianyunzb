@@ -126,7 +126,9 @@ def _fmt_battle(b: dict, run: dict) -> list[str]:
         for k, v in (e.get("debuffs") or {}).items():
             tags.append(f"{k}-{v}")
         tag_txt = f" [{', '.join(tags)}]" if tags else ""
-        out.append(f"  [{i}] {e.get('name')} {e.get('hp')}/{e.get('max_hp')}{tag_txt} 意图: {intent_txt}")
+        hide = "" if e.get("targetable", True) else (
+            " ✕不可选中(已阵亡)" if not e.get("alive", True) else " ✕不可选中(隐匿)")
+        out.append(f"  [{i}] {e.get('name')} {e.get('hp')}/{e.get('max_hp')}{tag_txt}{hide} 意图: {intent_txt}")
     out.append("手牌:")
     if not b.get("hand"):
         out.append("  （空）")

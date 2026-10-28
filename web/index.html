@@ -206,7 +206,12 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
     <div class="row"><label class="f">直播标题<input id="broadcastTitle" maxlength="60" data-k="broadcast.title"></label><label class="f">直播分区<select id="broadcastArea" data-k="broadcast.area_id"><option value="0">请选择直播分区</option></select></label></div>
     <div class="row"><label class="f">要直播的游戏窗口<select id="broadcastWindow"><option value="">请先启动游戏，再刷新窗口</option></select></label><button class="btn" id="broadcastLaunchGame" style="margin-top:18px">启动游戏</button><button class="btn" id="broadcastRefreshSources" style="margin-top:18px">刷新窗口</button></div>
     <div class="row"><label class="f">声音输出设备<select id="broadcastAudio"><option value="">系统默认输出</option></select></label><button class="btn b" id="broadcastPreview" style="margin-top:18px">预览画面和声音</button><button class="btn" id="broadcastPreviewStop" style="margin-top:18px">停止预览</button></div>
-    <div class="hint">只采集选中的窗口，不采集整个桌面。声音采集所选输出设备的游戏和千音配音，也会包含该设备的其他声音；直播前请关闭通知。画质：720p / 30帧。</div>
+    <div class="row">
+      <label class="f" style="max-width:220px">播多久自动停播（分钟，0=不限）<input type="number" min="0" step="5" data-k="broadcast.auto_stop_minutes"></label>
+      <label class="f">停播前说的话<input data-k="broadcast.auto_stop_line" maxlength="120"></label>
+    </div>
+    <div class="hint">到点后皮套会先把上面这句话说完，再自动停播（从点击「开始直播」算起）。</div>
+    <div class="hint">只采集选中的窗口，不采集整个桌面。声音采集所选输出设备的游戏和千音配音，也会包含该设备的其他声音；直播前请关闭通知。画质：1080p / 30帧。</div>
   </div>
   <div class="card">
     <h3>皮套上镜</h3>
@@ -219,11 +224,28 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
     <p class="hint">预览画面就是观众看到的画面，包含已启用的 Live2D 皮套。位置和大小可在「画面调整」中实时修改，自动保存。</p>
   </div>
   <div class="card">
+    <h3>用直播姬开播（千音出画面）</h3>
+    <p class="hint">B站对千音这条网页开播通道要求人脸认证，直播姬那条通道不用。这个模式<b>不碰 B站开播接口</b>：千音把「游戏画面 + 皮套 + 字幕」合成好开成一个窗口，直播姬直接采集它，开播由直播姬点。</p>
+    <div class="row">
+      <button class="btn b" id="srcStart">开启源画面</button>
+      <button class="btn" id="srcStop">关闭源画面</button>
+      <span class="hint" id="srcState">未开启</span>
+    </div>
+    <ol class="hint" style="margin:10px 0 0 18px;line-height:1.9">
+      <li>先在上方选好游戏窗口和声音输出设备，再点「开启源画面」。</li>
+      <li>直播姬 → 添加素材 → <b>窗口采集</b> → 选「<b>千音源画面</b>」；采到黑屏就把采集方式换成 WGC。</li>
+      <li>直播姬的画布/直播设置改成 <b>1920×1080</b>，和源画面窗口一样大；缩放选「适配」，别选「拉伸填满」，否则画面会再糊一次。</li>
+      <li>直播姬的音频选<b>系统声音</b>：游戏声和千音的配音都从这台输出设备走，不用再单独加。</li>
+      <li>在直播姬点「开始直播」。这时千音的「开始直播」会被挡住，避免重复推流。</li>
+      <li>源画面窗口<b>没有标题条</b>（留着会被直播姬一起播进画面），要关它在千音里点「关闭源画面」。</li>
+    </ol>
+  </div>
+  <div class="card">
     <h3>直播间资料</h3>
     <div class="row" style="align-items:flex-start;gap:18px">
       <div style="width:280px;flex:none">
         <div class="hint" style="margin-bottom:6px">当前封面</div>
-        <img id="roomCoverPreview" alt="直播间封面" referrerpolicy="no-referrer" style="display:none;width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:8px;background:#000">
+        <img id="roomCoverPreview" alt="直播间封面" referrerpolicy="no-referrer" onerror="this.style.display='none';var e=document.querySelector('#roomCoverEmpty');e.style.display='';e.textContent='当前封面加载失败（B站图链已失效），重新上传一张即可';" style="display:none;width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:8px;background:#000">
         <div id="roomCoverEmpty" class="hint" style="padding:36px 0;text-align:center;border:1px dashed var(--line);border-radius:8px">登录后可查看当前封面</div>
       </div>
       <div style="flex:1;min-width:220px">
@@ -553,6 +575,10 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
   <div class="card">
     <h3>模型</h3>
     <div class="row">
+      <label class="f" style="max-width:260px">模型库（一键切换）<select id="l2dLib"></select></label>
+      <span class="hint" style="align-self:flex-end;padding-bottom:6px">切换时会把当前皮套的位置/大小/表情先记住</span>
+    </div>
+    <div class="row">
       <label class="f">模型文件夹<input data-k="live2d.model_dir"></label>
       <span class="btn" data-pick="live2d.model_dir" data-kind="dir" style="margin-top:18px">浏览…</span>
       <label class="f" style="max-width:260px">模型文件 (.model3.json)<select data-k="live2d.model_file" id="l2dModelFile"></select></label>
@@ -827,10 +853,7 @@ async function dtAction(fn) {
 }
 $('#dtStart').onclick = () => dtAction(async () => {
   $('#dtHint').textContent = '正在启动游戏并恢复存档…';
-  let r = await api('/api/dtgame/resume', {new_run: false});
-  if (!r.ok && r.code === 'no_save' && confirm(r.error + '。是否开始新出征？')) {
-    r = await api('/api/dtgame/resume', {new_run: true});
-  }
+  const r = await api('/api/dtgame/resume', {new_run: false});
   if (!r.ok) throw new Error(r.error || '代打启动失败');
   toast(r.already ? '代打已经在运行' : '已启动代打，等待语音就绪');
 });
@@ -924,8 +947,22 @@ async function loadL2d() {
   $('#l2dBase').innerHTML = L2D.expressions.map(e => `<label class="c"><input type="checkbox" data-base="${esc(e.id)}" ${base.includes(e.id) ? 'checked' : ''}>${esc(e.label)}</label>`).join('') || '<span class="hint">（没有找到表情文件）</span>';
   $('#l2dExprBtns').innerHTML = L2D.expressions.map(e => `<span class="btn sm" data-texpr="${esc(e.id)}">${esc(e.label)}</span>`).join('');
   $('#l2dMotionBtns').innerHTML = L2D.motions.map(m => `<span class="btn sm" data-tmotion="${esc(m.id)}">${esc(m.label)}</span>`).join('') || '<span class="hint">（无）</span>';
+  try {
+    const lib = await api('/api/l2d/library');
+    const cur = lib.current || '';
+    $('#l2dLib').innerHTML = lib.models.map(m => `<option value="${esc(m.key)}" ${m.key === cur ? 'selected' : ''}>${esc(m.key)}</option>`).join('') || '<option value="">（模型库为空）</option>';
+  } catch (e) { $('#l2dLib').innerHTML = '<option value="">（模型库读取失败）</option>'; }
   renderEmotions(); renderFixed(); fillForm();
 }
+$('#l2dLib').onchange = async (e) => {
+  const key = e.target.value;
+  if (!key) return;
+  const r = await api('/api/l2d/switch', {key});
+  if (r && r.ok === false) { toast(r.error || '切换失败'); return; }
+  toast('已切换到 ' + key);
+  await loadConfig();
+  await loadL2d();
+};
 function renderEmotions() {
   const emos = CFG.live2d.emotions || [];
   const exprIds = L2D.expressions.map(e => `<option value="${esc(e.id)}">${esc(e.label)}</option>`).join('');
@@ -973,7 +1010,7 @@ document.addEventListener('click', e => {
   const d = e.target.dataset || {};
   if (d.texpr) api('/api/l2d/test', {expressions: [d.texpr]});
   else if (d.tmotion) api('/api/l2d/test', {motion: d.tmotion});
-  else if (d.etest !== undefined) { const em = collectEmotions()[+d.etest]; api('/api/l2d/test', {expressions: em.expressions, motion: em.motion, text: `（${em.name}）`}); }
+  else if (d.etest !== undefined) { const em = collectEmotions()[+d.etest]; api('/api/l2d/test', {emotion: em.name, expressions: em.expressions, motion: em.motion, text: `（${em.name}）`}); }
   else if (d.edel !== undefined) { const l = collectEmotions(); l.splice(+d.edel, 1); saveEmotions(l); }
   else if (d.fdel !== undefined) { const l = collectFixed(); l.splice(+d.fdel, 1); saveNow({fixed_replies: l}).then(renderFixed); }
   else if (d.copy) { navigator.clipboard.writeText($(d.copy).value); toast('已复制'); }
@@ -1126,10 +1163,10 @@ $('#broadcastLogin').onclick = () => { broadcastLoginRequested = true; document.
 async function refreshBroadcastAccount() {
   const r = await api('/api/broadcast/account');
   broadcastAccount = r;
-  const cover = r.cover || '';
+  const cover = r.cover || r.cover_fallback || '';
   $('#roomCoverPreview').style.display = cover ? '' : 'none';
   $('#roomCoverEmpty').style.display = cover ? 'none' : '';
-  $('#roomCoverPreview').src = cover;
+  $('#roomCoverPreview').src = cover ? ('/api/broadcast/room/cover.jpg?t=' + Date.now()) : '';
   $('#roomCoverEmpty').textContent = r.logged_in ? (r.room_id ? '还没有设置直播间封面' : '请先开通直播间') : '登录后可查看当前封面';
   if (r.notice !== undefined && document.activeElement !== $('#roomNotice')) $('#roomNotice').value = r.notice || '';
   $('#roomNoticeCount').textContent = $('#roomNotice').value.length + '/60';
@@ -1246,6 +1283,19 @@ $('#broadcastPreview').onclick = () => broadcastAction(async () => {
   } finally { $('#broadcastPreview').textContent = '预览画面和声音'; }
 });
 $('#broadcastPreviewStop').onclick = () => broadcastAction(async () => { const r = await api('/api/broadcast/preview/stop', {}); if (!r.ok) throw new Error(r.error); });
+$('#srcStart').onclick = () => broadcastAction(async () => {
+  const selection = broadcastSelection();
+  if (!selection.hwnd) throw new Error('请先选择要直播的游戏窗口');
+  $('#srcState').textContent = '正在开启源画面…';
+  const r = await api('/api/broadcast/source', selection);
+  if (!r.ok) throw new Error(r.error);
+  toast('源画面已开启：去直播姬添加「窗口采集」，选「千音源画面」');
+});
+$('#srcStop').onclick = () => broadcastAction(async () => {
+  const r = await api('/api/broadcast/source/stop', {});
+  if (!r.ok) throw new Error(r.error);
+  toast('源画面已关闭');
+});
 $('#broadcastStart').onclick = () => broadcastAction(async () => {
   await flushConfig();
   if (!confirm(`以 ${broadcastAccount?.name || '当前账号'} 公开开播？观众将看到预览画面并听到所选设备声音。`)) return;
@@ -1272,6 +1322,12 @@ async function pollBroadcast() {
     $('#broadcastPreviewImage').style.display = show ? '' : 'none'; $('#broadcastPreviewEmpty').style.display = show ? 'none' : '';
     $('#overlayState').textContent = broadcastInfo.overlay ? '皮套正在叠加' : (broadcastInfo.overlay_error || (!CFG.live2d?.enabled ? '请先选择并启用 Live2D 模型' : !CFG.live2d?.overlay_in_broadcast ? '皮套叠加已关闭' : '预览或开播后叠加'));
     $('#overlayState').style.color = broadcastInfo.overlay_error ? 'var(--red)' : '';
+    $('#srcState').textContent = broadcastInfo.source
+      ? '已开启：直播姬「窗口采集」选「' + (broadcastInfo.source_title || '千音源画面') + '」'
+      : (broadcastInfo.running ? '直播中不需要源画面' : '未开启');
+    $('#srcState').style.color = broadcastInfo.source ? 'var(--pink, #fb7299)' : '';
+    $('#srcStart').disabled = broadcastBusy || !!broadcastInfo.source || !!broadcastInfo.running;
+    $('#srcStop').disabled = broadcastBusy || !broadcastInfo.source;
     syncPreviewStream(show);
     renderLayout();
     updateBroadcastButtons();

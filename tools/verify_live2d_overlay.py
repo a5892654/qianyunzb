@@ -18,7 +18,7 @@ import numpy as np
 from aiohttp import web
 
 from live_broadcast import Broadcast
-from live_capture import OUT_H, OUT_W, WindowStreamCapture
+from live_capture import FPS, OUT_H, OUT_W, WindowStreamCapture
 from live_overlay import Live2DOverlay, OverlayCompositor, OverlayError, _decode_png, find_edge
 
 
@@ -132,6 +132,97 @@ class CompositorTests(unittest.TestCase):
         finally:
             capture._audio_stop.set()
             worker.join(3)
+
+
+    def test_pixel_scale_comes_from_the_frame(self):
+        """显示器缩放只能靠「采集帧是物理像素、窗口尺寸是逻辑像素」这一对比推出来：
+        进程一旦开 DPI 感知，WGC 采浏览器窗口就会在 ntdll 里访问违例崩掉整个服务。"""
+        import live_capture
+        cap = WindowStreamCapture()
+        cap.hwnd = int(live_capture._user32.GetDesktopWindow())
+        cw, ch = live_capture.client_size(cap.hwnd)
+        self.assertGreater(cw, 100)
+        cap._raw_size = (cw * 2, ch * 2)
+        self.assertAlmostEqual(cap.pixel_scale(), 2.0, places=2)
+        cap._raw_size = None
+        self.assertEqual(cap.pixel_scale(), 1.0)
+
+    def test_upscale_does_not_use_area(self):
+        """采集窗口比输出小就是放大：cv2.INTER_AREA 放大等同最近邻，渐变会断成硬色块。
+        旧写法不分上下采样一律用 AREA，8x8 灰阶放大到 1080p 后只剩 8 个色阶。"""
+        capture = WindowStreamCapture()
+        ramp = np.linspace(0, 255, 8).astype(np.uint8)
+        gray = np.broadcast_to(ramp[None, :, None], (8, 8, 1)).copy()
+        capture._on_frame(SimpleNamespace(
+            frame_buffer=np.dstack([gray, gray, gray, np.full((8, 8, 1), 255, np.uint8)])))
+        canvas = capture._source_frame
+        self.assertEqual(canvas.shape[:2], (OUT_H, OUT_W))
+        self.assertGreater(len(np.unique(canvas[..., 0])), 40,
+                           "放大用了最近邻，画面边缘会出硬块")
+
+    def test_1080p_output_size(self):
+        """直播姬画布默认 1920x1080；采集只出 720p 会被它再放大一次，观众看到的就是一层糊。"""
+        self.assertEqual((OUT_W, OUT_H, FPS), (1920, 1080, 30))
+
+
+    def test_preview_pacing_keeps_capture_fps(self):
+        """预览必须按采集帧率出帧。旧写法是「先睡 33ms 再干活」，编码耗时被加到周期上，
+        实测掉到 ~16fps；这里塞 8ms 假耗时，旧写法只能出 ~24 帧，新写法贴着 30 帧。
+
+        这是计时断言，机器被直播本身占满时会一起变慢，所以先量一次零耗时基线，
+        基线不到 26 帧就跳过而不是报失败。"""
+        capture = WindowStreamCapture()
+        capture.compositor = self.compositor
+        real_compose = capture._compose_frame
+        frames_src = [np.full((OUT_H, OUT_W, 4), v, np.uint8) for v in (70, 180)]
+
+        def run(cost):
+            def slow(source):
+                if cost:
+                    time.sleep(cost)
+                real_compose(source)
+
+            capture._compose_frame = slow
+            capture.previewing = True
+            stop = threading.Event()
+
+            def feed():
+                i = 0
+                while not stop.is_set():
+                    i += 1
+                    with capture._lock:
+                        capture._source_frame = frames_src[i & 1]   # 预分配，别把测试自己的分配耗时算进去
+                    time.sleep(0.002)
+
+            feeder = threading.Thread(target=feed, daemon=True)
+            worker = threading.Thread(target=capture._jpeg_worker, daemon=True)
+            feeder.start()
+            time.sleep(0.05)
+            started, seq, frames = time.monotonic(), 0, 0
+            worker.start()
+            while time.monotonic() - started < 1.0:
+                got = capture.wait_jpeg(seq, 0.2)
+                if got is None:
+                    continue
+                seq, frames = got[0], frames + 1
+            stop.set()
+            worker.join(2)
+            feeder.join(2)
+            capture.previewing = False
+            return frames
+
+        baseline = run(0)
+        if baseline < 26:
+            self.skipTest("机器正忙：零耗时基线只有 %d 帧/秒，节奏断言不可信" % baseline)
+        frames = run(0.008)
+        self.assertGreaterEqual(frames, 24, "加 8ms 耗时后 1 秒只出了 %d 帧，预览周期把耗时累加了" % frames)
+        self.assertLessEqual(frames, 34, "出帧 %d 超过采集帧率上限" % frames)
+
+    def test_wait_jpeg_releases_lock_and_times_out(self):
+        capture = WindowStreamCapture()
+        self.assertIsNone(capture.wait_jpeg(0, 0.08))     # 没帧时超时返回，不卡住
+        capture._audio_stop.set()
+        self.assertIsNone(capture.wait_jpeg(0, 2.0))      # 停止时立刻返回，不等满超时
 
 
 class LifecycleTests(unittest.IsolatedAsyncioTestCase):

@@ -130,6 +130,8 @@ DEFAULTS = {
     "overlay": {"seconds": 8},
     "broadcast": {
         "title": "恶魔之塔 ZERO｜AI 游戏直播", "area_id": 283,
+        "auto_stop_minutes": 0,
+        "auto_stop_line": "下了下了，吃白饭去了，拜拜～",
         "schedule": {"enabled": False, "start_time": "20:00", "stop_time": "23:00",
                      "window_title": "", "audio_name": "", "last_start": "", "last_stop": ""},
     },
