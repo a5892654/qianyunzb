@@ -231,11 +231,12 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
       <button class="btn" id="srcStop">关闭源画面</button>
       <span class="hint" id="srcState">未开启</span>
     </div>
+    <div class="hint" id="srcHealth" aria-live="polite"></div>
     <ol class="hint" style="margin:10px 0 0 18px;line-height:1.9">
       <li>先在上方选好游戏窗口和声音输出设备，再点「开启源画面」。</li>
       <li>直播姬 → 添加素材 → <b>窗口采集</b> → 选「<b>千音源画面</b>」；采到黑屏就把采集方式换成 WGC。</li>
       <li>直播姬的画布/直播设置改成 <b>1920×1080</b>，和源画面窗口一样大；缩放选「适配」，别选「拉伸填满」，否则画面会再糊一次。</li>
-      <li>直播姬的音频选<b>系统声音</b>：游戏声和千音的配音都从这台输出设备走，不用再单独加。</li>
+      <li>直播姬的音频选<b>系统声音</b>，只采一次：源画面窗口本身无声，游戏声和千音配音由系统声音采集；不要再对这两个进程重复采音。</li>
       <li>在直播姬点「开始直播」。这时千音的「开始直播」会被挡住，避免重复推流。</li>
       <li>源画面窗口<b>没有标题条</b>（留着会被直播姬一起播进画面），要关它在千音里点「关闭源画面」。</li>
     </ol>
@@ -1326,6 +1327,14 @@ async function pollBroadcast() {
       ? '已开启：直播姬「窗口采集」选「' + (broadcastInfo.source_title || '千音源画面') + '」'
       : (broadcastInfo.running ? '直播中不需要源画面' : '未开启');
     $('#srcState').style.color = broadcastInfo.source ? 'var(--pink, #fb7299)' : '';
+    const health = $('#srcHealth'), raw = broadcastInfo.capture_size || [];
+    const measured = broadcastInfo.previewing && Number.isFinite(broadcastInfo.render_fps);
+    health.textContent = measured
+      ? `游戏更新 ${broadcastInfo.capture_fps} · 源画面处理 ${broadcastInfo.render_fps} / ${broadcastInfo.fps} 帧/秒 · 平均处理 ${broadcastInfo.frame_process_ms} 毫秒`
+        + (raw.length === 2 ? ` · 原始采集 ${raw[0]}×${raw[1]}` : '')
+        + (broadcastInfo.capture_age_ms > 2000 ? ` · 游戏已 ${(broadcastInfo.capture_age_ms / 1000).toFixed(1)} 秒未刷新（静止画面时正常）` : '')
+      : '';
+    health.style.color = measured && broadcastInfo.frame_process_ms > 1000 / broadcastInfo.fps ? 'var(--red)' : '';
     $('#srcStart').disabled = broadcastBusy || !!broadcastInfo.source || !!broadcastInfo.running;
     $('#srcStop').disabled = broadcastBusy || !broadcastInfo.source;
     syncPreviewStream(show);

@@ -228,13 +228,18 @@ class Brain:
             emotion = ""
         return clean_reply(raw, int(cfg_ai.get("max_chars", 40))), emotion
 
-    async def reply(self, cfg, ev_cfg, ev):
+    async def reply(self, cfg, ev_cfg, ev, context=""):
         """返回 (文本, 来源, 表情)。AI 失败时自动退回模板。"""
         lines = [l.strip() for l in ev_cfg.get("templates", "").splitlines() if l.strip()]
         template_text = fill(random.choice(lines), ev) if lines else ""
         if ev_cfg.get("mode") == "ai":
             try:
-                text, emotion = await self.ai(cfg, fill(ev_cfg.get("ai_prompt", ""), ev))
+                prompt = fill(ev_cfg.get("ai_prompt", ""), ev)
+                if context:
+                    prompt += ("\n\n【当前直播游戏上下文，仅供参考】\n" + context
+                               + "\n你就是正在打这局游戏的主播。优先回应上面的观众留言；"
+                               "聊到游戏时结合当前局势，普通闲聊就自然接话，不要只继续解说游戏。")
+                text, emotion = await self.ai(cfg, prompt)
                 if text:
                     if ev["type"] == "danmaku" and ev_cfg.get("read_original"):
                         text = f"{ev['name']}说：{ev['text']}。{text}"

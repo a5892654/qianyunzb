@@ -133,6 +133,61 @@ class CompositorTests(unittest.TestCase):
             capture._audio_stop.set()
             worker.join(3)
 
+    def test_changed_pixels_with_same_thumbnail_are_not_dropped(self):
+        """同一个 120x120 块内交换两种颜色，16x9 缩略图完全相同，实际画面已经变了。"""
+        first = np.full((OUT_H, OUT_W, 4), 80, np.uint8)
+        first[..., 3] = 255
+        first[:120, :60, :3] = (0, 0, 255)
+        first[:120, 60:120, :3] = (255, 0, 0)
+        second = first.copy()
+        second[:120, :60, :3] = (255, 0, 0)
+        second[:120, 60:120, :3] = (0, 0, 255)
+        np.testing.assert_array_equal(
+            cv2.resize(first, (16, 9), interpolation=cv2.INTER_AREA),
+            cv2.resize(second, (16, 9), interpolation=cv2.INTER_AREA))
+        capture = WindowStreamCapture()
+        capture._on_frame(SimpleNamespace(frame_buffer=first))
+        capture.previewing = True
+        worker = threading.Thread(target=capture._jpeg_worker)
+        worker.start()
+        try:
+            initial = capture.wait_jpeg(0, 2)
+            self.assertIsNotNone(initial)
+            capture._on_frame(SimpleNamespace(frame_buffer=second))
+            changed = capture.wait_jpeg(initial[0], 1)
+            self.assertIsNotNone(changed, '局部变化被低清指纹吞掉，观众会看到停帧')
+            self.assertNotEqual(changed[1], initial[1])
+            image = cv2.imdecode(np.frombuffer(changed[1], np.uint8), cv2.IMREAD_COLOR)
+            np.testing.assert_allclose(image[30, 30], (255, 0, 0), atol=8)
+        finally:
+            capture._audio_stop.set()
+            worker.join(3)
+
+    def test_capture_owns_buffer_at_native_size_and_after_scaling(self):
+        for width, height in ((OUT_W, OUT_H), (640, 360), (2560, 1440)):
+            capture = WindowStreamCapture()
+            source = np.full((height, width, 4), 80, np.uint8)
+            capture._on_frame(SimpleNamespace(frame_buffer=source))
+            source.fill(0)  # WGC 回调返回后会复用原缓冲区。
+            self.assertTrue(np.all(capture._source_frame == 80))
+
+    def test_health_uses_measured_frames_and_decays_after_stall(self):
+        capture = WindowStreamCapture()
+        blank = capture.snapshot()
+        self.assertEqual(blank['render_fps'], 0)
+        self.assertIsNone(blank['capture_age_ms'])
+        capture._on_frame(SimpleNamespace(frame_buffer=np.full((OUT_H, OUT_W, 4), 80, np.uint8)))
+        capture._compose_frame(capture._source_frame)
+        time.sleep(0.04)
+        capture._compose_frame(capture._source_frame)
+        state = capture.snapshot()
+        self.assertGreater(state['render_fps'], 10)
+        self.assertEqual(state['capture_size'], [OUT_W, OUT_H])
+        with patch('live_capture.time.monotonic', return_value=time.monotonic() + 4):
+            stalled = capture.snapshot()
+        self.assertEqual(stalled['render_fps'], 0)
+        self.assertGreater(stalled['capture_age_ms'], 4000)
+
 
     def test_pixel_scale_comes_from_the_frame(self):
         """显示器缩放只能靠「采集帧是物理像素、窗口尺寸是逻辑像素」这一对比推出来：
@@ -177,13 +232,17 @@ class CompositorTests(unittest.TestCase):
         frames_src = [np.full((OUT_H, OUT_W, 4), v, np.uint8) for v in (70, 180)]
 
         def run(cost):
+            rendered = [0]
+
             def slow(source):
                 if cost:
                     time.sleep(cost)
                 real_compose(source)
+                rendered[0] += 1
 
             capture._compose_frame = slow
             capture.previewing = True
+            capture._audio_stop.clear()
             stop = threading.Event()
 
             def feed():
@@ -198,18 +257,18 @@ class CompositorTests(unittest.TestCase):
             worker = threading.Thread(target=capture._jpeg_worker, daemon=True)
             feeder.start()
             time.sleep(0.05)
-            started, seq, frames = time.monotonic(), 0, 0
+            started = time.monotonic()
             worker.start()
             while time.monotonic() - started < 1.0:
-                got = capture.wait_jpeg(seq, 0.2)
-                if got is None:
-                    continue
-                seq, frames = got[0], frames + 1
+                time.sleep(0.01)
             stop.set()
+            capture._audio_stop.set()
             worker.join(2)
             feeder.join(2)
             capture.previewing = False
-            return frames
+            # 相同画面允许不重复发 JPEG；节奏验证计合成次数，避免两种颜色快速
+            # 交替时采样混叠，把正常的重复帧优化误判成机器忙而跳过测试。
+            return rendered[0]
 
         baseline = run(0)
         if baseline < 26:

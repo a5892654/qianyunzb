@@ -6,6 +6,7 @@ WS_CAPTION 去掉它照样画），而窗口采集（WGC）采的是整个窗口
 
 运行：.venv\Scripts\python.exe tools\source_window.py <url> <标题> <宽> <高> <x> <y>
 """
+import os
 import sys
 
 
@@ -15,6 +16,15 @@ def main(argv):
         return 2
     url, title = argv[1], argv[2]
     w, h, x, y = (int(v) for v in argv[3:7])
+    # 此窗口经常被游戏挡住，但直播姬仍在采集它。只为本进程禁用浏览器的后台
+    # 降速，避免观众看到降帧；保留调用方已有的 WebView2 参数。
+    key = "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"
+    args = os.environ.get(key, "")
+    for flag in ("--disable-background-timer-throttling",
+                 "--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding"):
+        if flag not in args.split():
+            args = (args + " " + flag).strip()
+    os.environ[key] = args
     import webview
     webview.create_window(title, url, width=w, height=h, x=x, y=y,
                           frameless=True, resizable=False, on_top=False,
