@@ -9,6 +9,7 @@ import numpy as np
 
 from brain import fill
 from tts import ENV_FPS, envelope
+from tts import decode_audio_file
 
 log = logging.getLogger("pipe")
 
@@ -137,6 +138,9 @@ class Pipeline:
         return ""
 
     def on_event(self, ev):
+        if ev["type"] == "wishlist":
+            self.app.wishlist.on_event(ev)
+            return
         ev["raw_name"] = ev.get("name", "")
         ev["name"] = self._display_name(ev.get("name"))
         if ev["type"] == "gift":
@@ -229,6 +233,13 @@ class Pipeline:
         """普通游戏解说排在观众互动后面，保留手动播报的原有优先级。"""
         return self.say(text, emotion, kind="narration")
 
+    def play_audio(self, filename, text="心愿单奖励", emotion="开心"):
+        """本地 AI 翻唱与普通播报共用队列、音频设备和口型时钟。"""
+        before = set(j["id"] for j in self.jobs)
+        self._enqueue({"type": "manual", "name": "", "text": text, "emotion": emotion,
+                       "audio_file": filename}, text=text)
+        return next((j["id"] for j in self.jobs if j["id"] not in before), None)
+
     def say_job_id(self, text, emotion=""):
         """把一句话送进合成+播放队列，返回它的 job id（用于等待播完）。"""
         return self.say(text, emotion)
@@ -303,6 +314,9 @@ class Pipeline:
             emotion = emotion or self.detect_emotion(text)
             item = {"id": job["id"], "type": job["type"], "text": text, "src": src, "emotion": emotion,
                     "desc": describe(job["ev"]) if job["text"] is None else ""}
+            if job["ev"].get("audio_file"):
+                item["audio_file"] = job["ev"]["audio_file"]
+                item["src"] = "心愿单音频"
             self.app.push("reply", item)
             await self.synth_q.put(item)
 
@@ -315,7 +329,14 @@ class Pipeline:
         while True:
             item = await self.synth_q.get()
             tts = self.cfg["tts"]
-            if tts.get("enabled", True) and not self._stream_mode():
+            if item.get("audio_file"):
+                try:
+                    item["pcm"], item["sr"] = await asyncio.to_thread(decode_audio_file, item["audio_file"])
+                except Exception as e:
+                    self.app.push("log", {"level": "error", "msg": f"心愿单音频读取失败：{e}"})
+                    self._mark_done(item["id"])
+                    continue
+            elif tts.get("enabled", True) and not self._stream_mode():
                 try:
                     t0 = time.time()
                     item["pcm"], item["sr"] = await self.app.engine.synth(tts, item["text"])
@@ -384,7 +405,7 @@ class Pipeline:
             self.current = item
             clock = asyncio.create_task(self._voice_clock(item["id"]))
             try:
-                if self._stream_mode():
+                if self._stream_mode() and not item.get("audio_file"):
                     await self._play_stream(item, loop)
                 else:
                     await self._play_blocking(item, loop)

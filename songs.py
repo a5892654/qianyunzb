@@ -29,6 +29,7 @@ class SongManager:
         self.end = asyncio.Event()
         self.last_hint = {}
         self.account = None
+        self.account_error = ""
 
     @property
     def cfg(self):
@@ -41,7 +42,7 @@ class SongManager:
                    paused=self.paused) if self.current else None
         return {"current": cur, "queue": self.queue,
                 "credits": [dict(v, key=k) for k, v in self.credits.items() if v["song"] or v["pin"] or v["song_prog"] or v["pin_prog"]],
-                "account": self.account}
+                "account": self.account, "account_error": self.account_error}
 
     def push(self):
         self.app.push("songs", self.state())
@@ -207,13 +208,23 @@ class SongManager:
         self.app.player.set_music(float(self.cfg.get("volume", 50)), float(self.cfg.get("duck", 30)))
 
     async def refresh_account(self):
-        if not self.cfg.get("netease_cookie"):
-            self.account = None
-        else:
+        cookie = self.cfg.get("netease_cookie", "")
+        self.account = None
+        self.account_error = ""
+        if cookie:
             try:
-                self.account = await self.ne.account()
+                account = await self.ne.account()
             except Exception as e:
+                if cookie != self.cfg.get("netease_cookie", ""):
+                    return
+                self.account_error = "暂时无法验证网易云账号，请检查网络后重试"
                 log.warning("网易云账号检查失败：%s", e)
+            else:
+                if cookie != self.cfg.get("netease_cookie", ""):
+                    return
+                self.account = account
+                if not account:
+                    self.account_error = "登录已失效，请重新登录"
         self.push()
 
     # ---------- 控制 ----------
