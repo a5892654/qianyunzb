@@ -4,6 +4,7 @@ import ctypes
 import json
 import logging
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -14,7 +15,7 @@ from aiohttp import web, WSMsgType, ClientSession
 
 import config
 import live2d
-from bili import BiliLive, QrLogin
+from bili import BiliLive, QrLogin, SmsLogin
 from brain import Brain, default_qoder_exe, list_qoder_models
 from dtgame.bridge import BridgeError, GameBridge
 from dtgame.launcher import GameProcess, find_godot
@@ -35,6 +36,13 @@ log = logging.getLogger("app")
 
 # aiohttp 默认只收 1MB 请求体，封面原图轻松超它；上限要比 5MB 的封面校验再宽一点。
 MAX_BODY_BYTES = 8 * 1024 * 1024
+
+_PHONE_RE = re.compile(r"\d{6,11}")
+
+
+def _sms_fail(e: Exception) -> str:
+    """B站短信接口的报错原样给用户看，但兜底把手机号抹掉，别进日志。"""
+    return _PHONE_RE.sub("<手机号>", str(e) or type(e).__name__)[:120]
 
 
 class UiLogHandler(logging.Handler):
@@ -62,6 +70,7 @@ class App:
         self.pipe = Pipeline(self)
         self.songs = SongManager(self)
         self.qr = QrLogin()
+        self.sms = SmsLogin()
         self.dt = None
         self.dt_task = None
         self.dt_resume_lock = asyncio.Lock()
@@ -575,6 +584,50 @@ def build_web(app: App):
             config.save(app.cfg)
             asyncio.create_task(app.broadcast.login())
         return ok(code=code, msg=msg)
+
+    @routes.post("/api/bili/sms/captcha")
+    async def bili_sms_captcha(_):
+        """拿极验参数给前端滑人机验证；滑完才能发短信。"""
+        try:
+            return ok(**await app.sms.captcha())
+        except Exception as e:
+            return web.json_response({"ok": False, "error": _sms_fail(e)}, status=400)
+
+    @routes.post("/api/bili/sms/send")
+    async def bili_sms_send(request):
+        if app.broadcast.running or app.broadcast.phase in ("starting", "stopping"):
+            return web.json_response({"ok": False, "error": "请先停止直播，再切换主播账号"})
+        d = await request.json()
+        phone = str(d.get("phone") or "").strip()
+        if not (phone.isdigit() and 6 <= len(phone) <= 11):
+            return web.json_response({"ok": False, "error": "手机号格式不对"}, status=400)
+        try:
+            gee = {"validate": d.get("validate"), "seccode": d.get("seccode")}
+            key = await app.sms.send(phone, gee, str(d.get("token") or ""),
+                                     str(d.get("challenge") or ""))
+        except Exception as e:
+            return web.json_response({"ok": False, "error": _sms_fail(e)}, status=400)
+        return ok(captcha_key=key)
+
+    @routes.post("/api/bili/sms/login")
+    async def bili_sms_login(request):
+        if app.broadcast.running or app.broadcast.phase in ("starting", "stopping"):
+            return web.json_response({"ok": False, "error": "请先停止直播，再切换主播账号"})
+        d = await request.json()
+        phone, code = str(d.get("phone") or "").strip(), str(d.get("code") or "").strip()
+        if not (phone.isdigit() and 6 <= len(phone) <= 11):
+            return web.json_response({"ok": False, "error": "手机号格式不对"}, status=400)
+        if not (code.isdigit() and 4 <= len(code) <= 8):
+            return web.json_response({"ok": False, "error": "短信验证码是 4-8 位数字"}, status=400)
+        try:
+            cookie = await app.sms.login(phone, code, str(d.get("captcha_key") or ""))
+        except Exception as e:
+            return web.json_response({"ok": False, "error": _sms_fail(e)}, status=400)
+        app.schedule.disable_for_account_change()
+        app.cfg["bili_cookie"] = cookie
+        config.save(app.cfg)
+        asyncio.create_task(app.broadcast.login())
+        return ok(msg="登录成功")
 
     @routes.post("/api/bili/cookie")
     async def bili_cookie(request):

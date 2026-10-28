@@ -173,6 +173,106 @@ class BiliLive:
             log.warning("nav check failed: %s", e)
 
 
+SMS_URLS = {
+    "captcha": "https://passport.bilibili.com/x/passport-login/captcha",
+    "send": "https://passport.bilibili.com/x/passport-login/web/sms/send",
+    "login": "https://passport.bilibili.com/x/passport-login/web/login/sms",
+    "buvid": "https://api.bilibili.com/x/frontend/finger/spi",
+}
+COOKIE_KEYS = ("DedeUserID", "DedeUserID__ckMd5", "SESSDATA", "bili_jct", "sid", "refresh_token")
+# B站短信相关错误码，只留用户看得懂的那几句
+SMS_ERRORS = {
+    5: "短信验证码不对，重新输入或再发一次",
+    -5: "短信验证码不对或已过期",
+    86: "发送太频繁，请稍后再试",
+    89: "请求过于频繁，稍后再试",
+    100003: "这个手机号没有注册过B站",
+    215971: "人机验证已过期，请重新点「获取验证码」",
+    -412: "被B站风控拦住了，请改用扫码登录",
+}
+
+
+def sms_error(j: dict, default: str = "B站返回错误") -> str:
+    return SMS_ERRORS.get(j.get("code"), str(j.get("message") or default))
+
+
+def send_params(phone: str, gee: dict, token: str, challenge: str) -> dict:
+    """字段名按B站网页端：极验的 validate/seccode 加上它给的 token/challenge。"""
+    return {"source": "main-fe-header", "cid": "86", "tel": phone, "token": token,
+            "challenge": challenge, "validate": str(gee.get("validate") or ""),
+            "seccode": str(gee.get("seccode") or "")}
+
+
+def login_params(phone: str, code: str, captcha_key: str) -> dict:
+    return {"source": "main_web", "cid": "86", "tel": phone, "code": code,
+            "captcha_key": captcha_key, "keep": "true"}
+
+
+def parse_captcha(j: dict) -> dict:
+    """极验参数；B站也可能改发腾讯验证码，那就只能走扫码。"""
+    if j.get("code") != 0:
+        raise RuntimeError(sms_error(j, "获取人机验证失败"))
+    data = j.get("data") or {}
+    gee = data.get("geetest") or {}
+    if not gee.get("gt"):
+        raise RuntimeError("B站这次给的是别的人机验证，请改用扫码登录")
+    return {"gt": gee["gt"], "challenge": gee.get("challenge", ""), "token": data.get("token", "")}
+
+
+def parse_send(j: dict) -> str:
+    if j.get("code") != 0:
+        raise RuntimeError(sms_error(j, "验证码发送失败"))
+    key = (j.get("data") or {}).get("captcha_key") or ""
+    if not key:
+        raise RuntimeError("B站没回 captcha_key，请重新滑一次人机验证")
+    return key
+
+
+def parse_login(j: dict, cookies: dict) -> str:
+    if j.get("code") != 0:
+        raise RuntimeError(sms_error(j, "登录失败"))
+    if not cookies.get("SESSDATA"):
+        # status=1 是B站要求二次安全验证，那条流程不在这里做
+        raise RuntimeError("B站要求额外安全验证，没给登录态，请改用扫码登录")
+    return "; ".join(f"{k}={cookies[k]}" for k in COOKIE_KEYS if k in cookies)
+
+
+class SmsLogin:
+    """B站手机号 + 短信验证码登录：极验 -> 发验证码 -> 换 Cookie。
+
+    极验必须真人滑完才拿得到 validate，所以那一步在前端做；手机号只在单次请求里
+    用到，不写进配置、不写日志。
+    """
+
+    @property
+    def _headers(self):
+        return {"User-Agent": UA, "Referer": "https://www.bilibili.com/",
+                "Origin": "https://www.bilibili.com"}
+
+    async def captcha(self) -> dict:
+        async with aiohttp.ClientSession(headers=self._headers) as s:
+            async with s.get(SMS_URLS["captcha"],
+                             params={"source": "main-fe-header", "t": int(time.time() * 1000)},
+                             timeout=aiohttp.ClientTimeout(total=12)) as r:
+                return parse_captcha(await r.json(content_type=None))
+
+    async def send(self, phone: str, gee: dict, token: str, challenge: str) -> str:
+        async with aiohttp.ClientSession(headers=self._headers) as s:
+            async with s.get(SMS_URLS["buvid"], timeout=aiohttp.ClientTimeout(total=12)) as r:
+                buvid = ((await r.json(content_type=None)).get("data") or {}).get("b_3") or ""
+            async with s.post(SMS_URLS["send"], data=send_params(phone, gee, token, challenge),
+                              cookies={"buvid3": buvid} if buvid else {},
+                              timeout=aiohttp.ClientTimeout(total=12)) as r:
+                return parse_send(await r.json(content_type=None))
+
+    async def login(self, phone: str, code: str, captcha_key: str) -> str:
+        async with aiohttp.ClientSession(headers=self._headers) as s:
+            async with s.post(SMS_URLS["login"], data=login_params(phone, code, captcha_key),
+                              timeout=aiohttp.ClientTimeout(total=12)) as r:
+                j = await r.json(content_type=None)
+                return parse_login(j, {k: v.value for k, v in r.cookies.items() if k in COOKIE_KEYS})
+
+
 class QrLogin:
     """B站网页扫码登录：生成二维码 -> 轮询 -> 拿到 Cookie。"""
 

@@ -190,6 +190,13 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
       <div id="qrsvg"></div>
       <div><div id="qrmsg" style="font-size:15px">请用B站手机客户端扫码</div><div class="hint">二维码 3 分钟内有效</div></div>
     </div>
+    <div class="row" style="margin-top:10px;flex-wrap:wrap;gap:8px;align-items:center">
+      <input id="smsPhone" placeholder="手机号" style="width:150px" maxlength="11" inputmode="numeric">
+      <button class="btn" id="smsSend">获取验证码</button>
+      <input id="smsCode" placeholder="短信验证码" style="width:120px" maxlength="8" inputmode="numeric">
+      <button class="btn p" id="smsLogin">手机号登录</button>
+      <span class="hint" id="smsTip">不想扫码就用手机号：先滑一下人机验证，再填短信验证码</span>
+    </div>
     <details style="margin-top:8px"><summary class="hint" style="cursor:pointer">或者手动粘贴 Cookie</summary>
       <div class="row" style="margin-top:8px"><input id="cookieIn" placeholder="SESSDATA=...; bili_jct=...; DedeUserID=..."><span class="btn" id="cookieBtn">保存</span></div>
     </details>
@@ -920,6 +927,58 @@ $('#quitBtn').onclick = async () => {
 $('#cookieBtn').onclick = async () => { const r = await api('/api/bili/cookie', {cookie: $('#cookieIn').value}); if (!r.ok) { toast(r.error); return; } $('#cookieIn').value = ''; toast('登录信息已保存'); await loadConfig(); refreshBroadcastAccount(); };
 $('#logoutBtn').onclick = async () => { if (confirm('退出B站登录？')) { const r = await api('/api/bili/logout', {}); if (!r.ok) { toast(r.error); return; } await loadConfig(); refreshBroadcastAccount(); } };
 let qrTimer = null;
+// 手机号登录：B站要求先过极验人机验证才发短信，所以「获取验证码」= 拉参数 → 弹极验 → 后端发短信
+let smsKey = null, smsTimer = null;
+const loadGee = (done) => {
+  if (window.initGeetest) return done();
+  const s = document.createElement('script');
+  s.src = 'https://static.geetest.com/static/tools/gt.js';
+  s.onload = done;
+  s.onerror = () => { $('#smsTip').textContent = '不想等验证？改用扫码登录'; toast('极验脚本加载失败，请检查网络'); };
+  document.head.appendChild(s);
+};
+const smsSend = async (phone, c, v) => {
+  const r = await api('/api/bili/sms/send', { phone, token: c.token, challenge: c.challenge,
+                                              validate: v.geetest_validate, seccode: v.geetest_seccode });
+  if (!r.ok) { $('#smsTip').textContent = ''; toast(r.error); return; }
+  smsKey = r.captcha_key;
+  $('#smsTip').textContent = '验证码已发到手机，10 分钟内有效';
+  $('#smsCode').focus();
+  let left = 60;
+  const btn = $('#smsSend');
+  btn.disabled = true;
+  clearInterval(smsTimer);
+  smsTimer = setInterval(() => {
+    left -= 1;
+    btn.textContent = left > 0 ? `重新发送 ${left}s` : '获取验证码';
+    if (left <= 0) { clearInterval(smsTimer); btn.disabled = false; }
+  }, 1000);
+  btn.textContent = `重新发送 ${left}s`;
+};
+$('#smsSend').onclick = () => {
+  const phone = $('#smsPhone').value.trim();
+  if (!/^\d{6,11}$/.test(phone)) { toast('手机号格式不对'); return; }
+  $('#smsTip').textContent = '正在准备人机验证…';
+  (async () => {
+    const c = await api('/api/bili/sms/captcha', {});
+    if (!c.ok) { $('#smsTip').textContent = ''; toast(c.error); return; }
+    loadGee(() => initGeetest({ gt: c.gt, challenge: c.challenge, offline: false,
+                                new_captcha: true, product: 'popup' }, (cap) => {
+      cap.onReady(() => cap.verify());
+      cap.onSuccess(() => smsSend(phone, c, cap.getValidate()));
+      cap.onError(() => { $('#smsTip').textContent = ''; toast('人机验证没完成，请重试'); });
+    }));
+  })();
+};
+$('#smsLogin').onclick = async () => {
+  if (!smsKey) { toast('请先点「获取验证码」完成人机验证'); return; }
+  const r = await api('/api/bili/sms/login', { phone: $('#smsPhone').value.trim(),
+                                               code: $('#smsCode').value.trim(), captcha_key: smsKey });
+  if (!r.ok) { toast(r.error); return; }
+  smsKey = null; $('#smsCode').value = ''; $('#smsTip').textContent = '已登录';
+  toast('手机号登录成功');
+  await loadConfig(); refreshBroadcastAccount();
+};
 $('#qrBtn').onclick = async () => {
   clearInterval(qrTimer);
   const r = await api('/api/bili/qr', {});
