@@ -275,6 +275,8 @@ def _fmt_character(ch: dict) -> list[str]:
     out = ["选择角色:"]
     for c in ch.get("characters") or []:
         mark = " ←当前" if c.get("selected") else ""
+        if c.get("locked") or c.get("unlocked") is False or c.get("enabled") is False:
+            mark += " ✕不可选"
         out.append(f"  [{c['slot']}] {c.get('name')} HP {c.get('hp')}{mark}")
     return out
 

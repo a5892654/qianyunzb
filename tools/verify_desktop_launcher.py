@@ -87,6 +87,7 @@ class PlayerLifecycleTests(ConfigWriteGuardMixin, unittest.IsolatedAsyncioTestCa
         with patch("main.DTPlayer") as made:
             app.start_dt()
         self.assertEqual(list(made.call_args.kwargs["chars"]), ["奈尔"])
+        self.assertIs(made.call_args.kwargs["speak"], app.pipe.narrate)
         made.call_args.kwargs["on_chars"](["奈尔", "安洁莉亚"])
         self.assertEqual(app.cfg["dtgame"]["recent_chars"], ["奈尔", "安洁莉亚"])
         await app.stop_dt()
@@ -266,10 +267,128 @@ class CharacterRotationTests(unittest.TestCase):
         self.assertEqual(p._swap_if_repeat(self.ROSTER, 2, ""), 2)   # 本来就换了就不动
         p.log_push.assert_not_called()
 
-    def test_no_swap_when_everyone_already_used(self):
+    def test_different_pick_is_kept_when_everyone_already_used(self):
         p = self.player(["奈尔", "爱丽丝", "安洁莉亚"])
         self.assertEqual(p._swap_if_repeat(self.ROSTER, 0, ""), 0)
         p.log_push.assert_not_called()
+
+    def test_repeat_is_swapped_even_after_everyone_has_played(self):
+        p = self.player(["奈尔", "爱丽丝", "安洁莉亚"])
+        self.assertEqual(p._swap_if_repeat(self.ROSTER, 2, "c"), 0)
+
+    def test_replacement_uses_least_recent_character(self):
+        p = self.player(["爱丽丝", "奈尔", "安洁莉亚"])
+        self.assertEqual(p._swap_if_repeat(self.ROSTER, 2, "c"), 1)
+
+    def test_slot_and_id_both_change_in_actual_bridge_call(self):
+        p = self.player(["奈尔"])
+        p.bridge.pick_character.side_effect = lambda slot, cid: {"ok": True, "selected_id": cid}
+        action = {"action": "character", "slot": 0, "id": "a"}
+        result = p._do({"screen": "character_select", **self.ROSTER}, action)
+        p.bridge.pick_character.assert_called_once_with(1, "b")
+        self.assertEqual(result["selected_id"], "b")
+        self.assertEqual((action["slot"], action["id"]), (1, "b"))
+
+    def test_id_only_choice_can_be_rotated(self):
+        p = self.player(["奈尔"])
+        p.bridge.pick_character.return_value = {"ok": True}
+        p._do({"screen": "character_select", **self.ROSTER}, {"action": "character", "id": "a"})
+        p.bridge.pick_character.assert_called_once_with(1, "b")
+
+    def test_conflicting_model_slot_is_normalized_to_id(self):
+        p = self.player(["安洁莉亚"])
+        p.bridge.pick_character.return_value = {"ok": True}
+        p._do({"screen": "character_select", **self.ROSTER},
+              {"action": "character", "slot": 0, "id": "b"})
+        p.bridge.pick_character.assert_called_once_with(1, "b")
+
+    def test_preview_character_does_not_replace_last_run(self):
+        p = self.player(["爱丽丝"])
+        p.on_chars = Mock()
+        for screen in ("character_select", "hall", "menu"):
+            p._remember_character({"screen": screen, "run": {"character": "奈尔"}})
+        self.assertEqual(p.chars, ["爱丽丝"])
+        p.on_chars.assert_not_called()
+
+    def test_rotation_never_selects_locked_alternative(self):
+        import copy
+        state = copy.deepcopy(self.ROSTER)
+        state["character_select"]["characters"][1]["locked"] = True
+        p = self.player(["奈尔"])
+        p.bridge.pick_character.return_value = {"ok": True}
+        p._do({"screen": "character_select", **state}, {"action": "character", "slot": 0})
+        p.bridge.pick_character.assert_called_once_with(2, "c")
+
+    def test_one_available_character_can_continue(self):
+        import copy
+        state = copy.deepcopy(self.ROSTER)
+        state["character_select"]["characters"][1]["locked"] = True
+        state["character_select"]["characters"][2]["unlocked"] = False
+        p = self.player(["奈尔"])
+        p.bridge.pick_character.return_value = {"ok": True}
+        p._do({"screen": "character_select", **state}, {"action": "character", "slot": 0})
+        p.bridge.pick_character.assert_called_once_with(0, "a")
+        self.assertIn("只有奈尔可选", p._rotation(state))
+
+    def test_invalid_or_locked_choice_never_reaches_game(self):
+        import copy
+        state = {"screen": "character_select", **copy.deepcopy(self.ROSTER)}
+        state["character_select"]["characters"][1]["enabled"] = False
+        for action in ({"action": "character", "slot": 99},
+                       {"action": "character", "slot": 0, "id": "missing"},
+                       {"action": "character", "slot": 1}):
+            p = self.player(["奈尔"])
+            self.assertFalse(p._do(state, action)["ok"])
+            p.bridge.pick_character.assert_not_called()
+
+
+class CharacterRotationFlowTests(unittest.IsolatedAsyncioTestCase):
+    async def test_repeated_model_choice_rotates_over_multiple_runs(self):
+        from dtgame.player import Player
+        import copy
+
+        bridge = Mock()
+        bridge.screen.return_value = {"screen": "character_select"}
+        bridge.pick_character.return_value = {"ok": True}
+        on_chars, speak = Mock(), Mock(return_value=None)
+        p = Player({}, bridge, chars=["奈尔"], on_chars=on_chars, speak=speak)
+        p._ask = AsyncMock(side_effect=lambda text: {"action": "character", "slot": 0,
+                                                    "id": "a", "say": "还是选奈尔吧"})
+        for expected_slot, expected_id, expected_name in ((1, "b", "爱丽丝"), (0, "a", "奈尔"),
+                                                          (2, "c", "安洁莉亚"), (0, "a", "奈尔")):
+            state = {"screen": "character_select", **copy.deepcopy(CharacterRotationTests.ROSTER),
+                     "run": {"character": "奈尔"}}  # 选角界面的旧预览值不能污染记录。
+            bridge.state.return_value = state
+            result = await p.step()
+            self.assertTrue(result["ok"])
+            bridge.pick_character.assert_called_with(expected_slot, expected_id)
+            self.assertEqual(result["action"]["id"], expected_id)
+            self.assertEqual(p.chars[-1], expected_name)  # 成功选角后立即持久化，不等下一帧。
+            if expected_id != "a":
+                self.assertIn(expected_name, result["say"])
+                self.assertNotIn("还是选奈尔", result["say"])
+            p._remember_character({"screen": "battle", "run": {"character": expected_name}})
+        self.assertEqual(on_chars.call_args.args[0][-4:], ["爱丽丝", "奈尔", "安洁莉亚", "奈尔"])
+        # 重新创建决策器时沿用落盘记录，仍然避开上一局。
+        restarted = Player({}, bridge, chars=on_chars.call_args.args[0], narrate=False)
+        action = {"action": "character", "slot": 0, "id": "a"}
+        restarted._do(state, action)
+        bridge.pick_character.assert_called_with(1, "b")
+
+    async def test_failed_selection_does_not_record_preview_or_requested_character(self):
+        from dtgame.player import Player
+        bridge = Mock()
+        bridge.screen.return_value = {"screen": "character_select"}
+        bridge.state.return_value = {"screen": "character_select", **CharacterRotationTests.ROSTER,
+                                     "run": {"character": "安洁莉亚"}}
+        bridge.pick_character.return_value = {"ok": False, "error": "选角被拒绝"}
+        on_chars = Mock()
+        p = Player({}, bridge, chars=["奈尔"], on_chars=on_chars, narrate=False)
+        p._ask = AsyncMock(return_value={"action": "character", "slot": 1, "say": "这局试试爱丽丝"})
+        result = await p.step()
+        self.assertFalse(result["ok"])
+        self.assertEqual(p.chars, ["奈尔"])
+        on_chars.assert_not_called()
 
 
 class ApiTests(ConfigWriteGuardMixin, unittest.IsolatedAsyncioTestCase):

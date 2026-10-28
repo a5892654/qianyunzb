@@ -1,8 +1,8 @@
 """选定窗口与输出设备的本机预览、直播编码。"""
 from __future__ import annotations
 
+import collections
 import ctypes
-import hashlib
 import os
 import queue
 import re
@@ -310,8 +310,10 @@ class WindowStreamCapture:
         self._frame: bytes | None = None          # OUT_W x OUT_H BGRA
         self._source_frame: np.ndarray | None = None  # 最新游戏画面，合成时复制，避免残影
         self._raw_size: tuple[int, int] | None = None  # 采集帧原始尺寸（物理像素）
-        self._digest = ""                          # 低清帧指纹（黑屏/变化检测）
         self._mean = 0.0
+        self._capture_times = collections.deque(maxlen=180)
+        self._render_times = collections.deque(maxlen=180)
+        self._process_times = collections.deque(maxlen=60)
         self._jpeg: bytes | None = None
         self._jpeg_seq = 0
         self._jpeg_at = 0.0
@@ -344,6 +346,9 @@ class WindowStreamCapture:
             self._frame = self._jpeg = None
             self._source_frame = None
             self.latest = self._jpeg_at = 0.0
+            self._capture_times.clear()
+            self._render_times.clear()
+            self._process_times.clear()
             self._capture_closed.clear()
         hwnd = int(hwnd)
         _validate_window(hwnd)
@@ -417,20 +422,17 @@ class WindowStreamCapture:
         self._audio_thread.start()
         self._jpeg_thread = threading.Thread(target=self._jpeg_worker, name="lc-jpeg", daemon=True)
         self._jpeg_thread.start()
-        # 等待首帧并区分“真黑”与“loading”：帧均值亮 或 帧内容有变化才算成功。
+        # 等待首帧，过滤纯黑或空白加载画面。
         deadline = time.monotonic() + _FRAME_WAIT_S
-        first_seen = False
         while time.monotonic() < deadline:
             with self._frame_cv:
                 if self._frame is None and not self._capture_closed.is_set():
                     self._frame_cv.wait(timeout=0.5)
-                got, mean, digest = self._frame, self._mean, self._digest
+                got, mean = self._frame, self._mean
             if got is None:
                 if self._capture_closed.is_set():
                     break
                 continue
-            if not first_seen:
-                first_seen, self._digest0 = True, digest
             if mean > 6.0:
                 return
             if self._capture_closed.is_set():
@@ -463,17 +465,21 @@ class WindowStreamCapture:
             s = max(OUT_W / w, OUT_H / h)
             nw, nh = max(OUT_W, int(round(w * s))), max(OUT_H, int(round(h * s)))
             # INTER_AREA 放大会退化成最近邻（边缘发硬），只有缩小时才拿它抗锯齿
-            scaled = cv2.resize(buf, (nw, nh),
-                                interpolation=cv2.INTER_AREA if s < 1 else cv2.INTER_LINEAR)
+            # WGC 的缓冲区只在回调期间有效。尺寸相同时只复制一次；缩放产生的
+            # 新数组已由我们持有，裁切视图也能直接保留，不必再复制整张 1080p。
+            scaled = (buf.copy() if (nw, nh) == (w, h) else
+                      cv2.resize(buf, (nw, nh),
+                                 interpolation=cv2.INTER_AREA if s < 1 else cv2.INTER_LINEAR))
             x0, y0 = (nw - OUT_W) // 2, (nh - OUT_H) // 2
             canvas = scaled[y0:y0 + OUT_H, x0:x0 + OUT_W]
             tiny = cv2.resize(canvas, (16, 9), interpolation=cv2.INTER_AREA)
             rgb = tiny[2:-2, 3:-3, :3]
             mean = float(rgb.mean()) if float(rgb.std()) > 3.0 else 0.0
             with self._lock:
-                self._source_frame = canvas.copy()
+                self._source_frame = canvas
                 self._mean = mean
                 self.latest = time.monotonic()
+                self._capture_times.append(self.latest)
         except Exception as exc:
             self._fail(_safe(f"帧处理异常: {exc}"))
 
@@ -487,10 +493,9 @@ class WindowStreamCapture:
                 self.compositor_error = f"Live2D 画面合成失败：{exc}"
                 self.compositor = None
         data = canvas.tobytes()
-        tiny = cv2.resize(canvas, (16, 9), interpolation=cv2.INTER_AREA)
-        digest = hashlib.md5(tiny.tobytes()).hexdigest()
         with self._frame_cv:
-            self._frame, self._digest = data, digest
+            self._frame = data
+            self._render_times.append(time.monotonic())
             self._frame_cv.notify_all()
 
     def _on_closed(self, *_args) -> None:
@@ -523,7 +528,7 @@ class WindowStreamCapture:
 
     def _jpeg_worker(self) -> None:
         # 独立刷新最终画面：游戏静止时皮套仍能动，关掉或移动皮套不会残留旧画面。
-        last_digest = ""
+        last_frame = None
         step = 1 / FPS
         # 先睡 33ms 再干活会把周期变成「33ms + 编码耗时」，实测掉到 ~16fps。
         # 改成按固定截止时间追帧，编码时间落在同一个周期里，才能跑到采集帧率。
@@ -535,6 +540,8 @@ class WindowStreamCapture:
             next_t += step
             if next_t < time.monotonic() - step:
                 next_t = time.monotonic()          # 落后太多就重新对齐，不追补旧帧
+            started = time.monotonic()
+            source = None
             try:
                 with self._lock:
                     source = self._source_frame
@@ -542,8 +549,10 @@ class WindowStreamCapture:
                     continue
                 self._compose_frame(source)
                 with self._lock:
-                    frame, digest = self._frame, self._digest
-                if digest == last_digest:
+                    frame = self._frame
+                # 必须比较完整画面。16x9 均值指纹会吞掉文字、鼠标和嘴型等局部变化；
+                # bytes 比较在 C 层完成，有变化时会提前结束，也保留了静止画面免编码。
+                if frame == last_frame:
                     continue
                 bgra = np.frombuffer(frame, np.uint8).reshape(OUT_H, OUT_W, 4)
                 bgr = cv2.cvtColor(bgra, cv2.COLOR_BGRA2BGR)
@@ -555,10 +564,14 @@ class WindowStreamCapture:
                         self._jpeg_at = time.monotonic()
                         self._jpeg_seq += 1
                         self._frame_cv.notify_all()
+                    last_frame = frame
             except Exception as exc:
                 self._fail(_safe(f"预览编码异常: {exc}"))
                 return
-            last_digest = digest
+            finally:
+                if source is not None:
+                    with self._lock:
+                        self._process_times.append((time.monotonic() - started) * 1000)
 
     def wait_jpeg(self, after_seq: int, timeout: float = 0.5):
         """等一帧比 after_seq 更新的预览 JPEG，返回 (序号, bytes)；超时或停止返回 None。
@@ -593,12 +606,26 @@ class WindowStreamCapture:
         return raw[0] / cw if cw > 1 else 1.0
 
     def snapshot(self) -> dict:
+        now = time.monotonic()
+
+        def rate(samples):
+            recent = [at for at in samples if now - at < 3]
+            if len(recent) < 2:
+                return 0.0
+            # 把距离最后一次更新的空档也算进去，停帧不能还显示旧的 30fps。
+            return round((len(recent) - 1) / max(now - recent[0], 0.001), 1)
+
         with self._lock:
             return {"previewing": self.previewing,
                     "output_running": self.output_running,
                     "audio_level": self.audio_level,
                     "error": self.error, "width": OUT_W, "height": OUT_H,
-                    "capture_size": list(self._raw_size or []), "fps": FPS}
+                    "capture_size": list(self._raw_size or []), "fps": FPS,
+                    "capture_fps": rate(self._capture_times),
+                    "render_fps": rate(self._render_times),
+                    "frame_process_ms": round(sum(self._process_times) / len(self._process_times), 1)
+                    if self._process_times else 0.0,
+                    "capture_age_ms": round((now - self.latest) * 1000) if self.latest else None}
 
     # ---------------- 输出 ----------------
 

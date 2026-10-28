@@ -230,6 +230,26 @@ class SourceWindowTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(proc.terminated)
 
 
+class WindowRuntimeTests(unittest.TestCase):
+    def test_capture_window_keeps_rendering_when_covered(self):
+        import os
+        from tools import source_window
+
+        key = 'WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS'
+        browser = SimpleNamespace(create_window=Mock(), start=Mock())
+        seen = []
+        browser.create_window.side_effect = lambda *args, **kwargs: seen.append(os.environ[key])
+        with patch.dict(sys.modules, {'webview': browser}), \
+             patch.dict(os.environ, {key: '--force-color-profile=srgb'}):
+            self.assertEqual(source_window.main(['source_window.py', 'http://127.0.0.1:8787/source',
+                                                 SOURCE_TITLE, '1920', '1080', '60', '60']), 0)
+        for flag in ('--force-color-profile=srgb', '--disable-background-timer-throttling',
+                     '--disable-backgrounding-occluded-windows', '--disable-renderer-backgrounding'):
+            self.assertIn(flag, seen[0])
+        browser.start.assert_called_once_with(gui='edgechromium', private_mode=True)
+        self.assertTrue(browser.create_window.call_args.kwargs['frameless'])
+
+
 class RouteTests(unittest.IsolatedAsyncioTestCase):
     async def test_routes_exist_and_are_guarded(self):
         from aiohttp import web

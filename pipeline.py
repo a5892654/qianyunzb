@@ -13,8 +13,9 @@ from tts import ENV_FPS, envelope
 log = logging.getLogger("pipe")
 
 TYPE_NAMES = {"enter": "进房", "follow": "关注", "danmaku": "弹幕", "gift": "礼物", "guard": "上舰",
-              "superchat": "醒目留言", "like": "点赞", "manual": "手动"}
-PRIORITY = {"manual": 0, "superchat": 0, "guard": 0, "gift": 1, "danmaku": 2, "follow": 2, "enter": 3, "like": 4}
+              "superchat": "醒目留言", "like": "点赞", "manual": "手动", "narration": "游戏解说"}
+PRIORITY = {"manual": 0, "superchat": 0, "guard": 0, "gift": 1, "danmaku": 2, "follow": 2,
+            "enter": 3, "like": 4, "narration": 5}
 MERGE_BY_TYPE = ("enter", "follow", "like")
 _seq = itertools.count(1)
 
@@ -28,6 +29,8 @@ def describe(ev):
     n = ev.get("name", "")
     if t == "danmaku":
         return f"{n}：{ev.get('text', '')}"
+    if t in ("manual", "narration"):
+        return ev.get("text", "")
     if t == "gift":
         v = f"（{ev['value']}元）" if ev.get("value") else "（免费）"
         return f"{n} 送出 {ev.get('gift')} ×{ev.get('num')}{v}"
@@ -209,29 +212,41 @@ class Pipeline:
         while len(self.jobs) > limit:
             victim = max(self.jobs, key=lambda j: (j["prio"], -j["ts"]))
             self.jobs.remove(victim)
+            self._mark_done(victim["id"])
             self.app.push("log", {"level": "warn", "msg": f"队列已满，丢弃：{describe(victim['ev'])}"})
         self.has_job.set()
         self._push_queue()
 
-    def say(self, text, emotion=""):
+    def say(self, text, emotion="", *, kind="manual"):
         before = set(j["id"] for j in self.jobs)
-        self._enqueue({"type": "manual", "name": "", "text": text, "emotion": emotion}, text=text)
+        self._enqueue({"type": kind, "name": "", "text": text, "emotion": emotion}, text=text)
         for j in self.jobs:
             if j["id"] not in before:
                 return j["id"]
         return None
+
+    def narrate(self, text, emotion=""):
+        """普通游戏解说排在观众互动后面，保留手动播报的原有优先级。"""
+        return self.say(text, emotion, kind="narration")
 
     def say_job_id(self, text, emotion=""):
         """把一句话送进合成+播放队列，返回它的 job id（用于等待播完）。"""
         return self.say(text, emotion)
 
     def spoken_done(self, job_id) -> bool:
-        """这句话是否已经播完。只认播放完成时打的标记，避免合成窗口被误判成已完成。"""
+        """这句话是否已播完或被取消；合成/排队中仍然要等。"""
         if job_id is None:
             return True
         return job_id in self._spoken_ids
 
+    def _mark_done(self, job_id):
+        self._spoken_ids.add(job_id)
+        if len(self._spoken_ids) > 256:
+            self._spoken_ids = set(sorted(self._spoken_ids)[-128:])
+
     def clear(self):
+        for job in self.jobs:
+            self._mark_done(job["id"])
         self.jobs.clear()
         self.merging.clear()
         self._push_queue()
@@ -257,28 +272,37 @@ class Pipeline:
                 max_wait *= 3
             if time.time() - job["ts"] > max_wait:
                 self.app.push("log", {"level": "warn", "msg": f"等待超过 {int(max_wait)} 秒，放弃：{describe(job['ev'])}"})
+                self._mark_done(job["id"])
                 continue
+            dt = getattr(self.app, "dt", None)
+            dt = dt if dt is not None and dt.running else None
             try:
                 emotion = ""
                 rule = job["ev"].get("fixed_rule")
                 if job["text"] is not None:
-                    text, src, emotion = job["text"], "手动", job["ev"].get("emotion", "")
+                    text, src, emotion = job["text"], TYPE_NAMES[job["type"]], job["ev"].get("emotion", "")
                 elif rule:
                     lines = [l.strip() for l in rule["reply"].splitlines() if l.strip()]
                     text, src, emotion = fill(random.choice(lines), job["ev"]), "固定回复", rule.get("emotion", "")
                 else:
                     t0 = time.time()
-                    text, src, emotion = await self.app.brain.reply(self.cfg, self.cfg["events"][job["type"]], job["ev"])
+                    context = dt.commentary_context() if dt and job["type"] in ("danmaku", "superchat") else ""
+                    text, src, emotion = await self.app.brain.reply(
+                        self.cfg, self.cfg["events"][job["type"]], job["ev"], context=context)
                     src += f" {time.time() - t0:.1f}s"
             except Exception as e:
                 log.exception("生成回复失败")
                 self.app.push("log", {"level": "error", "msg": f"生成回复失败：{e}"})
+                self._mark_done(job["id"])
                 continue
             if not text:
+                self._mark_done(job["id"])
                 continue
+            if dt and dt is getattr(self.app, "dt", None) and dt.running and job["type"] in ("danmaku", "superchat"):
+                dt.remember_interaction(job["ev"], text)
             emotion = emotion or self.detect_emotion(text)
             item = {"id": job["id"], "type": job["type"], "text": text, "src": src, "emotion": emotion,
-                    "desc": describe(job["ev"]) if job["type"] != "manual" else ""}
+                    "desc": describe(job["ev"]) if job["text"] is None else ""}
             self.app.push("reply", item)
             await self.synth_q.put(item)
 
@@ -369,10 +393,7 @@ class Pipeline:
             finally:
                 clock.cancel()
                 self.current = None
-                self._spoken_ids.add(item["id"])
-                # 只留最近的一批，避免长时间直播把集合撑大
-                if len(self._spoken_ids) > 256:
-                    self._spoken_ids = set(sorted(self._spoken_ids)[-128:])
+                self._mark_done(item["id"])
                 self.app.push("speak_end", {"id": item["id"]})
 
     async def _voice_clock(self, item_id):

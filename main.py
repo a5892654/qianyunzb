@@ -211,7 +211,7 @@ class App:
         p = DTPlayer(
             self._dt_ai(),
             self._dt_bridge(),
-            speak=self.pipe.say,
+            speak=self.pipe.narrate,
             log_push=lambda level, msg: self.push("log", {"level": level, "msg": msg}),
             narrate=bool(c.get("narrate", True)),
             pipe=self.pipe,
