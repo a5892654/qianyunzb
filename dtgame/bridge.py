@@ -108,9 +108,24 @@ class GameBridge:
     def enter_hall(self) -> dict:
         return self.call("enter_hall", timeout=30)
 
-    def begin_expedition(self, depth: int | None = None) -> dict:
-        args = {} if depth is None else {"depth": depth}
+    def begin_expedition(self, depth: int | None = None, mode: str = "deep",
+                         skip_tutorial: bool = True) -> dict:
+        """代打只开深层探索：mode=deep + skip_tutorial 让游戏按「我是高手」口径解锁。"""
+        args: dict = {"mode": mode, "skip_tutorial": skip_tutorial}
+        if depth is not None:
+            args["depth"] = depth
         return self.call("begin_expedition", args, timeout=60)
+
+    def hall_run(self, op: str = "continue", mode: str = "") -> dict:
+        """大厅「未完成的出征」：continue 回地图续玩，restart 结算后重新出征。"""
+        args: dict = {"op": op}
+        if mode:
+            args["mode"] = mode
+        return self.call("hall_run", args, timeout=60)
+
+    def abandon_run(self) -> dict:
+        """放弃当前出征回大厅（只用于把浅层/教学局清掉，代打只保留深层）。"""
+        return self.call("abandon_run", timeout=60)
 
     def pick_character(self, slot: int = -1, char_id: str = "") -> dict:
         return self.call("pick_character", {"slot": slot, "id": char_id}, timeout=60)

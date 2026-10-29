@@ -364,9 +364,27 @@ class Player:
             self.bridge.call("enter_hall", timeout=30)
             return "从主菜单进入出征大厅"
         if sc == "hall":
-            r = self.bridge.call("begin_expedition", timeout=60)
-            return "从大厅出征" if r.get("ok") else f"出征失败：{r.get('error', '')}"
+            return self._boot_hall()
         return ""
+
+    def _boot_hall(self) -> str:
+        """只开深层探索：浅层/教学未完成的局一律放弃重开，深层局继续。"""
+        hall = (self.bridge.state() or {}).get("hall") or {}
+        if hall.get("continue_dialog"):
+            run_mode = str(hall.get("run_mode") or "")
+            if run_mode == "deep":
+                r = self.bridge.hall_run("continue")
+                return "继续未完成的深层探索" if r.get("ok") else f"继续出征失败：{r.get('error', '')}"
+            r = self.bridge.hall_run("restart", mode="deep")
+            label = {"shallow": "浅层", "deep": "深层"}.get(run_mode, run_mode or "未知模式")
+            self.log_push("warn", f"发现未完成的{label}出征，放弃后改开深层探索")
+            return "已放弃旧局，改开深层探索" if r.get("ok") else f"重新出征失败：{r.get('error', '')}"
+        r = self.bridge.begin_expedition(mode="deep", skip_tutorial=True)
+        if not r.get("ok"):
+            return f"出征失败：{r.get('error', '')}"
+        if r.get("tutorial_skipped"):
+            self.log_push("info", "已跳过新手教学，深层探索已解锁")
+        return "从大厅出征（深层探索）"
 
     async def _wait_spoken(self, job_id, timeout: float = 40.0):
         """等这句话播完（含合成排队时间）。超时就放行，不让一句话卡死整局。"""
@@ -389,6 +407,16 @@ class Player:
         screen = state.get("screen")
         if state.get("busy"):
             return {"screen": screen, "ok": True, "action": {"action": "wait"}, "say": ""}
+        # 代打只看深层：读档落进浅层/教学局时先放弃回大厅，下一轮 _boot 会开深层。
+        mode = str((state.get("run") or {}).get("mode") or "")
+        if mode and mode != "deep" and screen in (
+                "battle", "map", "reward", "campfire", "shop", "event", "dialog", "loot",
+                "character_select", *view.OVERLAY_SCREENS):
+            r = await asyncio.to_thread(self.bridge.abandon_run)
+            label = {"shallow": "浅层/教学"}.get(mode, mode)
+            self.log_push("warn", f"当前是{label}局，放弃后只打深层探索")
+            return {"screen": screen, "action": {"action": "abandon_run"},
+                    "ok": bool(r.get("ok")), "error": r.get("error", ""), "say": ""}
         if screen in (None, "menu"):
             return {"screen": screen, "ok": False, "error": "游戏不在可操作界面"}
 

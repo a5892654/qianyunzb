@@ -391,6 +391,66 @@ class CharacterRotationFlowTests(unittest.IsolatedAsyncioTestCase):
         on_chars.assert_not_called()
 
 
+class BootModeTests(unittest.TestCase):
+    def _player(self, hall=None):
+        from dtgame.player import Player
+        bridge = Mock()
+        bridge.screen.return_value = {"screen": "hall"}
+        bridge.state.return_value = {"hall": hall or {"ready": True}}
+        return Player({}, bridge, narrate=False, log_push=Mock()), bridge
+
+    def test_hall_starts_deep_expedition(self):
+        """代打开局必须点名深层探索并跳过教学，不能落回浅层。"""
+        p, bridge = self._player()
+        bridge.begin_expedition.return_value = {"ok": True, "mode": "deep", "tutorial_skipped": True}
+        self.assertIn("深层探索", p._boot())
+        bridge.begin_expedition.assert_called_once_with(mode="deep", skip_tutorial=True)
+        self.assertIn("跳过新手教学", str(p.log_push.call_args_list))
+
+    def test_pending_shallow_run_is_restarted_in_deep(self):
+        p, bridge = self._player({"ready": True, "continue_dialog": True, "run_mode": "shallow"})
+        bridge.hall_run.return_value = {"ok": True}
+        self.assertIn("放弃旧局", p._boot())
+        bridge.hall_run.assert_called_once_with("restart", mode="deep")
+        bridge.begin_expedition.assert_not_called()
+        self.assertIn("浅层", str(p.log_push.call_args_list))
+
+    def test_pending_deep_run_is_resumed(self):
+        p, bridge = self._player({"ready": True, "continue_dialog": True, "run_mode": "deep"})
+        bridge.hall_run.return_value = {"ok": True}
+        self.assertIn("继续未完成的深层", p._boot())
+        bridge.hall_run.assert_called_once_with("continue")
+        bridge.begin_expedition.assert_not_called()
+
+
+class DeepOnlyRunTests(unittest.IsolatedAsyncioTestCase):
+    async def test_shallow_run_abandoned_before_model_call(self):
+        """读档落进浅层/教学局时不该继续打：先放弃回大厅，再走深层开局。"""
+        from dtgame.player import Player
+        bridge = Mock()
+        bridge.state.return_value = {"screen": "map", "run": {"mode": "shallow"}, "map": {}}
+        bridge.abandon_run.return_value = {"ok": True}
+        p = Player({}, bridge, narrate=False, log_push=Mock())
+        p._ask = AsyncMock()
+        r = await p.step()
+        self.assertEqual(r["action"]["action"], "abandon_run")
+        bridge.abandon_run.assert_called_once()
+        p._ask.assert_not_called()
+        self.assertIn("浅层", str(p.log_push.call_args_list))
+
+    async def test_deep_run_is_played_normally(self):
+        from dtgame.player import Player
+        bridge = Mock()
+        bridge.state.return_value = {"screen": "map", "run": {"mode": "deep"}, "map": {}}
+        bridge.screen.return_value = {"screen": "map"}
+        bridge.choose_node.return_value = {"ok": True}
+        p = Player({}, bridge, narrate=False, log_push=Mock())
+        p._ask = AsyncMock(return_value={"action": "node", "col": 0, "row": 0, "say": ""})
+        await p.step()
+        bridge.abandon_run.assert_not_called()
+        bridge.choose_node.assert_called_once_with(0, 0)
+
+
 class ApiTests(ConfigWriteGuardMixin, unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         from aiohttp.test_utils import TestClient, TestServer

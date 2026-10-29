@@ -198,6 +198,7 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
       <button class="btn p" id="smsLogin">手机号登录</button>
       <span class="hint" id="smsTip">不想扫码就用手机号：先滑一下人机验证，再填短信验证码</span>
     </div>
+    <div id="geeBox" style="display:none;margin:6px 0 4px;min-height:44px"></div>
     <details style="margin-top:8px"><summary class="hint" style="cursor:pointer">或者手动粘贴 Cookie</summary>
       <div class="row" style="margin-top:8px"><input id="cookieIn" placeholder="SESSDATA=...; bili_jct=...; DedeUserID=..."><span class="btn" id="cookieBtn">保存</span></div>
     </details>
@@ -970,7 +971,9 @@ const loadGee = (done) => {
 const smsSend = async (phone, c, v) => {
   const r = await api('/api/bili/sms/send', { phone, token: c.token, challenge: c.challenge,
                                               validate: v.geetest_validate, seccode: v.geetest_seccode });
-  if (!r.ok) { $('#smsTip').textContent = ''; toast(r.error); return; }
+  if (!r.ok) { $('#smsTip').textContent = '发送失败：把上面的滑块再滑一次'; toast(r.error); return; }
+  $('#geeBox').style.display = 'none';
+  $('#geeBox').innerHTML = '';      // 极验参数一次性的，重来必须重建控件
   smsKey = r.captcha_key;
   $('#smsTip').textContent = '验证码已发到手机，10 分钟内有效';
   $('#smsCode').focus();
@@ -992,12 +995,19 @@ $('#smsSend').onclick = () => {
   (async () => {
     const c = await api('/api/bili/sms/captcha', {});
     if (!c.ok) { $('#smsTip').textContent = ''; toast(c.error); return; }
-    loadGee(() => initGeetest({ gt: c.gt, challenge: c.challenge, offline: false,
-                                new_captcha: true, product: 'popup' }, (cap) => {
-      cap.onReady(() => cap.verify());
-      cap.onSuccess(() => smsSend(phone, c, cap.getValidate()));
-      cap.onError(() => { $('#smsTip').textContent = ''; toast('人机验证没完成，请重试'); });
-    }));
+    loadGee(() => {
+      // 只能用界面内嵌滑块：popup 模式需要在真实点击的手势里才弹得出来，
+      // 我们是「异步取参数 -> 自动 verify」，极验会当成没手势，什么都不显示。
+      $('#geeBox').style.display = 'block';
+      initGeetest({ gt: c.gt, challenge: c.challenge, offline: false, new_captcha: true,
+                    product: 'embed', language: 'zh-cn' }, (cap) => {
+        cap.appendTo('#geeBox');
+        cap.onReady(() => { $('#smsTip').textContent = '请点上面「点击按钮进行验证」，拖完滑块就发短信'; });
+        cap.onSuccess(() => smsSend(phone, c, cap.getValidate()));
+        cap.onError(() => { $('#smsTip').textContent = ''; toast('人机验证加载失败，请改用扫码登录'); });
+        cap.onFail(() => { $('#smsTip').textContent = ''; toast('人机验证没通过，请重试或改用扫码登录'); });
+      });
+    });
   })();
 };
 $('#smsLogin').onclick = async () => {
