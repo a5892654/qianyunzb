@@ -154,7 +154,8 @@ class App:
     # ---------- 游戏自动托管 ----------
     def _dt_bridge(self) -> GameBridge:
         c = self.cfg.get("dtgame", {})
-        return GameBridge(c.get("bridge_host", "127.0.0.1"), int(c.get("bridge_port", 9787)))
+        return GameBridge(c.get("bridge_host", "127.0.0.1"), int(c.get("bridge_port", 9787)),
+                          grans_port=int(c.get("grans_bridge_port", 9788)))
 
     def _dt_ai(self) -> dict:
         c = self.cfg.get("dtgame", {})
@@ -212,6 +213,8 @@ class App:
             emotions=lambda: self.cfg["live2d"].get("emotions", []) if self.cfg["live2d"].get("enabled") else [],
             chars=c.get("recent_chars") or (),
             on_chars=lambda names: self._remember_chars(names),
+            auto_depth=bool(c.get("auto_depth", True)),
+            depth=c.get("depth", 0),
         )
         p.running = True
         self.dt = p

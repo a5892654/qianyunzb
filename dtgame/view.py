@@ -4,6 +4,8 @@
 这里按界面类型输出人读格式，只保留做决策需要的字段。
 """
 
+from dtgame.expedition import depth_settings
+
 TYPE_CN = {
     "battle": "战斗", "elite": "精英", "boss": "BOSS", "campfire": "篝火",
     "shop": "商店", "mystery": "未知", "chest": "宝箱", "start": "起点",
@@ -30,6 +32,9 @@ def _fmt_status(status: dict) -> list[str]:
         bits.append(f"格挡 {status['block']}")
     bits.append(f"灵魂 {status.get('souls', 0)}")
     bits.append(f"第{status.get('act', 1)}幕 第{status.get('floor', 1)}层")
+    depth = status.get("expedition_depth", status.get("depth"))
+    if type(depth) is int:
+        bits.append(f"出征深度 {depth}")
     line = " | ".join(bits)
     extra = []
     if status.get("relics"):
@@ -108,6 +113,18 @@ def _fmt_battle(b: dict, run: dict) -> list[str]:
         else:
             out.append(f"光焰 {rad}（奥义需 {cost}；技艺每回合只有 1 次，没到阈值别按）")
     out.extend(_fmt_estus(b))
+    g = b.get("grans") or {}
+    if g:
+        if not g.get("available"):
+            out.append("【格兰斯】蓄能/解放接口不可用，不要猜测模式或输出 release：" + str(g.get("error", "")))
+        else:
+            mode = "解放" if g.get("release_mode") else "蓄能"
+            out.append(f"【格兰斯】光蓄 {g.get('light')}/{g.get('capacity', 6)}，暗蓄 {g.get('dark')}/{g.get('capacity', 6)}，当前全手牌模式：{mode}")
+            out.append("光暗蓄能跨回合保留；切换不扣资源，剑牌成功打出时才付款。")
+            if g.get("can_switch"):
+                out.append("光剑/暗剑出牌明确带 release=false 蓄能、release=true 解放；每张牌单独决定。")
+            else:
+                out.append("can_switch=false：当前不能切换，先等待结算或处理弹窗。")
     out.append("敌人:")
     for i, e in enumerate(b.get("enemies") or []):
         it = e.get("intent") or {}
@@ -139,9 +156,27 @@ def _fmt_battle(b: dict, run: dict) -> list[str]:
         cost_txt = "?" if cost is not None and cost < 0 else str(cost)
         tgt = {"single": "需选敌", "all": "群体", "self": "自身"}.get(c.get("target") or "", "自身")
         out.append(f"  [{c.get('slot')}] {c.get('name')} 费{cost_txt} [{c.get('type')}] {tgt}{flag}")
-        desc = (c.get("desc") or "").strip().replace("\n", " ")
+        gc = c.get("grans") or {}
+        desc = (gc.get("normal_desc") or c.get("desc") or "").strip().replace("\n", " ")
         if desc:
-            out.append(f"      {desc}")
+            out.append(f"      {'蓄能效果：' if gc.get('sword') in ('light', 'dark') else ''}{desc}")
+        side = gc.get("sword")
+        if side in ("light", "dark"):
+            sword = "光剑" if side == "light" else "暗剑"
+            cross = "暗蓄" if side == "light" else "光蓄"
+            out.append(f"      {sword}；" + (f"打出后{cross}+1（另按能力结算）" if gc.get("cross_charge_available") else "本张无默认交叉充能额度"))
+            if gc.get("can_release"):
+                preview = gc.get("preview") or {}
+                value = (f"额外{preview.get('fixed_block', 0)}固定格挡、另抽{preview.get('draw', 0)}" if side == "light"
+                         else f"解放后的首段基础伤害{preview.get('damage')}（已含解放加成，不要重复加算）")
+                out.append(f"      解放可用：消耗本侧全部{preview.get('n')}层；{value}。交叉充能和能力回充以出牌后的新状态为准。")
+                release_desc = str(gc.get("release_desc") or "").strip().replace("\n", " ")
+                if release_desc:
+                    out.append("      解放效果：" + release_desc)
+            else:
+                out.append("      解放不可用：本侧蓄能为空、同源额度已用或临时副本；可按蓄能模式普通打出。")
+        elif side == "dual":
+            out.append(f"      合璧牌：按牌面自动消耗{gc.get('pair_spend', 0)}对光暗蓄能，不受开关影响，不要填 release。")
     out.append(f"牌库 {b.get('draw_pile_count')} / 弃牌 {b.get('discard_pile_count')} / 消耗 {b.get('exhaust_pile_count')}")
     out.extend(_fmt_potions(b))
     if b.get("battle_over"):
@@ -271,13 +306,44 @@ def _fmt_event(e: dict) -> list[str]:
     return _fmt_overlay("event", e)
 
 
+def character_selectable(character: dict) -> bool:
+    return (type(character.get("slot")) is int and character["slot"] >= 0
+            and not character.get("locked") and character.get("unlocked") is not False
+            and character.get("enabled") is not False)
+
+
+def character_unlock_known(character: dict) -> bool:
+    return character.get("unlocked") is True or character.get("locked") is False
+
+
 def _fmt_character(ch: dict) -> list[str]:
     out = ["选择角色:"]
     for c in ch.get("characters") or []:
         mark = " ←当前" if c.get("selected") else ""
-        if c.get("locked") or c.get("unlocked") is False or c.get("enabled") is False:
-            mark += " ✕不可选"
-        out.append(f"  [{c['slot']}] {c.get('name')} HP {c.get('hp')}{mark}")
+        if not character_selectable(c):
+            mark += f" ✕不可选（{c.get('lock_reason') or '未解锁或不可用'}）"
+        elif not character_unlock_known(c):
+            mark += "（解锁状态未知，需游戏校验；优先选已解锁角色）"
+        out.append(f"  [{c.get('slot', '?')}] {c.get('name')} HP {c.get('hp')}{mark}")
+    return out
+
+
+def _fmt_hall(state: dict) -> list[str]:
+    current, limit = depth_settings(state)
+    out = ["出征前可以选择本局深度；深度越高，叠加的负面效果越多。"]
+    if current is not None:
+        out.append(f"当前选择深度: {current}")
+    if limit is None:
+        out.append("游戏桥未提供已解锁深度上限，沿用游戏当前深度，不要猜测可选范围。")
+        out.append("按当前设置出征: action=expedition（不填 depth）")
+    else:
+        out.append(f"可选出征深度: 0～{limit}，只能选择这个范围内的整数。")
+        if (state.get("hall") or {}).get("expedition_mode", (state.get("hall") or {}).get("mode")) == "shallow":
+            out.append("当前是新手教学路线，本局固定深度 0。")
+        for item in (state.get("hall") or {}).get("depth_debuffs") or []:
+            if type(item.get("depth")) is int and item["depth"] <= limit:
+                out.append(f"  深度 {item['depth']}: {item.get('name', '')} {item.get('desc', '')}")
+        out.append("选择深度并出征: action=expedition depth=整数")
     return out
 
 
@@ -330,6 +396,8 @@ def render(state: dict) -> str:
         lines.extend(_fmt_run_end(body))
     elif screen == "character_select" and body:
         lines.extend(_fmt_character(body))
+    elif screen == "hall":
+        lines.extend(_fmt_hall(state))
     elif screen == "menu":
         lines.append("游戏在菜单里。需要先从出征大厅开始一局。")
     if state.get("busy"):

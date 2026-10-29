@@ -330,7 +330,7 @@ class CharacterRotationTests(unittest.TestCase):
         p.bridge.pick_character.assert_called_once_with(0, "a")
         self.assertIn("只有奈尔可选", p._rotation(state))
 
-    def test_invalid_or_locked_choice_never_reaches_game(self):
+    def test_invalid_or_locked_choice_is_replaced_with_available_character(self):
         import copy
         state = {"screen": "character_select", **copy.deepcopy(self.ROSTER)}
         state["character_select"]["characters"][1]["enabled"] = False
@@ -338,8 +338,9 @@ class CharacterRotationTests(unittest.TestCase):
                        {"action": "character", "slot": 0, "id": "missing"},
                        {"action": "character", "slot": 1}):
             p = self.player(["奈尔"])
-            self.assertFalse(p._do(state, action)["ok"])
-            p.bridge.pick_character.assert_not_called()
+            p.bridge.pick_character.return_value = {"ok": True}
+            self.assertTrue(p._do(state, action)["ok"])
+            p.bridge.pick_character.assert_called_once_with(2, "c")
 
 
 class CharacterRotationFlowTests(unittest.IsolatedAsyncioTestCase):
@@ -348,8 +349,12 @@ class CharacterRotationFlowTests(unittest.IsolatedAsyncioTestCase):
         import copy
 
         bridge = Mock()
-        bridge.screen.return_value = {"screen": "character_select"}
+        bridge.screen.side_effect = lambda: {"screen": "character_select" if bridge.state.return_value.get("screen") == "character_select" else "map"}
         bridge.pick_character.return_value = {"ok": True}
+        def enter_map(*args):
+            bridge.state.return_value = {"screen": "map"}
+            return {"ok": True}
+        bridge.pick_character.side_effect = enter_map
         on_chars, speak = Mock(), Mock(return_value=None)
         p = Player({}, bridge, chars=["奈尔"], on_chars=on_chars, speak=speak)
         p._ask = AsyncMock(side_effect=lambda text: {"action": "character", "slot": 0,
