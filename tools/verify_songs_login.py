@@ -1,10 +1,14 @@
 """网易云扫码登录回归：本地模拟上游，不读取真实账号、不联网。"""
 import asyncio
+import base64
+import json
 import sys
 import types
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
+from Cryptodome.Cipher import AES
+from Cryptodome.Util.Padding import unpad
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
@@ -19,16 +23,22 @@ class NetEaseLoginTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.code, self.mode, self.requests = 801, "normal", []
 
+        async def record(request):
+            form = await request.post()
+            self.requests.append((dict(request.headers), json.loads(form["payload"])))
+
         async def key(request):
-            self.requests.append(request)
+            await record(request)
             if self.mode == "http_error":
                 return web.Response(status=503, text="unavailable")
             if self.mode == "bad_json":
                 return web.Response(text="not JSON")
-            return web.json_response({"code": 200, "unikey": "fixture-key"} if self.mode != "no_key" else {"code": 200})
+            response = web.json_response({"code": 200, "unikey": "fixture-key"} if self.mode != "no_key" else {"code": 200})
+            response.set_cookie("NMTID", "fixture-context")
+            return response
 
         async def poll(request):
-            self.requests.append(request)
+            await record(request)
             if self.mode == "redirect":
                 response = web.HTTPFound("/confirmed")
                 response.set_cookie("MUSIC_U", "redirect-token")
@@ -46,33 +56,44 @@ class NetEaseLoginTests(unittest.IsolatedAsyncioTestCase):
             return web.json_response({"code": 803})
 
         upstream = web.Application()
-        upstream.router.add_get("/api/login/qrcode/unikey", key)
-        upstream.router.add_get("/api/login/qrcode/client/login", poll)
+        upstream.router.add_post("/weapi/login/qrcode/unikey", key)
+        upstream.router.add_post("/weapi/login/qrcode/client/login", poll)
         upstream.router.add_get("/confirmed", confirmed)
         self.server = TestServer(upstream)
         await self.server.start_server()
         self.base = patch.object(netease, "BASE", str(self.server.make_url("/")).rstrip("/"))
         self.base.start()
+        self.crypto = patch.object(netease, "_weapi_encrypt", side_effect=lambda data: {"payload": json.dumps(data)})
+        self.crypto.start()
         self.ne = netease.NetEase(lambda: "MUSIC_U=old-expired-token")
+        await self.ne.qr_key()
 
     async def asyncTearDown(self):
         self.base.stop()
+        self.crypto.stop()
         await self.server.close()
 
     async def test_anonymous_key_and_all_scan_states(self):
         key, url = await self.ne.qr_key()
         self.assertEqual(key, "fixture-key")
         self.assertIn("codekey=fixture-key", url)
+        self.assertIn("/st/platform/scanlogin?", url)
+        self.assertIn("chainId=", url)
         for code in (801, 802, 803, 800):
             self.code = code
             actual, msg, cookie = await self.ne.qr_poll(key)
             self.assertEqual(actual, code)
             self.assertTrue(msg)
             self.assertEqual("MUSIC_U=fixture-token" in cookie, code == 803)
-        for request in self.requests:
-            self.assertNotIn("Cookie", request.headers, "重新登录时不能带旧账号凭证")
-            self.assertEqual(request.query["type"], "3")
-            self.assertTrue(request.query.get("timestamp"))
+        chains = set()
+        for headers, payload in self.requests:
+            self.assertNotIn("old-expired-token", headers.get("Cookie", ""), "重新登录时不能带旧账号凭证")
+            self.assertEqual(payload["type"], 1)
+            self.assertTrue(payload["noCheckToken"])
+            chains.add(headers["x-login-chain-id"])
+            if "key" in payload:
+                self.assertIn("NMTID=fixture-context", headers["Cookie"])
+        self.assertTrue(chains)
 
     async def test_cookie_body_and_redirect_are_supported(self):
         self.code, self.mode = 803, "body_cookie"
@@ -102,6 +123,54 @@ class NetEaseLoginTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(netease.aiohttp, "ClientSession", side_effect=TimeoutError):
             with self.assertRaisesRegex(RuntimeError, "超时"):
                 await self.ne.qr_key()
+
+    async def test_8821_pauses_polling_and_proof_continues_same_key(self):
+        self.code = 8821
+        self.assertEqual((await self.ne.qr_poll("fixture-key"))[0], 8821)
+        count = len(self.requests)
+        self.assertEqual((await self.ne.qr_poll("fixture-key"))[0], 8821)
+        self.assertEqual(len(self.requests), count, "验证期间不应继续访问上游轮询")
+        self.code = 803
+        code, _, cookie = await self.ne.qr_poll("fixture-key", secure_captcha="fixture-proof", yd_device_token="fixture-device")
+        self.assertEqual(code, 803)
+        self.assertIn("MUSIC_U=fixture-token", cookie)
+        self.assertEqual(self.requests[-1][1]["secureCaptcha"], "fixture-proof")
+        self.assertEqual(self.requests[-1][1]["ydDeviceToken"], "fixture-device")
+        self.assertEqual(self.requests[-1][1]["key"], "fixture-key")
+        self.assertNotIn("fixture-proof", repr(self.ne._qr))
+
+    async def test_replayed_proof_and_cancelled_key_are_rejected(self):
+        self.code = 8821
+        await self.ne.qr_poll("fixture-key")
+        await self.ne.qr_poll("fixture-key", secure_captcha="fixture-proof")
+        count = len(self.requests)
+        with self.assertRaisesRegex(ValueError, "已提交"):
+            await self.ne.qr_poll("fixture-key", secure_captcha="fixture-proof")
+        self.assertEqual(len(self.requests), count)
+        self.ne.cancel_qr()
+        with self.assertRaisesRegex(RuntimeError, "已更新"):
+            await self.ne.qr_poll("fixture-key", secure_captcha="late-proof")
+
+    async def test_security_proof_validation_and_additional_verification(self):
+        with self.assertRaisesRegex(ValueError, "参数无效"):
+            await self.ne.qr_poll("fixture-key", secure_captcha={"invalid": True})
+        self.code = 8830
+        code, msg, cookie = await self.ne.qr_poll("fixture-key")
+        self.assertEqual(code, 8830)
+        self.assertIn("官网", msg)
+        self.assertEqual(cookie, "")
+
+
+class WebQrCryptoTests(unittest.TestCase):
+    def test_web_form_can_be_decrypted_to_original_payload(self):
+        secret = b"0123456789abcdef"
+        data = {"key": "fixture-key", "type": 1, "secureCaptcha": "fixture-proof", "csrf_token": ""}
+        with patch.object(netease.secrets, "token_hex", return_value=secret.decode()):
+            form = netease._weapi_encrypt(data)
+        first = unpad(AES.new(secret, AES.MODE_CBC, netease._WEAPI_IV).decrypt(base64.b64decode(form["params"])), 16)
+        plain = unpad(AES.new(netease._WEAPI_KEY, AES.MODE_CBC, netease._WEAPI_IV).decrypt(base64.b64decode(first)), 16)
+        self.assertEqual(json.loads(plain), data)
+        self.assertEqual(len(form["encSecKey"]), 256)
 
 
 class SongLoginRouteTests(unittest.IsolatedAsyncioTestCase):
@@ -155,6 +224,21 @@ class SongLoginRouteTests(unittest.IsolatedAsyncioTestCase):
         self.ne.qr_poll.return_value = (803, "登录成功", "")
         self.assertFalse((await self.post("qrpoll", {"key": "first-key"}))["ok"])
         self.save.assert_not_called()
+
+    async def test_verification_required_preserves_key_and_forwards_proof(self):
+        await self.post("qr")
+        self.ne.qr_poll.return_value = (8821, "请完成安全验证", "")
+        result = await self.post("qrpoll", {"key": "first-key"})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["code"], 8821)
+        self.save.assert_not_called()
+        self.ne.qr_poll.return_value = (803, "登录成功", "MUSIC_U=fixture-token")
+        result = await self.post("qrpoll", {"key": "first-key", "secure_captcha": "fixture-proof", "yd_device_token": "fixture-device"})
+        self.ne.qr_poll.assert_awaited_with("first-key", secure_captcha="fixture-proof", yd_device_token="fixture-device")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["code"], 803)
+        self.assertNotIn("fixture-proof", str(result))
+        self.save.assert_called_once()
 
     async def test_logout_while_confirmation_in_flight_cannot_restore_login(self):
         await self.post("qr")

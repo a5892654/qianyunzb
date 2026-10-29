@@ -6,6 +6,7 @@ numpy>=1.26
 sounddevice>=0.5
 miniaudio>=1.61
 qrcode>=8.0
+pycryptodomex>=3.20,<4
 comtypes>=1.4
 pycaw>=20240101
 bilibili-api-python==17.4.2

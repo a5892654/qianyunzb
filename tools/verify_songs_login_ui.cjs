@@ -11,6 +11,7 @@ const account = {nickname: '扫码测试用户', vip: 1};
 let qrMode = 'normal', pollMode = 'normal', sequence = 0, pollCount = 0;
 let replies = [], loggedIn = false, pendingPoll = null, delayedReady = null;
 const errors = [];
+const pollBodies = [];
 
 (async () => {
   const browser = await chromium.launch({channel: 'msedge', headless: true});
@@ -19,6 +20,16 @@ const errors = [];
     page.on('pageerror', error => errors.push(error.message));
     page.on('dialog', dialog => dialog.accept());
     await page.clock.install();
+    await page.addInitScript(() => {
+      window.createNEFingerprint = () => ({getToken: async () => ({token: 'fixture-device-token'})});
+      window.__fakeInitCaptcha = (options, ready, failed) => {
+        window.__captchaOptions = options;
+        if (window.__captchaMode === 'init_error') { failed(); return; }
+        ready({destroy: () => { window.__captchaDestroyed = (window.__captchaDestroyed || 0) + 1; },
+               popUp: () => { window.__captchaOpened = true; }});
+      };
+      window.initNECaptcha = window.__fakeInitCaptcha;
+    });
     await page.routeWebSocket('**/ws', ws => ws.onMessage(() => {}));
     await page.route('**/*', async route => {
       const request = route.request(), url = new URL(request.url());
@@ -43,10 +54,11 @@ const errors = [];
         if (qrMode === 'json_error') result = {ok: false, error: '连接网易云超时，请检查网络后重试'};
         else {
           const key = 'key-' + ++sequence;
-          result = {ok: true, key, svg: `<svg xmlns="http://www.w3.org/2000/svg" data-key="${key}" viewBox="0 0 180 180"><rect width="180" height="180" fill="white"/><path d="M10 10h40v40H10z M130 10h40v40h-40z M10 130h40v40H10z"/></svg>`};
+          result = {ok: true, key, captcha_id: 'fixture-captcha-id', device_app_id: 'fixture-device-app', svg: `<svg xmlns="http://www.w3.org/2000/svg" data-key="${key}" viewBox="0 0 180 180"><rect width="180" height="180" fill="white"/><path d="M10 10h40v40H10z M130 10h40v40h-40z M10 130h40v40H10z"/></svg>`};
         }
       } else if (url.pathname === '/api/songs/qrpoll') {
         pollCount++;
+        pollBodies.push(body);
         if (pollMode === 'delayed') return new Promise(resolve => {
           pendingPoll = async result => {
             await route.fulfill({contentType: 'application/json', body: JSON.stringify(result)}).catch(() => {});
@@ -85,6 +97,66 @@ const errors = [];
     console.log('PASS 二维码生成失败与非 JSON 响应可见');
 
     qrMode = 'normal';
+    replies = [{ok: true, code: 8821, msg: '网易云要求安全验证，请点击“开始安全验证”后继续登录'}, {ok: true, code: 803, msg: '登录成功', account}];
+    await start();
+    const securityKey = 'key-' + sequence;
+    await poll('开始安全验证', 1000);
+    assert.equal(await page.locator('#neVerifyBtn').isVisible(), true);
+    const pausedCount = pollCount;
+    await page.clock.runFor(10000);
+    assert.equal(pollCount, pausedCount, '等待安全验证时必须暂停轮询');
+    await page.screenshot({path: path.join(root, 'logs/netease-8821-verification.png'), fullPage: true});
+    await page.locator('#neVerifyBtn').click();
+    await page.waitForFunction(() => window.__captchaOpened);
+    await page.evaluate(() => { window.__verifiedCallback = window.__captchaOptions.onVerify; window.__verifiedCallback(null, {validate: 'fixture-captcha-proof'}); });
+    await expectMessage('登录成功');
+    await page.waitForFunction(() => document.querySelector('#neState').textContent.includes('扫码测试用户'));
+    assert.equal(pollBodies.at(-1).key, securityKey);
+    assert.equal(pollBodies.at(-1).secure_captcha, 'fixture-captcha-proof');
+    assert.equal(pollBodies.at(-1).yd_device_token, 'fixture-device-token');
+    const verifiedCount = pollCount;
+    await page.evaluate(() => window.__verifiedCallback(null, {validate: 'fixture-captcha-proof'}));
+    await page.clock.runFor(1000);
+    assert.equal(pollCount, verifiedCount, '同一个验证结果只能提交一次');
+    console.log('PASS 8821 暂停轮询，完成官方验证后用同一个二维码登录，验证结果只提交一次');
+
+    replies = [{ok: true, code: 8821, msg: '请完成安全验证'}];
+    await start(); await poll('安全验证', 1000);
+    await page.locator('#neVerifyBtn').click();
+    await page.waitForFunction(() => !!window.__captchaOptions);
+    await page.evaluate(() => window.__captchaOptions.onClose());
+    await expectMessage('已关闭');
+    assert.equal(await page.locator('#neVerifyBtn').isEnabled(), true);
+    await page.evaluate(() => { window.__captchaMode = 'init_error'; });
+    await page.locator('#neVerifyBtn').click(); await expectMessage('初始化失败');
+    await page.evaluate(() => { window.__captchaMode = ''; });
+    await page.locator('#neVerifyBtn').click();
+    await expectMessage('请完成网易安全验证');
+    await page.evaluate(() => { window.__staleCallback = window.__captchaOptions.onVerify; });
+    await start();
+    const beforeStale = pollCount;
+    await page.evaluate(() => window.__staleCallback(null, {validate: 'stale-proof'}));
+    assert.equal(pollCount, beforeStale);
+    assert.ok(!(await message.textContent()).includes('验证完成'));
+    console.log('PASS 关闭或初始化失败可重试，更换二维码后旧验证回调失效');
+
+    replies = [{ok: true, code: 8821, msg: '请完成安全验证'}];
+    await start(); await poll('安全验证', 1000);
+    await page.evaluate(() => { delete window.initNECaptcha; });
+    await page.locator('#neVerifyBtn').click(); await expectMessage('加载失败');
+    assert.equal(await page.locator('#neVerifyBtn').isEnabled(), true);
+    await page.evaluate(() => { window.initNECaptcha = window.__fakeInitCaptcha; });
+    console.log('PASS 官方验证脚本加载失败有提示并可重新加载');
+
+    replies = [{ok: true, code: 8830, msg: '网易云要求进一步账号验证，请在官网完成登录后使用手动 Cookie 登录'}];
+    await start(); await poll('进一步账号验证', 1000);
+    const terminalCount = pollCount;
+    await page.clock.runFor(6000);
+    assert.equal(pollCount, terminalCount);
+    assert.equal(await page.locator('#neVerifyBtn').isVisible(), false);
+    assert.equal(await page.locator('#neCookie').isVisible(), true);
+    console.log('PASS 8830 停止轮询并显示官网登录后的手动登录入口');
+
     replies = [{ok: true, code: 801, msg: '等待扫码'}, {ok: true, code: '802', msg: '已扫码，请在手机上确认'}, {ok: true, code: 803, msg: '登录成功', account}];
     await start();
     await poll('等待扫码', 1000);

@@ -23,6 +23,7 @@ from live_broadcast import Broadcast
 from live_schedule import DailyBroadcastSchedule
 from pipeline import Pipeline
 from songs import SongManager
+from netease import CAPTCHA_ID, DEVICE_APP_ID
 from tts import GsvEngine, Player
 from wishlist import WishlistActions, validate_settings as validate_wishlist_settings
 
@@ -844,6 +845,7 @@ def build_web(app: App):
     def reset_song_login():
         song_login["generation"] += 1
         song_login["key"] = None
+        app.songs.ne.cancel_qr()
         return song_login["generation"]
 
     @routes.get("/songs")
@@ -891,18 +893,20 @@ def build_web(app: App):
                 raise RuntimeError("二维码已更新，请使用最新二维码")
             song_login["key"] = key
             img = qrcode.make(url, image_factory=qrcode.image.svg.SvgPathImage, box_size=8)
-            return ok(svg=img.to_string(encoding="unicode"), key=key)
+            return ok(svg=img.to_string(encoding="unicode"), key=key, captcha_id=CAPTCHA_ID, device_app_id=DEVICE_APP_ID)
         except Exception as e:
             return web.json_response({"ok": False, "error": str(e) or "生成网易云二维码失败，请重试"})
 
     @routes.post("/api/songs/qrpoll")
     async def songs_qrpoll(request):
         try:
-            key = (await request.json()).get("key")
+            data = await request.json()
+            key = data.get("key")
             generation = song_login["generation"]
             if not key or key != song_login["key"]:
                 raise RuntimeError("二维码已更新或已结束，请重新扫码")
-            code, msg, cookie = await app.songs.ne.qr_poll(key)
+            proof = {field: data[field] for field in ("secure_captcha", "yd_device_token") if field in data}
+            code, msg, cookie = await app.songs.ne.qr_poll(key, **proof)
             if generation != song_login["generation"] or key != song_login["key"]:
                 raise RuntimeError("二维码已更新或已结束，请重新扫码")
             if code == 803:
