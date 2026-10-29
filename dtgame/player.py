@@ -20,7 +20,9 @@ import time
 import aiohttp
 
 from dtgame.bridge import BridgeError, GameBridge
+from dtgame.expedition import choose_depth, depth_settings
 from dtgame import view
+from dtgame import grans
 
 log = logging.getLogger("dtplay")
 
@@ -93,7 +95,16 @@ SYSTEM = """你在直播玩《恶魔之塔 Zero》——一款类杀戮尖塔的
 选角：
   {"action":"character","slot":序号}
   选角色你自己拿主意，按当前阵容和心情直接点一个，不要停下来等确认。
+  只选当前可用的角色，未解锁、不可选或本轮已被游戏拒绝的角色都跳过，不要尝试解锁或购买。
   但观众要看换人：状态里给了「选角提醒」时必须照办，别连着几局点同一个人。
+
+出征大厅：
+  {"action":"expedition","depth":出征深度}
+  每局出征前你可以自主升降深度，只选状态中已解锁范围内的整数。
+  参考上一局表现和近期观众的游戏建议：打得吃力或阵亡后可以降一两级，
+  顺利通关后可以提高一级，不必每局固定选同一个深度，也别直接跳到最高难度。
+  新手教学路线固定深度0；游戏桥没给解锁上限时不填 depth，沿用当前设置。
+  深度只能在大厅开始新出征前调整，不能中途改本局难度，也不要为改深度放弃现有进度。
 
 每个 JSON 都要带一个 "say" 字段，是你此刻对着观众说的一句口语中文，
 不超过 30 字，像真人打牌时随口念叨，不要念数值、不要解说规则。
@@ -114,9 +125,14 @@ SYSTEM = """你在直播玩《恶魔之塔 Zero》——一款类杀戮尖塔的
 
 class Player:
     AI_FAIL_LIMIT = 5
+    CHARACTER_AI_TIMEOUT = 8.0
+    CHARACTER_TRANSITION_TIMEOUT = 6.0
+    EXPEDITION_AI_TIMEOUT = 8.0
+    EXPEDITION_TRANSITION_TIMEOUT = 6.0
 
     def __init__(self, cfg_ai: dict, bridge: GameBridge, speak=None, log_push=None,
-                 narrate: bool = True, pipe=None, emotions=None, chars=(), on_chars=None):
+                 narrate: bool = True, pipe=None, emotions=None, chars=(), on_chars=None,
+                 auto_depth: bool = True, depth: int = 0):
         self.cfg = cfg_ai
         self.bridge = bridge
         self.speak = speak or (lambda text, emotion="": None)
@@ -143,6 +159,13 @@ class Player:
                 self.chars.append(key)
         del self.chars[:-8]
         self.on_chars = on_chars or (lambda names: None)
+        self._character_rejected: dict[str, str] = {}
+        self._character_recovery = False
+        self.auto_depth = auto_depth
+        self.default_depth = depth
+        self._expedition_depth = None
+        self._expedition_recovery = False
+        self._last_expedition = None
 
     def commentary_context(self) -> str:
         """复用最近读到的游戏状态，回复弹幕时不再阻塞查询游戏桥。"""
@@ -169,11 +192,12 @@ class Player:
                 + json.dumps(recent, ensure_ascii=False))
 
     def _system_prompt(self) -> str:
+        prompt = SYSTEM + ("\n" + grans.PROMPT if grans.is_grans(self._last_state) else "")
         options = [{"name": e["name"], "motion": e.get("motion", ""), "keywords": e.get("keywords", "")}
                    for e in self.emotions() if e.get("name")]
         if not options:
-            return SYSTEM
-        return SYSTEM + (
+            return prompt
+        return prompt + (
             '\n【Live2D 表情与动作】每个决策 JSON 除 say 外，必须带独立的 "emotion" 字段，'
             '值从下面的 name 中原样选择一个，不能为空，不要把标签写进 say。'
             '根据这句话的语气和游戏局势主动选择：得手时开心、拿奖励时期待、受挫时生气、意外时惊讶等。'
@@ -199,9 +223,37 @@ class Player:
 
     @staticmethod
     def _can_pick_character(character: dict) -> bool:
-        return (type(character.get("slot")) is int and character["slot"] >= 0
-                and not character.get("locked") and character.get("unlocked") is not False
-                and character.get("enabled") is not False)
+        return view.character_selectable(character)
+
+    @staticmethod
+    def _character_token(character: dict) -> str:
+        return str(character.get("id") or f"slot:{character.get('slot')}")
+
+    def _character_candidates(self, state: dict) -> list[dict]:
+        return [c for c in (state.get("character_select") or {}).get("characters") or []
+                if self._can_pick_character(c)
+                and self._character_token(c) not in self._character_rejected]
+
+    def _preferred_character(self, candidates: list[dict]) -> dict:
+        last_used = {key: i for i, key in enumerate(self.chars)}
+        # 老桥没有解锁字段时仍允许由游戏校验，但先用明确已解锁的角色。
+        return min(candidates, key=lambda c: (
+            not view.character_unlock_known(c),
+            last_used.get(self._char_key(c.get("name")), -1), c["slot"]))
+
+    def _reject_character(self, character: dict, reason: str) -> None:
+        self._character_rejected[self._character_token(character)] = reason
+        self._character_recovery = True
+        self.log_push("warn", f"跳过角色{character.get('name') or character.get('id')}：{reason}，自动改选")
+
+    def _character_state(self, state: dict) -> dict:
+        """把游戏拒过的角色也标进模型读到的名单，避免旧桥缺少锁定字段。"""
+        body = state.get("character_select") or {}
+        roster = []
+        for c in body.get("characters") or []:
+            reason = self._character_rejected.get(self._character_token(c))
+            roster.append({**c, "enabled": False, "lock_reason": reason} if reason else c)
+        return {**state, "character_select": {**body, "characters": roster}}
 
     @staticmethod
     def _character_choice(state: dict, slot: int, cid: str) -> dict | None:
@@ -212,9 +264,9 @@ class Player:
                                            else c.get("slot") == slot)), None)
 
     def _rotation(self, state: dict) -> str:
-        roster = [str(c.get("name") or "").strip()
-                  for c in (state.get("character_select") or {}).get("characters") or []
-                  if self._can_pick_character(c)]
+        candidates = self._character_candidates(state)
+        known = [c for c in candidates if view.character_unlock_known(c)]
+        roster = [str(c.get("name") or "").strip() for c in known or candidates]
         roster = [n for n in roster if n]
         if not roster:
             return ""
@@ -232,7 +284,6 @@ class Player:
 
     def _swap_if_repeat(self, state: dict, slot: int, cid: str) -> int:
         """提醒说了还不听就换：连着点上一局那个角色，观众看到的就是一个人一直打。"""
-        chars = (state.get("character_select") or {}).get("characters") or []
         picked = self._character_choice(state, slot, cid)
         if picked is None:
             return slot
@@ -240,16 +291,68 @@ class Player:
         name = self._char_key(picked.get("name"))
         if not self.chars or not name or name != self.chars[-1]:
             return slot
-        alternatives = [c for c in chars if self._can_pick_character(c)
-                        and self._char_key(c.get("name"))
+        alternatives = [c for c in self._character_candidates(state)
+                        if self._char_key(c.get("name"))
                         and self._char_key(c.get("name")) != name]
+        if view.character_unlock_known(picked):
+            alternatives = [c for c in alternatives if view.character_unlock_known(c)]
         if not alternatives:
             return slot
         # 没用过的优先；全部用过后按最近一次使用时间轮换，不能退回到允许连选。
-        last_used = {key: i for i, key in enumerate(self.chars)}
-        replacement = min(alternatives, key=lambda c: last_used.get(self._char_key(c.get("name")), -1))
+        replacement = self._preferred_character(alternatives)
         self.log_push("info", f"AI 又想点上一局的{name}，这一局换成{replacement['name']}")
         return replacement["slot"]
+
+    def _pick_character(self, state: dict, act: dict) -> dict:
+        candidates = self._character_candidates(state)
+        if not candidates:
+            return {"ok": False, "error": "没有可继续出征的角色：名单为空、角色均未解锁或本轮选角均被拒绝",
+                    "character_exhausted": True}
+        try:
+            slot = int(act.get("slot", -1))
+        except (ValueError, TypeError, OverflowError):
+            slot = -1
+        picked = self._character_choice(state, slot, str(act.get("id") or ""))
+        fallback = (act.get("action") != "character" or picked not in candidates)
+        if not fallback and not view.character_unlock_known(picked):
+            fallback = any(view.character_unlock_known(c) for c in candidates)
+        if fallback:
+            chosen = self._preferred_character(candidates)
+        else:
+            slot = self._swap_if_repeat(state, picked["slot"], str(picked.get("id") or ""))
+            chosen = self._character_choice(state, slot, "")
+        act.update(action="character", slot=chosen["slot"], id=str(chosen.get("id") or ""))
+        self._character_recovery = True  # 未确认进入游戏前，后续重试不再依赖模型。
+        result = self.bridge.pick_character(act["slot"], act["id"])
+        if not result.get("ok"):
+            if not result.get("stale") and not result.get("busy"):
+                self._reject_character(chosen, str(result.get("error") or "游戏拒绝选角"))
+            return result
+        return {**result, "character_swapped": fallback or chosen != picked,
+                "character_name": chosen.get("name", "")}
+
+    async def _verify_character_pick(self, state: dict, act: dict, result: dict) -> dict:
+        """调用成功不等于出征成功：锁定角色的确认函数会直接返回且留在原页。"""
+        deadline = time.monotonic() + self.CHARACTER_TRANSITION_TIMEOUT
+        while True:
+            try:
+                now = await asyncio.to_thread(self.bridge.screen)
+            except BridgeError as e:
+                return {"ok": False, "error": f"选角后未能确认界面：{e}"}
+            screen = now.get("screen")
+            if not now.get("busy") and screen not in (None, "", "character_select", "menu", "hall", "other"):
+                self._character_recovery = False
+                self._character_rejected.clear()
+                return {**result, "screen_after": screen}
+            if time.monotonic() >= deadline:
+                if now.get("busy") or screen in (None, "", "other"):
+                    # 转场或读取不完整时不要把角色误判为锁定，也不补发点击。
+                    return {"ok": False, "stale": True}
+                chosen = self._character_choice(state, act["slot"], act["id"])
+                reason = "选角后仍未进入游戏，可能角色未解锁或确认被拦截"
+                self._reject_character(chosen, reason)
+                return {"ok": False, "error": reason}
+            await asyncio.sleep(0.2)
 
     async def _ask(self, state_text: str) -> dict:
         base = str(self.cfg.get("openai_base", "")).rstrip("/")
@@ -305,12 +408,77 @@ class Player:
         raise RuntimeError(f"模型没给出合法 JSON：{text[:200]}")
 
     # ---------- 执行 ----------
+    def _begin_expedition(self, state: dict, act: dict) -> dict:
+        hall = state.get("hall") or {}
+        if hall.get("continue_dialog"):
+            return self._resume_pending_run(hall)
+        requested = act.get("depth") if self.auto_depth else self.default_depth
+        if self._expedition_recovery and self.auto_depth:
+            requested = 0
+        depth = choose_depth(state, requested, self.default_depth)
+        adjusted = act.get("action") != "expedition" or requested != depth
+        act.update(action="expedition")
+        if depth is None:
+            act.pop("depth", None)
+            result = self.bridge.begin_expedition()
+        else:
+            act["depth"] = depth
+            result = self.bridge.begin_expedition(depth)
+        if result.get("tutorial_skipped"):
+            self.log_push("info", "已跳过新手教学，深层探索已解锁")
+        if not result.get("ok") and not result.get("stale") and not result.get("busy"):
+            self._expedition_recovery = True
+        return {**result, "depth": depth if depth is not None else depth_settings(state)[0],
+                "depth_adjusted": adjusted}
+
+    async def _verify_expedition(self, result: dict) -> dict:
+        deadline = time.monotonic() + self.EXPEDITION_TRANSITION_TIMEOUT
+        while True:
+            try:
+                now = await asyncio.to_thread(self.bridge.screen)
+            except BridgeError as e:
+                return {"ok": False, "error": f"未能确认出征结果：{e}"}
+            screen = now.get("screen")
+            if not now.get("busy"):
+                if screen in ("character_select", "map", "battle"):
+                    self._expedition_depth = result.get("depth")
+                    self._expedition_recovery = False
+                    label = f"深度 {self._expedition_depth}" if self._expedition_depth is not None else "游戏当前深度"
+                    self.log_push("info", f"按{label}出征")
+                    return {**result, "screen_after": screen}
+                if screen not in (None, "", "hall", "other"):
+                    return {"ok": False, "stale": True}  # 先交给新出现的窗口处理。
+            if time.monotonic() >= deadline:
+                if now.get("busy") or screen in (None, "", "other"):
+                    return {"ok": False, "stale": True}
+                self._expedition_recovery = True
+                return {"ok": False, "error": "出征后仍停在大厅，请检查游戏提示或账号验证"}
+            await asyncio.sleep(0.2)
+
+    def _remember_expedition_result(self, state: dict, outcome: str) -> None:
+        run = state.get("run") or {}
+        body = state.get(state.get("screen")) or {}
+        self._last_expedition = {
+            "depth": run.get("expedition_depth", run.get("depth", self._expedition_depth)),
+            "outcome": outcome, "character": run.get("character", ""),
+            "summary": " / ".join(str(t) for t in [body.get("title", ""), *(body.get("texts") or [])])[:500],
+        }
+
     def _do(self, state: dict, act: dict) -> dict:
         screen = state.get("screen")
         a = str(act.get("action", ""))
         try:
+            if screen == "hall":
+                return self._begin_expedition(state, act)
             if screen == "battle":
                 if a == "play":
+                    if "release" in act:
+                        if type(act["release"]) is not bool or not grans.is_grans(state):
+                            return {"ok": False, "error": "release 必须是布尔值，且只用于格兰斯剑牌"}
+                        if not (state.get("battle", {}).get("grans") or {}).get("available"):
+                            return {"ok": False, "error": "格兰斯模式接口尚未就绪，请重读游戏状态"}
+                        return self.bridge.play_card(int(act.get("slot", -1)), str(act.get("id", "")),
+                                                     int(act.get("target", -1)), release=act["release"])
                     return self.bridge.play_card(int(act.get("slot", -1)), str(act.get("id", "")),
                                                  int(act.get("target", -1)))
                 if a == "end":
@@ -338,53 +506,33 @@ class Player:
                 body = state[screen]
                 return self.bridge.overlay(int(act.get("slot", -1)), str(act.get("op", "")),
                                            body["window_id"], body["revision"])
-            elif screen == "character_select" and a == "character":
-                cid = str(act.get("id") or "")
-                slot = int(act.get("slot", -1))
-                picked = self._character_choice(state, slot, cid)
-                if picked is None or not self._can_pick_character(picked):
-                    return {"ok": False, "error": "所选角色不在当前可用名单中，请重新选择"}
-                slot = self._swap_if_repeat(state, slot, cid)
-                chosen = self._character_choice(state, slot, "")
-                # 改了槽位就必须同步角色 ID；也把实际执行目标写回动作记录。
-                act.update(slot=slot, id=str(chosen.get("id") or ""))
-                result = self.bridge.pick_character(act["slot"], act["id"])
-                if result.get("ok"):
-                    return {**result, "character_swapped": slot != picked["slot"],
-                            "character_name": chosen.get("name", "")}
-                return result
+            elif screen == "character_select":
+                return self._pick_character(state, act)
         except (BridgeError, ValueError, TypeError) as e:
             return {"ok": False, "error": str(e)}
         return {"ok": False, "error": f"界面 {screen} 不支持动作 {a}"}
 
     def _boot(self) -> str:
-        """主菜单/大厅这类没有选择的界面，由代码直接推进，不消耗模型调用。"""
+        """主菜单直接进入大厅；大厅的深度选择交给 step。"""
         sc = self.bridge.screen().get("screen")
         if sc == "menu":
             self.bridge.call("enter_hall", timeout=30)
             return "从主菜单进入出征大厅"
-        if sc == "hall":
-            return self._boot_hall()
         return ""
 
-    def _boot_hall(self) -> str:
-        """只开深层探索：浅层/教学未完成的局一律放弃重开，深层局继续。"""
-        hall = (self.bridge.state() or {}).get("hall") or {}
-        if hall.get("continue_dialog"):
-            run_mode = str(hall.get("run_mode") or "")
-            if run_mode == "deep":
-                r = self.bridge.hall_run("continue")
-                return "继续未完成的深层探索" if r.get("ok") else f"继续出征失败：{r.get('error', '')}"
-            r = self.bridge.hall_run("restart", mode="deep")
-            label = {"shallow": "浅层", "deep": "深层"}.get(run_mode, run_mode or "未知模式")
-            self.log_push("warn", f"发现未完成的{label}出征，放弃后改开深层探索")
-            return "已放弃旧局，改开深层探索" if r.get("ok") else f"重新出征失败：{r.get('error', '')}"
-        r = self.bridge.begin_expedition(mode="deep", skip_tutorial=True)
-        if not r.get("ok"):
-            return f"出征失败：{r.get('error', '')}"
-        if r.get("tutorial_skipped"):
-            self.log_push("info", "已跳过新手教学，深层探索已解锁")
-        return "从大厅出征（深层探索）"
+    def _resume_pending_run(self, hall: dict) -> dict:
+        """大厅挂着「未完成的出征」：深层局直接续玩，浅层/教学局结算掉再走深层选深度。"""
+        run_mode = str(hall.get("run_mode") or "")
+        if run_mode == "deep":
+            result = self.bridge.hall_run("continue")
+            if result.get("ok"):
+                self.log_push("info", "继续未完成的深层探索")
+            return {**result, "say": ""}
+        result = self.bridge.hall_run("restart", mode="deep")
+        label = {"shallow": "浅层"}.get(run_mode, run_mode or "未知模式")
+        self.log_push("warn", f"发现未完成的{label}出征，放弃后改开深层探索")
+        # restart 只把弹窗收掉，深度还没选；标 stale 让下一轮正常走深度选择，别误判成出征失败。
+        return {**result, "stale": True, "say": ""} if result.get("ok") else {**result, "say": ""}
 
     async def _wait_spoken(self, job_id, timeout: float = 40.0):
         """等这句话播完（含合成排队时间）。超时就放行，不让一句话卡死整局。"""
@@ -405,6 +553,11 @@ class Player:
         self._state_time = time.monotonic()
         self._remember_character(state)
         screen = state.get("screen")
+        if screen not in (None, "", "character_select", "menu", "hall", "other") and not state.get("busy"):
+            self._character_rejected.clear()
+            self._character_recovery = False
+        if screen not in (None, "", "hall", "menu", "other"):
+            self._expedition_recovery = False
         if state.get("busy"):
             return {"screen": screen, "ok": True, "action": {"action": "wait"}, "say": ""}
         # 代打只看深层：读档落进浅层/教学局时先放弃回大厅，下一轮 _boot 会开深层。
@@ -443,12 +596,16 @@ class Player:
             else:
                 r = await asyncio.to_thread(self.bridge.return_to_hall)
                 action = "return_to_hall"
+                if r.get("ok"):
+                    self._remember_expedition_result(state, "阵亡，本局已结束")
             return {"screen": screen, "action": {"action": action},
                     "ok": bool(r.get("ok")), "error": r.get("error", ""), "say": ""}
         # 本局结算页：「返回大厅」在危险词名单里，普通窗口读出来是空按钮列表，
-        # 模型根本没有可点的东西，只能由代码按下去，然后 _boot 会接着开下一局。
+        # 模型根本没有可点的东西，只能由代码按下去，然后主循环会接着开下一局。
         if screen == "run_end":
             r = await asyncio.to_thread(self.bridge.return_to_hall)
+            if r.get("ok"):
+                self._remember_expedition_result(state, "本局结算，结果见 summary")
             return {"screen": screen, "action": {"action": "return_to_hall"},
                     "ok": bool(r.get("ok")), "error": r.get("error", ""), "say": ""}
         # 已阵亡但结算面板还没挂出来：等它自己走结算流程，别继续发命令。
@@ -463,26 +620,45 @@ class Player:
             return {"screen": screen, "action": {"action": "confirm_result"},
                     "ok": bool(r.get("ok")), "error": r.get("error", ""), "say": ""}
 
-        text = view.render(state)
+        text = view.render(self._character_state(state) if screen == "character_select" else state)
         if screen == "character_select":
             text += "\n" + self._rotation(state)
+        if screen == "hall" and self._last_expedition:
+            text += "\n上一局表现：" + json.dumps(self._last_expedition, ensure_ascii=False)
         try:
-            act = await self._ask(text)
+            if screen == "hall":
+                if not self.auto_depth or self._expedition_recovery or depth_settings(state)[1] is None:
+                    act = {"action": "expedition"}
+                else:
+                    act = await asyncio.wait_for(self._ask(text), self.EXPEDITION_AI_TIMEOUT)
+            elif screen == "character_select":
+                if self._character_recovery or not self._character_candidates(state):
+                    act = {"action": "character"}
+                else:
+                    act = await asyncio.wait_for(self._ask(text), self.CHARACTER_AI_TIMEOUT)
+            else:
+                act = await self._ask(text)
         except Exception as e:
-            self.ai_fails += 1
-            msg = str(e)
-            log.warning("模型决策失败（%d/%d）：%s", self.ai_fails, self.AI_FAIL_LIMIT, msg)
-            if self.ai_fails >= self.AI_FAIL_LIMIT:
-                self.log_push("error", f"模型连续失败 {self.ai_fails} 次，已停止代打：{msg}")
-                self.running = False
-            return {"screen": screen, "ok": False, "error": msg, "idle": True}
+            if screen in ("character_select", "hall"):
+                label = "选角" if screen == "character_select" else "出征深度"
+                self.log_push("warn", f"{label}决策超时或失败，自动使用可用设置：{e}")
+                act = {"action": "character" if screen == "character_select" else "expedition"}
+            else:
+                self.ai_fails += 1
+                msg = str(e)
+                log.warning("模型决策失败（%d/%d）：%s", self.ai_fails, self.AI_FAIL_LIMIT, msg)
+                if self.ai_fails >= self.AI_FAIL_LIMIT:
+                    self.log_push("error", f"模型连续失败 {self.ai_fails} 次，已停止代打：{msg}")
+                    self.running = False
+                return {"screen": screen, "ok": False, "error": msg, "idle": True}
         self.ai_fails = 0
 
         # 模型思考期间界面可能已经换了（比如上一张卡选完奖励页自己关了），
         # 这时旧决策必然作废——先复查，别把过期动作发下去。
         # None 和空串都算「没有窗口」，两次读法少给一个字段不该把动作全判废。
         now = await asyncio.to_thread(self.bridge.screen)
-        if now.get("screen") != screen or (now.get("window_id") or "") != (state.get("window_id") or ""):
+        if (now.get("busy") or now.get("screen") != screen
+                or (now.get("window_id") or "") != (state.get("window_id") or "")):
             return {"screen": screen, "action": act, "ok": False,
                     "error": "", "say": "", "stale": True}
 
@@ -498,6 +674,10 @@ class Player:
         # 先出牌再说话：画面是"因"，台词是"果"。
         # 反过来的话（之前就是）声音还在合成，牌早打完了，观感就是音画脱节。
         result = await asyncio.to_thread(self._do, state, act)
+        if screen == "hall" and result.get("ok"):
+            result = await self._verify_expedition(result)
+        if screen == "character_select" and result.get("ok"):
+            result = await self._verify_character_pick(state, act, result)
         if result.get("stale"):
             return {"screen": screen, "action": act, "ok": False, "stale": True, "say": ""}
         if result.get("ok") and screen == "character_select" and result.get("character_name"):
@@ -505,6 +685,9 @@ class Player:
             self._remember_character({"run": {"character": result["character_name"]}})
         if result.get("ok") and result.get("character_swapped"):
             say = _clean_say(f"这局换{result['character_name']}上场，试试别的打法！")
+        if result.get("ok") and screen == "hall" and (result.get("depth_adjusted") or not say):
+            depth = result.get("depth")
+            say = f"这局试试深度{depth}，出发！" if depth is not None else "按当前深度出发，继续爬塔！"
         self.history.append({"role": "user", "content":
                              f"实际操作结果：{act}，ok={bool(result.get('ok'))}，"
                              f"error={result.get('error', '')}，screen_after={result.get('screen_after', screen)}"})
@@ -525,6 +708,16 @@ class Player:
         if not result.get("ok"):
             err = result.get("error", "")
             self.log_push("warn", f"[{screen}] {act} 被拒：{err}")
+            if screen == "character_select":
+                # 选角拒绝不是模型通用失败。直接轮换剩余候选，不累计到暂停阈值。
+                self.fails = 0
+                self.error_streak = 0
+                exhausted = result.get("character_exhausted") or not self._character_candidates(state)
+                if exhausted:
+                    self.log_push("error", f"自动选角无法继续，已停止代打：{err}；请检查角色解锁状态或游戏桥")
+                    self.running = False
+                return {"screen": screen, "action": act, "ok": False, "error": err,
+                        "say": "", "recovering": not exhausted}
             # 战斗已结束/已阵亡时不要盲目补发命令，交给主循环按新状态推进。
             if result.get("battle_over"):
                 self.fails = 0
@@ -568,7 +761,7 @@ class Player:
                 if screen != last_screen:
                     last_screen = screen
                     self.log_push("info", f"进入界面：{screen}")
-                if screen in ("menu", "hall", "other"):
+                if screen in ("menu", "other"):
                     msg = await asyncio.to_thread(self._boot)
                     if msg:
                         self.log_push("info", msg)

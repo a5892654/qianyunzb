@@ -1,24 +1,50 @@
+import asyncio
+import base64
+import hashlib
 import json
 import logging
 import re
+import secrets
 import time
-from http.cookies import SimpleCookie
+from http.cookies import CookieError, SimpleCookie
+from urllib.parse import urlencode
 
 import aiohttp
+from Cryptodome.Cipher import AES
+from Cryptodome.PublicKey import RSA
+from Cryptodome.Util.Padding import pad
 
 log = logging.getLogger("song")
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
 BASE = "https://music.163.com"
-# 与网易云当前二维码登录接口保持一致，生成和轮询必须使用同一类型。
-# 参考：https://github.com/neteasecloudmusicapienhanced/api-enhanced/blob/master/module/login_qr_check.js
-QR_TYPE = 3
+# 网页登录使用 weapi + type=1，不能混用客户端 type=3 的登录链路。
+# 协议与官方验证组件接入参考：https://github.com/Rainlxyl/netease-music-mcp-safe
+QR_TYPE = 1
+CAPTCHA_ID = "73a18dc827b24b18ad0783701a75277d"
+DEVICE_APP_ID = "9d0ef7e0905d422cba1ecf7e73d77e67"
+_WEAPI_KEY = b"0CoJUm6Qyw8W8jud"
+_WEAPI_IV = b"0102030405060708"
+_WEAPI_PUBLIC_KEY = RSA.import_key(b"""-----BEGIN PUBLIC KEY-----
+MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDgtQn2JZ34ZC28NWYpAUd98iZ37BUrX/aKzmFbt7clFSs6sXqHauqKWqdtLkF2KexO40H1YTX8z2lSgBBOAxLsvaklV8k4cBFK9snQXE9/DDaFt6Rr7iVZMldczhC0JNgTz+SHXT6CBHuX3e9SdB1Ua44oncaTWz7OBGLbCiK45wIDAQAB
+-----END PUBLIC KEY-----""")
+
+
+def _weapi_encrypt(payload):
+    """网易网页协议：两层 AES-CBC 和 RSA 封装的单次随机密钥。"""
+    secret = secrets.token_hex(8).encode("ascii")
+    plain = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    first = base64.b64encode(AES.new(_WEAPI_KEY, AES.MODE_CBC, _WEAPI_IV).encrypt(pad(plain, 16)))
+    params = AES.new(secret, AES.MODE_CBC, _WEAPI_IV).encrypt(pad(first, 16))
+    wrapped = pow(int.from_bytes(secret[::-1], "big"), _WEAPI_PUBLIC_KEY.e, _WEAPI_PUBLIC_KEY.n)
+    return {"params": base64.b64encode(params).decode("ascii"), "encSecKey": f"{wrapped:0256x}"}
 
 
 class NetEase:
     def __init__(self, get_cookie):
         self.get_cookie = get_cookie
+        self._qr = None
 
     def _headers(self, authenticated=True):
         h = {"User-Agent": UA, "Referer": BASE + "/"}
@@ -102,43 +128,92 @@ class NetEase:
                 return await r.read()
 
     # ---------- 登录 ----------
+    def cancel_qr(self):
+        self._qr = None
+
+    async def _qr_request(self, path, payload, context):
+        headers = self._headers(authenticated=False)
+        headers.update({"Origin": BASE, "x-os": "web", "X-loginMethod": "QrCode",
+                        "x-login-chain-id": context["chain"],
+                        "Cookie": "; ".join(f"{k}={v}" for k, v in context["cookies"].items())})
+        url = BASE + "/weapi/" + path.removeprefix("/api/")
+        try:
+            async with aiohttp.ClientSession(headers=headers) as session:
+                async with session.post(url, data=_weapi_encrypt({**payload, "csrf_token": ""}),
+                                        timeout=aiohttp.ClientTimeout(total=15)) as response:
+                    data = await response.json(content_type=None)
+                    if not isinstance(data, dict):
+                        raise ValueError("无效响应")
+                    if response.status >= 400 and str(data.get("code")) not in ("800", "801", "802", "803", "8821", "8830"):
+                        response.raise_for_status()
+                    for item in (*response.history, response):
+                        context["cookies"].update({k: v.value for k, v in item.cookies.items() if v.value})
+                    body_cookie = data.get("cookie") or ""
+                    for value in body_cookie if isinstance(body_cookie, list) else [body_cookie]:
+                        parsed = SimpleCookie()
+                        parsed.load(value)
+                        context["cookies"].update({k: v.value for k, v in parsed.items() if v.value})
+                    return data
+        except TimeoutError as e:
+            raise RuntimeError("连接网易云超时，请检查网络后重试") from e
+        except (aiohttp.ClientError, ValueError, CookieError, TypeError) as e:
+            raise RuntimeError("网易云登录接口连接失败或返回异常，请稍后重试") from e
+
     async def qr_key(self):
-        d = await self._get("/api/login/qrcode/unikey",
-                            {"type": QR_TYPE, "timestamp": time.time_ns() // 1_000_000}, anonymous=True)
-        key = d.get("unikey")
+        stamp, nuid = time.time_ns() // 1_000_000, secrets.token_hex(16)
+        context = {"chain": f"v1_unknown-{secrets.randbelow(1000000)}_web_login_{stamp}",
+                   "cookies": {"_ntes_nuid": nuid, "_ntes_nnid": f"{nuid},{stamp}", "WEVNSM": "1.0.0"},
+                   "key": None, "status": 801, "proofs": set(), "lock": asyncio.Lock()}
+        self._qr = context
+        d = await self._qr_request("/api/login/qrcode/unikey", {"type": QR_TYPE, "noCheckToken": True}, context)
+        body = d.get("data") if isinstance(d.get("data"), dict) else d
+        key = body.get("unikey")
         if str(d.get("code")) != "200" or not isinstance(key, str) or not key:
             raise RuntimeError("生成网易云二维码失败，请稍后重新扫码")
-        return key, f"https://music.163.com/login?codekey={key}"
+        if self._qr is not context:
+            raise RuntimeError("二维码已更新，请使用最新二维码")
+        context["key"] = key
+        return key, BASE + "/st/platform/scanlogin?" + urlencode(
+            {"codekey": key, "chainId": context["chain"], "hdw_device": "web", "hdw_appid": "web", "hitExp": "1"})
 
-    async def qr_poll(self, key):
-        d, r = await self._get("/api/login/qrcode/client/login",
-                               {"key": key, "type": QR_TYPE, "timestamp": time.time_ns() // 1_000_000},
-                               raw=True, anonymous=True)
-        try:
-            code = int(d.get("code"))
-        except (TypeError, ValueError):
-            code = None
-        messages = {800: "二维码已过期，请重新扫码", 801: "等待扫码", 802: "已扫码，请在手机上确认", 803: "登录成功"}
-        if code not in messages:
-            raise RuntimeError(f"网易云扫码状态异常（{code or '未知'}），请重新扫码")
-        msg = messages[code]
-        cookie = ""
-        if code == 803:
-            cookies = {}
-            # 兼容重定向响应头及返回体中的 Set-Cookie，过滤 Path / Expires 等属性。
-            for response in (*r.history, r):
-                cookies.update({k: v.value for k, v in response.cookies.items() if v.value})
-            body_cookie = d.get("cookie") or ""
-            for value in body_cookie if isinstance(body_cookie, list) else [body_cookie]:
-                parsed = SimpleCookie()
-                parsed.load(value)
-                for k, v in parsed.items():
-                    if v.value:
-                        cookies.setdefault(k, v.value)
-            if not cookies.get("MUSIC_U"):
-                raise RuntimeError("已确认扫码，但网易云未返回登录凭证，请重新扫码或手动粘贴 MUSIC_U")
-            cookie = "; ".join(f"{k}={v}" for k, v in cookies.items())
-        return code, msg, cookie
+    async def qr_poll(self, key, secure_captcha="", yd_device_token=""):
+        context = self._qr
+        if not context or context["key"] != key:
+            raise RuntimeError("二维码已更新或已结束，请重新扫码")
+        for value in (secure_captcha, yd_device_token):
+            if not isinstance(value, str) or len(value) > 8192 or any(c in value for c in "\r\n"):
+                raise ValueError("安全验证参数无效，请重新完成验证")
+        messages = {800: "二维码已过期，请重新扫码", 801: "等待扫码", 802: "已扫码，请在手机上确认", 803: "登录成功",
+                    8821: "网易云要求安全验证，请点击“开始安全验证”后继续登录",
+                    8830: "网易云要求进一步账号验证，请在官网完成登录后使用手动 Cookie 登录"}
+        async with context["lock"]:
+            if self._qr is not context:
+                raise RuntimeError("二维码已更新或已结束，请重新扫码")
+            if context["status"] == 8821 and not secure_captcha:
+                return 8821, messages[8821], ""
+            payload = {"key": key, "type": QR_TYPE, "noCheckToken": True, "ydDeviceToken": yd_device_token}
+            if secure_captcha:
+                digest = hashlib.sha256(secure_captcha.encode()).hexdigest()
+                if context["status"] != 8821 or digest in context["proofs"]:
+                    raise ValueError("安全验证已提交或当前无需验证，请重新打开安全验证")
+                context["proofs"].add(digest)
+                payload["secureCaptcha"] = secure_captcha
+            d = await self._qr_request("/api/login/qrcode/client/login", payload, context)
+            if self._qr is not context:
+                raise RuntimeError("二维码已更新或已结束，请重新扫码")
+            try:
+                code = int(d.get("code"))
+            except (TypeError, ValueError):
+                code = None
+            if code not in messages:
+                raise RuntimeError(f"网易云扫码状态异常（{code or '未知'}），请重新扫码")
+            context["status"] = code
+            cookie = ""
+            if code == 803:
+                if not context["cookies"].get("MUSIC_U"):
+                    raise RuntimeError("已确认扫码，但网易云未返回登录凭证，请重新扫码或手动粘贴 MUSIC_U")
+                cookie = "; ".join(f"{k}={context['cookies'][k]}" for k in ("MUSIC_U", "__csrf") if context["cookies"].get(k))
+            return code, messages[code], cookie
 
     async def account(self):
         d = await self._get("/api/nuser/account/get")

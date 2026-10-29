@@ -23,6 +23,7 @@ import json
 import sys
 
 from dtgame.bridge import BridgeError, GameBridge
+from dtgame.expedition import MAX_DEPTH, depth_settings
 from dtgame import view
 
 PROTOCOL_VERSION = "2024-11-05"
@@ -44,12 +45,26 @@ TOOLS = [
         "inputSchema": _schema({}),
     },
     {
+        "name": "begin_expedition",
+        "description": "在出征大厅选择已解锁的深度并开始新出征。先用 game_state 查看当前深度和解锁上限；深度只能在新局开始前调整。省略 depth 沿用游戏设置。",
+        "inputSchema": _schema({
+            "depth": {"type": "integer", "minimum": 0, "maximum": MAX_DEPTH,
+                      "description": "出征深度，必须处于 game_state 显示的已解锁范围"},
+        }),
+    },
+    {
         "name": "play_card",
         "description": "战斗中使用一张手牌。slot 是手牌序号；单体牌需要 target 指定敌人序号。",
         "inputSchema": _schema({
             "slot": {"type": "integer", "description": "手牌序号，见 game_state 的 hand"},
             "target": {"type": "integer", "description": "敌人序号，见 game_state 的 enemies"},
+            "release": {"type": "boolean", "description": "仅格兰斯光剑/暗剑：false 蓄能，true 解放。先设置全手牌模式再出牌；合璧牌不要填。"},
         }, ["slot"]),
+    },
+    {
+        "name": "set_grans_mode",
+        "description": "切换格兰斯全手牌蓄能/解放模式。只切换开关，不出牌、不扣能量或蓄能；通常直接在 play_card 中带 release 更方便。",
+        "inputSchema": _schema({"release": {"type": "boolean", "description": "true 解放，false 蓄能"}}, ["release"]),
     },
     {
         "name": "end_turn",
@@ -129,8 +144,30 @@ class Server:
             return json.dumps(b.screen(), ensure_ascii=False)
         if name == "game_state":
             return view.render(b.state())
+        if name == "begin_expedition":
+            state = b.state()
+            if state.get("screen") != "hall" or state.get("busy"):
+                raise BridgeError("只能在可操作的出征大厅选择深度并开始新局")
+            if "depth" in args:
+                depth = args["depth"]
+                _, limit = depth_settings(state)
+                if limit is None:
+                    raise BridgeError("游戏桥未提供已解锁深度上限，请省略 depth 沿用当前设置")
+                if type(depth) is not int or not 0 <= depth <= limit:
+                    raise ValueError(f"出征深度必须是 0～{limit} 的整数")
+                return _j(b.begin_expedition(depth))
+            return _j(b.begin_expedition())
         if name == "play_card":
+            if "release" in args:
+                if type(args["release"]) is not bool:
+                    raise ValueError("release 必须是布尔值")
+                return _j(b.play_card(int(args.get("slot", -1)), "", int(args.get("target", -1)), release=args["release"]))
             return _j(b.play_card(int(args.get("slot", -1)), "", int(args.get("target", -1))))
+        if name == "set_grans_mode":
+            if type(args.get("release")) is not bool:
+                raise ValueError("release 必须是布尔值")
+            b.state()  # 用这次读到的战斗/回合/手牌作为切换的前置条件。
+            return _j(b.set_grans_mode(args["release"]))
         if name == "end_turn":
             return _j(b.end_turn())
         if name == "use_potion":

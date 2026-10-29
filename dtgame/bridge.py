@@ -8,6 +8,8 @@ import json
 import socket
 import time
 
+from dtgame import grans
+
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 9787
 
@@ -17,9 +19,12 @@ class BridgeError(RuntimeError):
 
 
 class GameBridge:
-    def __init__(self, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT):
+    def __init__(self, host: str = DEFAULT_HOST, port: int = DEFAULT_PORT, grans_port: int = 9788):
         self.host = host
         self.port = port
+        self.grans_port = grans_port
+        self._grans_snapshot = None
+        self._grans_probe_after = 0.0
 
     def call(self, cmd: str, args: dict | None = None, timeout: float = 45.0) -> dict:
         payload = json.dumps({"cmd": cmd, "args": args or {}}, ensure_ascii=False) + "\n"
@@ -50,11 +55,72 @@ class GameBridge:
 
     def state(self) -> dict:
         r = self.call("state", timeout=20)
-        return r.get("state", {})
+        state = r.get("state", {})
+        self._grans_snapshot = None
+        if state.get("screen") != "battle" or not grans.is_grans(state):
+            return state
+        if time.monotonic() < self._grans_probe_after:
+            return {**state, "battle": {**state.get("battle", {}), "grans": {
+                "available": False, "error": "格兰斯游戏接口暂不可用，稍后自动重连"}}}
+        try:
+            snapshot = self._read_grans()
+            state = grans.merge_snapshot(state, snapshot)
+            self._grans_snapshot = snapshot
+            self._grans_probe_after = 0.0
+            return state
+        except (BridgeError, ValueError) as e:
+            if isinstance(e, BridgeError):
+                self._grans_probe_after = time.monotonic() + 10
+            return {**state, "battle": {**state.get("battle", {}), "grans": {
+                "available": False, "error": str(e)}}}
+
+    def _call_grans(self, cmd: str, args: dict | None = None) -> dict:
+        return GameBridge(self.host, self.grans_port).call(cmd, args, timeout=1.5)
+
+    def _read_grans(self) -> dict:
+        snapshot = self._call_grans("grans_state")
+        try:
+            grans.validate_snapshot(snapshot)
+        except ValueError as e:
+            raise BridgeError(str(snapshot.get("error") or e) if isinstance(snapshot, dict) else str(e)) from e
+        return snapshot
+
+    def set_grans_mode(self, release: bool) -> dict:
+        if type(release) is not bool:
+            raise ValueError("release 必须是布尔值")
+        snapshot = self._grans_snapshot or self._read_grans()
+        result = self._call_grans("grans_mode", {
+            "release": release, "battle_id": snapshot["battle_id"],
+            "turn": snapshot["turn"], "hand_ids": snapshot["hand_ids"],
+            "light": snapshot["light"], "dark": snapshot["dark"], "release_mode": snapshot["release_mode"],
+        })
+        if result.get("ok"):
+            grans.validate_snapshot(result)
+            if result["release_mode"] != release:
+                raise BridgeError("游戏没有完成格兰斯模式切换")
+            self._grans_snapshot = result
+        return result
 
     # ---------- 写 ----------
-    def play_card(self, slot: int = -1, card_id: str = "", target: int = -1) -> dict:
-        return self.call("play_card", {"slot": slot, "id": card_id, "target": target})
+    def play_card(self, slot: int = -1, card_id: str = "", target: int = -1,
+                  release: bool | None = None) -> dict:
+        if release is not None:
+            if type(release) is not bool:
+                raise ValueError("release 必须是布尔值")
+            snapshot = self._grans_snapshot or self._read_grans()
+            picked = next((c for c in snapshot["cards"] if (
+                c.get("id") == card_id if card_id else c.get("slot") == slot)), None)
+            if not picked or picked.get("sword") not in ("light", "dark"):
+                return {"ok": False, "error": "只有格兰斯光剑/暗剑可指定 release；合璧牌按牌面自动消耗"}
+            if release and not picked.get("can_release"):
+                return {"ok": False, "error": "这张剑牌当前不能解放：蓄能为空、额度已用或属于副本，请蓄能打出"}
+            result = self.set_grans_mode(release)
+            if not result.get("ok"):
+                return result
+            slot, card_id = picked["slot"], picked["id"]
+        result = self.call("play_card", {"slot": slot, "id": card_id, "target": target})
+        self._grans_snapshot = None
+        return result
 
     def end_turn(self) -> dict:
         return self.call("end_turn", timeout=60)

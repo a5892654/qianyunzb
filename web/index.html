@@ -527,7 +527,7 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
       <div class="row"><span class="btn p" id="neQrBtn">扫码登录</span><span class="btn r" id="neLogout">退出登录</span></div>
       <div id="neQrBox" class="row" style="display:none;align-items:flex-start;gap:16px">
         <div id="neQrSvg" style="background:#fff;padding:8px;border-radius:8px;width:180px;height:180px"></div>
-        <div><div id="neQrMsg">请用网易云音乐手机 App 扫码</div><div class="hint">扫码登录失败时，可以手动粘贴 Cookie（浏览器登录 music.163.com 后复制 MUSIC_U）</div></div>
+        <div><div id="neQrMsg">请用网易云音乐手机 App 扫码</div><button class="btn b" id="neVerifyBtn" style="display:none;margin-top:8px">开始安全验证</button><div id="neCaptcha"></div><div class="hint">需要安全验证时，点击上方按钮完成网易验证后继续；也可在官网登录后手动粘贴 Cookie（MUSIC_U）</div></div>
       </div>
       <details style="margin-top:8px"><summary class="hint" style="cursor:pointer">手动粘贴 Cookie</summary>
         <div class="row" style="margin-top:8px"><input id="neCookie" placeholder="MUSIC_U=..."><span class="btn" id="neCookieBtn">保存</span></div>
@@ -1205,8 +1205,44 @@ $('#sgSearch').onclick = async () => {
   $('#sgResults').innerHTML = r.songs.map(s => `<div class="row" style="margin-bottom:4px"><span style="flex:1">${esc(s.name)} - ${esc(s.artist)} <span class="hint">${fmtT(s.dur)}</span></span>${s.playable ? `<span class="btn sm p" data-addsong="${esc(JSON.stringify(s))}">加入</span>` : '<span class="hint">不能播放</span>'}</div>`).join('') || '没有结果';
 };
 $('#sgQ').onkeydown = e => { if (e.key === 'Enter') $('#sgSearch').click(); };
-let neTimer = null, neAttempt = 0;
-function stopNeLogin() { clearTimeout(neTimer); neTimer = null; return ++neAttempt; }
+let neTimer = null, neAttempt = 0, neCaptcha = null, neCaptchaTimer = null, neChallengeVersion = 0, neVerifyAction = null;
+const neScripts = new Map();
+function clearNeCaptcha() {
+  ++neChallengeVersion; clearTimeout(neCaptchaTimer); neCaptchaTimer = null;
+  const instance = neCaptcha; neCaptcha = null;
+  try { instance?.destroy(); } catch {}
+}
+function stopNeLogin() {
+  clearTimeout(neTimer); neTimer = null; ++neAttempt; neVerifyAction = null;
+  clearNeCaptcha(); $('#neVerifyBtn').style.display = 'none';
+  return neAttempt;
+}
+function loadNeSdk(url, apiName) {
+  if (typeof window[apiName] === 'function') return Promise.resolve();
+  if (neScripts.has(url)) return neScripts.get(url);
+  const promise = new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    const failed = () => { clearTimeout(timer); script.remove(); reject(new Error('网易安全验证加载失败，请检查网络后重试')); };
+    const timer = setTimeout(failed, 8000);
+    script.src = url; script.async = true; script.onerror = failed;
+    script.onload = () => { clearTimeout(timer); typeof window[apiName] === 'function' ? resolve() : failed(); };
+    document.head.appendChild(script);
+  }).catch(error => { neScripts.delete(url); throw error; });
+  neScripts.set(url, promise);
+  return promise;
+}
+async function neDeviceToken(appId) {
+  if (!appId) return '';
+  let timer;
+  try {
+    await loadNeSdk('https://st.music.163.com/device/signature/create/deviceid.js', 'createNEFingerprint');
+    const device = window.createNEFingerprint({appId, timeout: 5000});
+    const result = await Promise.race([device.getToken(), new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('timeout')), 7000); })]);
+    return typeof result?.token === 'string' ? result.token : '';
+  } catch { return ''; }
+  finally { clearTimeout(timer); }
+}
+$('#neVerifyBtn').onclick = () => neVerifyAction?.();
 async function neApi(url, body) {
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 40000);
   try {
@@ -1235,19 +1271,34 @@ $('#neQrBtn').onclick = async () => {
     if (!r.key || !r.svg) throw new Error('未获取到二维码，请重试');
     $('#neQrSvg').innerHTML = r.svg; $('#neQrMsg').textContent = '请用网易云音乐手机 App 扫码，并在手机上确认登录';
     const deadline = Date.now() + 180000;
+    const deviceToken = neDeviceToken(r.device_app_id);
     let failures = 0;
-    const poll = async () => {
+    const poll = async (proof = '') => {
       if (attempt !== neAttempt) return;
       if (Date.now() >= deadline) { $('#neQrMsg').textContent = '二维码已过期，请点击“扫码登录”重试'; return; }
       try {
-        const p = await neApi('/api/songs/qrpoll', {key: r.key});
+        const token = proof ? await neDeviceToken(r.device_app_id) : await deviceToken;
+        if (attempt !== neAttempt) return;
+        const body = {key: r.key, yd_device_token: token};
+        if (proof) body.secure_captcha = proof;
+        const p = await neApi('/api/songs/qrpoll', body);
         if (attempt !== neAttempt) return;
         const code = Number(p.code);
-        if (![800, 801, 802, 803].includes(code)) throw new Error('扫码状态异常，请重新扫码');
+        if (![800, 801, 802, 803, 8821, 8830].includes(code)) throw new Error('扫码状态异常，请重新扫码');
         failures = 0;
         $('#neQrMsg').textContent = p.msg;
-        if (code === 800) return;
+        if (code === 8821) {
+          $('#neVerifyBtn').style.display = 'inline-flex'; $('#neVerifyBtn').disabled = false;
+          return;
+        }
+        $('#neVerifyBtn').style.display = 'none';
+        if (code === 800 || code === 8830) {
+          clearNeCaptcha();
+          if (code === 8830) $('#neCookie').closest('details').open = true;
+          return;
+        }
         if (code === 803) {
+          clearNeCaptcha(); neVerifyAction = null;
           try { await refreshNeState(); }
           catch { if (attempt === neAttempt) $('#neQrMsg').textContent = '登录信息已保存，请刷新页面查看账号状态'; }
           if (attempt !== neAttempt) return;
@@ -1261,6 +1312,41 @@ $('#neQrBtn').onclick = async () => {
         $('#neQrMsg').textContent = '查询失败，正在重试：' + error.message;
       }
       neTimer = setTimeout(poll, 2000);
+    };
+    neVerifyAction = async () => {
+      if (attempt !== neAttempt || neCaptcha) return;
+      clearNeCaptcha();
+      const version = neChallengeVersion;
+      const current = () => attempt === neAttempt && version === neChallengeVersion;
+      const failed = message => {
+        if (!current()) return;
+        clearNeCaptcha(); $('#neQrMsg').textContent = message;
+        $('#neVerifyBtn').style.display = 'inline-flex'; $('#neVerifyBtn').disabled = false;
+      };
+      $('#neVerifyBtn').disabled = true; $('#neQrMsg').textContent = '正在加载网易安全验证…';
+      try {
+        if (!r.captcha_id) throw new Error('未取得安全验证配置，请重新点击“扫码登录”');
+        await loadNeSdk('https://cstaticdun.126.net/load.min.js', 'initNECaptcha');
+        if (!current()) return;
+        neCaptchaTimer = setTimeout(() => failed('安全验证初始化超时，请点击按钮重试'), 30000);
+        window.initNECaptcha({captchaId: r.captcha_id, element: '#neCaptcha', mode: 'popup', width: '300px',
+          onVerify: (error, result) => {
+            if (!current()) return;
+            const proof = typeof result?.validate === 'string' ? result.validate.trim() : '';
+            if (error || !proof) { $('#neQrMsg').textContent = '安全验证未通过，请在验证窗口重试'; return; }
+            clearNeCaptcha(); $('#neVerifyBtn').style.display = 'none';
+            $('#neQrMsg').textContent = '验证完成，正在继续登录…';
+            poll(proof);
+          },
+          onClose: () => failed('安全验证已关闭，可以重新点击按钮继续'),
+          onError: () => failed('安全验证运行失败，请点击按钮重试')
+        }, instance => {
+          if (!current()) { try { instance.destroy(); } catch {} return; }
+          clearTimeout(neCaptchaTimer); neCaptchaTimer = null; neCaptcha = instance;
+          $('#neQrMsg').textContent = '请完成网易安全验证，完成后会继续登录';
+          instance.popUp();
+        }, () => failed('安全验证初始化失败，请点击按钮重试'));
+      } catch (error) { failed(error.message || '安全验证加载失败，请重试'); }
     };
     neTimer = setTimeout(poll, 1000);
   } catch (error) {

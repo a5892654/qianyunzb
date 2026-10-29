@@ -330,7 +330,7 @@ class CharacterRotationTests(unittest.TestCase):
         p.bridge.pick_character.assert_called_once_with(0, "a")
         self.assertIn("只有奈尔可选", p._rotation(state))
 
-    def test_invalid_or_locked_choice_never_reaches_game(self):
+    def test_invalid_or_locked_choice_is_replaced_with_available_character(self):
         import copy
         state = {"screen": "character_select", **copy.deepcopy(self.ROSTER)}
         state["character_select"]["characters"][1]["enabled"] = False
@@ -338,8 +338,9 @@ class CharacterRotationTests(unittest.TestCase):
                        {"action": "character", "slot": 0, "id": "missing"},
                        {"action": "character", "slot": 1}):
             p = self.player(["奈尔"])
-            self.assertFalse(p._do(state, action)["ok"])
-            p.bridge.pick_character.assert_not_called()
+            p.bridge.pick_character.return_value = {"ok": True}
+            self.assertTrue(p._do(state, action)["ok"])
+            p.bridge.pick_character.assert_called_once_with(2, "c")
 
 
 class CharacterRotationFlowTests(unittest.IsolatedAsyncioTestCase):
@@ -348,8 +349,12 @@ class CharacterRotationFlowTests(unittest.IsolatedAsyncioTestCase):
         import copy
 
         bridge = Mock()
-        bridge.screen.return_value = {"screen": "character_select"}
+        bridge.screen.side_effect = lambda: {"screen": "character_select" if bridge.state.return_value.get("screen") == "character_select" else "map"}
         bridge.pick_character.return_value = {"ok": True}
+        def enter_map(*args):
+            bridge.state.return_value = {"screen": "map"}
+            return {"ok": True}
+        bridge.pick_character.side_effect = enter_map
         on_chars, speak = Mock(), Mock(return_value=None)
         p = Player({}, bridge, chars=["奈尔"], on_chars=on_chars, speak=speak)
         p._ask = AsyncMock(side_effect=lambda text: {"action": "character", "slot": 0,
@@ -392,35 +397,62 @@ class CharacterRotationFlowTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BootModeTests(unittest.TestCase):
-    def _player(self, hall=None):
+    """开局只有一条路：step 在大厅选深度 -> begin_expedition（默认深层+跳教学）。"""
+
+    def _player(self, hall):
         from dtgame.player import Player
         bridge = Mock()
         bridge.screen.return_value = {"screen": "hall"}
-        bridge.state.return_value = {"hall": hall or {"ready": True}}
+        bridge.state.return_value = {"screen": "hall", "hall": hall}
+        bridge.begin_expedition.return_value = {"ok": True}
+        bridge.hall_run.return_value = {"ok": True}
         return Player({}, bridge, narrate=False, log_push=Mock()), bridge
 
-    def test_hall_starts_deep_expedition(self):
-        """代打开局必须点名深层探索并跳过教学，不能落回浅层。"""
-        p, bridge = self._player()
-        bridge.begin_expedition.return_value = {"ok": True, "mode": "deep", "tutorial_skipped": True}
-        self.assertIn("深层探索", p._boot())
-        bridge.begin_expedition.assert_called_once_with(mode="deep", skip_tutorial=True)
-        self.assertIn("跳过新手教学", str(p.log_push.call_args_list))
+    def test_hall_boot_defers_start_to_step(self):
+        """_boot 不能替大厅出征，否则和 step 的深度选择双重开局。"""
+        p, bridge = self._player({"ready": True})
+        self.assertEqual(p._boot(), "")
+        bridge.begin_expedition.assert_not_called()
+
+    def test_bridge_expedition_is_deep_and_skips_tutorial(self):
+        """代打只打深层：mode/skip_tutorial 由桥层默认带给游戏。"""
+        from dtgame.bridge import GameBridge
+        b = GameBridge()
+        b.call = Mock(return_value={"ok": True})
+        b.begin_expedition(7)
+        b.call.assert_called_once_with("begin_expedition",
+                                       {"mode": "deep", "skip_tutorial": True, "depth": 7},
+                                       timeout=60)
+
+    def test_hall_still_uses_reported_depth(self):
+        p, bridge = self._player({"selected_depth": 2, "unlocked_depth": 5})
+        r = p._begin_expedition({"screen": "hall", "hall": {"selected_depth": 2, "unlocked_depth": 5}},
+                                {"action": "expedition"})
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["depth"], 2)
+        bridge.begin_expedition.assert_called_once_with(2)
+        bridge.hall_run.assert_not_called()
 
     def test_pending_shallow_run_is_restarted_in_deep(self):
         p, bridge = self._player({"ready": True, "continue_dialog": True, "run_mode": "shallow"})
-        bridge.hall_run.return_value = {"ok": True}
-        self.assertIn("放弃旧局", p._boot())
+        r = p._begin_expedition({"screen": "hall", "hall": {"continue_dialog": True,
+                                                            "run_mode": "shallow"}},
+                                {"action": "expedition"})
         bridge.hall_run.assert_called_once_with("restart", mode="deep")
         bridge.begin_expedition.assert_not_called()
+        self.assertTrue(r["stale"])  # 弹窗收掉了但深度还没选，下一轮再出征
         self.assertIn("浅层", str(p.log_push.call_args_list))
 
     def test_pending_deep_run_is_resumed(self):
         p, bridge = self._player({"ready": True, "continue_dialog": True, "run_mode": "deep"})
-        bridge.hall_run.return_value = {"ok": True}
-        self.assertIn("继续未完成的深层", p._boot())
+        r = p._begin_expedition({"screen": "hall", "hall": {"continue_dialog": True,
+                                                            "run_mode": "deep"}},
+                                {"action": "expedition"})
         bridge.hall_run.assert_called_once_with("continue")
         bridge.begin_expedition.assert_not_called()
+        self.assertTrue(r["ok"])
+        self.assertNotIn("stale", r)
+        self.assertIn("继续未完成的深层", str(p.log_push.call_args_list))
 
 
 class DeepOnlyRunTests(unittest.IsolatedAsyncioTestCase):
