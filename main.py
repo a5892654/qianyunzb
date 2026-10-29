@@ -704,7 +704,8 @@ def build_web(app: App):
 
     @routes.get("/api/broadcast/status")
     async def broadcast_status(_):
-        return web.json_response(app.broadcast.status())
+        return web.json_response({**app.broadcast.status(),
+                                  "finishing": app.schedule.active_action == "farewell"})
 
     @routes.get("/api/broadcast/schedule")
     async def broadcast_schedule(_):
@@ -827,6 +828,14 @@ def build_web(app: App):
         if task and not task.done():
             task.cancel()
         return web.json_response(await app.schedule.stop_now())
+
+    @routes.post("/api/broadcast/finish")
+    async def broadcast_finish(_):
+        task = getattr(app, "auto_stop_task", None)
+        if task and not task.done():
+            task.cancel()
+        return web.json_response(await app.schedule.stop_now(
+            farewell="今天播了很久了，下播吃饭饭了。"))
 
     @routes.post("/api/test_event")
     async def test_event(request):

@@ -10,6 +10,8 @@ _CLOCK = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d\Z")
 class DailyBroadcastSchedule:
     # 刚启动的游戏窗口要一两秒才出现在枚举里，重试这么多秒（测试里会调小）
     WINDOW_TRIES = 10
+    FAREWELL_TIMEOUT = 90
+    FAREWELL_TAIL = 1.2
 
     def __init__(self, app, clock=datetime.now):
         self.app = app
@@ -190,7 +192,7 @@ class DailyBroadcastSchedule:
             asyncio.create_task(self.app.connect())
         return result
 
-    async def stop_now(self):
+    async def stop_now(self, *, farewell=""):
         self.abort_start = self.stop_requested = True
         now = self.clock()
         self.last_minute = now.strftime("%Y-%m-%d %H:%M")
@@ -198,7 +200,24 @@ class DailyBroadcastSchedule:
             self.settings["last_start"] = now.date().isoformat()
             config.save(self.app.cfg)
         async with self.execution_lock:
-            return await self.app.broadcast.stop()
+            try:
+                if farewell and self.app.broadcast.running:
+                    self.active_action = "farewell"
+                    self.app.push("notice", {"text": "正在告别，说完后自动下播"})
+                    job = self.app.pipe.say_job_id(farewell, "")
+                    if job is None:
+                        return {"ok": False, "error": "告别语音未能加入队列，请重试手动下播"}
+                    try:
+                        async with asyncio.timeout(self.FAREWELL_TIMEOUT):
+                            while not self.app.pipe.spoken_done(job):
+                                await asyncio.sleep(0.1)
+                    except TimeoutError:
+                        return {"ok": False, "error": "告别语音等待超时，直播尚未停止；可重试手动下播，或点击停止直播"}
+                    # 等声卡缓冲和直播采集收尾，避免最后几个字被截掉。
+                    await asyncio.sleep(self.FAREWELL_TAIL)
+                return await self.app.broadcast.stop()
+            finally:
+                self.active_action = ""
 
     async def close(self):
         self.closing = self.abort_start = self.stop_requested = True

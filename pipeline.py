@@ -8,15 +8,16 @@ import time
 import numpy as np
 
 from brain import fill
+from interaction import AudienceInteraction
 from tts import ENV_FPS, envelope
 from tts import decode_audio_file
 
 log = logging.getLogger("pipe")
 
 TYPE_NAMES = {"enter": "进房", "follow": "关注", "danmaku": "弹幕", "gift": "礼物", "guard": "上舰",
-              "superchat": "醒目留言", "like": "点赞", "manual": "手动", "narration": "游戏解说"}
+              "superchat": "醒目留言", "like": "点赞", "manual": "手动", "narration": "游戏解说", "interaction": "主动互动"}
 PRIORITY = {"manual": 0, "superchat": 0, "guard": 0, "gift": 1, "danmaku": 2, "follow": 2,
-            "enter": 3, "like": 4, "narration": 5}
+            "enter": 3, "like": 4, "interaction": 4, "narration": 5}
 MERGE_BY_TYPE = ("enter", "follow", "like")
 _seq = itertools.count(1)
 
@@ -30,7 +31,7 @@ def describe(ev):
     n = ev.get("name", "")
     if t == "danmaku":
         return f"{n}：{ev.get('text', '')}"
-    if t in ("manual", "narration"):
+    if t in ("manual", "narration", "interaction"):
         return ev.get("text", "")
     if t == "gift":
         v = f"（{ev['value']}元）" if ev.get("value") else "（免费）"
@@ -54,6 +55,8 @@ class Pipeline:
         self.merging = {}
         self.current = None
         self._spoken_ids = set()
+        self.pending_replies = set()
+        self.interaction = AudienceInteraction(self)
         self.tasks = []
 
     @property
@@ -159,6 +162,7 @@ class Pipeline:
                                 "skip": reason, "test": bool(ev.get("test"))})
         if reason:
             return
+        self.interaction.on_event(ev)
         t = ev["type"]
         ec = self.cfg["events"][t]
         win = float(ec.get("merge_window", 0) or 0)
@@ -207,11 +211,14 @@ class Pipeline:
                 if now >= m["deadline"]:
                     del self.merging[key]
                     self._flush_merge(key, m)
+            self.interaction.tick()
 
     def _enqueue(self, ev, text=None):
         job = {"id": next(_seq), "type": ev["type"], "ev": ev, "text": text, "ts": time.time(),
                "prio": PRIORITY.get(ev["type"], 3)}
         self.jobs.append(job)
+        if ev["type"] not in ("narration", "interaction"):
+            self.pending_replies.add(job["id"])
         limit = max(1, int(self.cfg["filter"].get("max_queue", 6)))
         while len(self.jobs) > limit:
             victim = max(self.jobs, key=lambda j: (j["prio"], -j["ts"]))
@@ -220,6 +227,7 @@ class Pipeline:
             self.app.push("log", {"level": "warn", "msg": f"队列已满，丢弃：{describe(victim['ev'])}"})
         self.has_job.set()
         self._push_queue()
+        return job["id"] if job in self.jobs else None
 
     def say(self, text, emotion="", *, kind="manual"):
         before = set(j["id"] for j in self.jobs)
@@ -251,6 +259,9 @@ class Pipeline:
         return job_id in self._spoken_ids
 
     def _mark_done(self, job_id):
+        if job_id in self.pending_replies:
+            self.interaction.replied()
+        self.pending_replies.discard(job_id)
         self._spoken_ids.add(job_id)
         if len(self._spoken_ids) > 256:
             self._spoken_ids = set(sorted(self._spoken_ids)[-128:])
@@ -295,6 +306,8 @@ class Pipeline:
                 elif rule:
                     lines = [l.strip() for l in rule["reply"].splitlines() if l.strip()]
                     text, src, emotion = fill(random.choice(lines), job["ev"]), "固定回复", rule.get("emotion", "")
+                elif job["type"] == "interaction":
+                    text, src, emotion = await self.interaction.reply(job["ev"])
                 else:
                     t0 = time.time()
                     context = dt.commentary_context() if dt and job["type"] in ("danmaku", "superchat") else ""
@@ -309,11 +322,14 @@ class Pipeline:
             if not text:
                 self._mark_done(job["id"])
                 continue
+            self.interaction.remember_reply(job["ev"], text)
             if dt and dt is getattr(self.app, "dt", None) and dt.running and job["type"] in ("danmaku", "superchat"):
                 dt.remember_interaction(job["ev"], text)
             emotion = emotion or self.detect_emotion(text)
             item = {"id": job["id"], "type": job["type"], "text": text, "src": src, "emotion": emotion,
                     "desc": describe(job["ev"]) if job["text"] is None else ""}
+            if job["type"] == "interaction":
+                item["interaction_event"] = job["ev"]
             if job["ev"].get("audio_file"):
                 item["audio_file"] = job["ev"]["audio_file"]
                 item["src"] = "心愿单音频"
@@ -402,6 +418,11 @@ class Pipeline:
         loop = asyncio.get_running_loop()
         while True:
             item = await self.play_q.get()
+            if item["type"] == "interaction":
+                if not self.interaction.can_speak(item["interaction_event"]):
+                    self._mark_done(item["id"])
+                    continue
+                self.interaction.spoken(item["text"])
             self.current = item
             clock = asyncio.create_task(self._voice_clock(item["id"]))
             try:

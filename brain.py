@@ -20,6 +20,25 @@ RULES = (
     "遇到辱骂、引战、政治、色情或违规内容就俏皮地转移话题。"
 )
 
+GIFT_TOKEN_THANKS = "谢谢老板，这能买不少token了！"
+GIFT_THANKS_TIERS = (
+    (5, 10, "这份支持收到啦，今天的算力口粮又续上了！"),
+    (20, 50, "有你撑腰，陪大家玩游戏聊天都更有精神了，给老板比个心！"),
+    (100, 200, "这么大一份心意我认真收下啦，也祝老板天天开心、事事顺利，感谢你的陪伴！"),
+)
+
+
+def gift_thanks(ev):
+    """按本次（含连击合并）数量或总价值分档，不把免费礼物当成付费收入。"""
+    num = max(1, int(ev.get("num") or 1))
+    value = float(ev.get("value") or 0) if ev.get("paid") else 0
+    donor = f"{ev['name']}老板" if ev.get("name") else "老板"
+    intro = f"谢谢{donor}送的{num}个{ev.get('gift') or '礼物'}！{GIFT_TOKEN_THANKS}"
+    level = max((i for i, (count, amount, _) in enumerate(GIFT_THANKS_TIERS, 1)
+                 if num >= count or value >= amount), default=0)
+    extra = "".join(line for _, _, line in GIFT_THANKS_TIERS[:level])
+    return intro, extra
+
 
 def default_qoder_exe():
     return os.path.join(os.path.expanduser("~"), ".qoder", "bin", "qodercli", "qodercli.exe")
@@ -150,7 +169,7 @@ class OpenAIChat:
             async with s.post(f"{base}/chat/completions",
                               headers={"Authorization": f"Bearer {cfg_ai['openai_key']}"},
                               json={"model": cfg_ai["openai_model"], "messages": msgs, "temperature": 0.9,
-                                    "max_tokens": 200},
+                                    "max_tokens": max(200, int(cfg_ai.get("max_chars", 40)) * 3)},
                               timeout=aiohttp.ClientTimeout(total=float(cfg_ai.get("timeout", 30)))) as r:
                 d = await r.json(content_type=None)
                 if r.status != 200:
@@ -230,11 +249,16 @@ class Brain:
 
     async def reply(self, cfg, ev_cfg, ev, context=""):
         """返回 (文本, 来源, 表情)。AI 失败时自动退回模板。"""
+        if ev["type"] == "gift" and ev_cfg.get("tiered_thanks", True):
+            return await self._gift_reply(cfg, ev_cfg, ev)
         lines = [l.strip() for l in ev_cfg.get("templates", "").splitlines() if l.strip()]
         template_text = fill(random.choice(lines), ev) if lines else ""
         if ev_cfg.get("mode") == "ai":
             try:
                 prompt = fill(ev_cfg.get("ai_prompt", ""), ev)
+                if ev["type"] == "danmaku" and cfg.get("interaction", {}).get("enabled", True):
+                    prompt += ("\n先回应观众具体说的内容，语气像正在和朋友聊天。合适时顺势追问一个相关的小问题，"
+                               "让观众容易继续接话；不用每条都提问，也不要只顾着游戏解说。")
                 if context:
                     prompt += ("\n\n【当前直播游戏上下文，仅供参考】\n" + context
                                + "\n你就是正在打这局游戏的主播。优先回应上面的观众留言；"
@@ -248,6 +272,30 @@ class Brain:
                 log.warning("AI 生成失败，改用模板：%s", e)
                 return template_text, f"模板(AI失败:{str(e)[:80]})", ""
         return template_text, "模板", ""
+
+    async def _gift_reply(self, cfg, ev_cfg, ev):
+        intro, extra = gift_thanks(ev)
+        fallback = intro + extra
+        if not extra or ev_cfg.get("mode") != "ai":
+            return fallback, "礼物感谢模板", ""
+        # 只给这次礼物的补充感谢放宽字数，普通弹幕仍遵守原来的长度设置。
+        max_chars = len(extra) + 20
+        gift_cfg = {**cfg, "ai": {**cfg["ai"], "max_chars": max_chars}}
+        prompt = fill(ev_cfg.get("ai_prompt", ""), ev)
+        prompt += (f"\n【本次礼物感谢】开头由程序固定拼接：{intro}\n"
+                   f"请只输出接在开头后面的补充感谢，约{len(extra)}至{max_chars}字。"
+                   "不要重复开头、观众名字、礼物数量或token那句话。"
+                   f"这次感谢至少要像下面这样丰富，可以自然改写：{extra}"
+                   "不要索要更多礼物，不要承诺额外回报。")
+        try:
+            text, emotion = await self.ai(gift_cfg, prompt)
+            # 模型漏写或过于简短时，仍用对应档位的完整感谢词。
+            if len(text) >= len(extra) and GIFT_TOKEN_THANKS not in text and not (ev.get("name") and ev["name"] in text):
+                return intro + text, "AI", emotion
+        except Exception as e:
+            log.warning("AI 礼物感谢生成失败，改用分档模板：%s", e)
+            return fallback, f"模板(AI失败:{str(e)[:80]})", ""
+        return fallback, "礼物感谢模板", ""
 
     async def warm(self, cfg):
         if cfg["ai"].get("backend") != "openai":

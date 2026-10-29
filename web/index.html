@@ -111,7 +111,7 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
     <div class="stat"><div class="k">自动回复</div><div class="v" id="s_paused">-</div></div>
   </div>
   <div class="card">
-    <div class="row"><h3 style="margin:0;flex:1">B站直播</h3><span class="hint" id="broadcastDashState">尚未开播</span><button class="btn p" id="openBroadcast">登录并开播</button></div>
+    <div class="row"><h3 style="margin:0;flex:1">B站直播</h3><span class="hint" id="broadcastDashState">尚未开播</span><button class="btn p" id="openBroadcast">登录并开播</button><button class="btn r" id="broadcastDashFinish" disabled>手动下播</button></div>
     <div class="hint">在「一键开播」选择游戏窗口和分区，千音直接采集画面与声音，无需另开直播姬或 OBS。</div>
   </div>
   <div class="card">
@@ -281,7 +281,8 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
     <img id="broadcastPreviewImage" alt="直播画面预览" style="display:none;width:100%;max-height:420px;object-fit:contain;background:#000;border-radius:8px">
     <div id="broadcastPreviewEmpty" class="hint" style="padding:60px 0;text-align:center">先点预览，确认没有黑屏或隐私内容后再开播。预览不会发到 B站。</div>
     <div class="row" style="margin-top:12px"><span class="hint" id="broadcastStatus">尚未开播</span><span style="flex:1"></span><span class="hint">声音电平</span><meter id="broadcastMeter" min="0" max="1" value="0" style="width:130px"></meter></div>
-    <div class="row"><button class="btn p" id="broadcastStart">开始直播</button><button class="btn r" id="broadcastStop" disabled>停止直播</button><span class="hint" id="broadcastTimer"></span></div>
+    <div class="row"><button class="btn p" id="broadcastStart">开始直播</button><button class="btn r" id="broadcastFinish" disabled>手动下播</button><button class="btn" id="broadcastStop" disabled>停止直播</button><span class="hint" id="broadcastTimer"></span></div>
+    <div class="hint">手动下播会先让 AI 说「今天播了很久了，下播吃饭饭了」，说完再停止直播。</div>
     <div class="hint" id="broadcastError" role="status"></div>
     <div class="hint" style="margin-top:10px">开播后观众会看到预览中的内容。AI 生成配音/代打内容请在标题或直播间说明中明确标识；关闭软件会停止由千音开启的直播。</div>
   </div>
@@ -325,6 +326,15 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
   </div>
   <div id="evCards"></div>
   <div class="card">
+    <h3>主动和观众聊天</h3>
+    <div class="row"><label class="c"><input type="checkbox" data-k="interaction.enabled">有观众活动时主动找话题</label></div>
+    <div class="row">
+      <label class="f">冷场多久主动聊（秒）<input type="number" min="10" data-k="interaction.idle_seconds"></label>
+      <label class="f">主动聊天最短间隔（秒）<input type="number" min="30" data-k="interaction.interval_seconds"></label>
+    </div>
+    <p class="hint">最近 5 分钟有观众进房、发弹幕或送礼时，冷场后会结合游戏和聊天记录找话题。观众消息优先，暂停自动回复或告别下播时停止主动聊天。</p>
+  </div>
+  <div class="card">
     <h3>过滤与队列</h3>
     <div class="row">
       <label class="f">屏蔽词（命中则不回复，逗号或换行分隔）<textarea data-k="filter.blocklist"></textarea></label>
@@ -339,7 +349,7 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
       <label class="c"><input type="checkbox" data-k="filter.ignore_owner">不回复主播自己的消息</label>
       <label class="c"><input type="checkbox" data-k="filter.rename_default">打码名 / bili_xxx 默认名念成“新朋友”</label>
     </div>
-    <p class="hint">优先级：醒目留言 = 上舰 &gt; 礼物 &gt; 弹幕 = 关注 &gt; 进房 &gt; 点赞。</p>
+    <p class="hint">优先级：醒目留言 = 上舰 &gt; 礼物 &gt; 弹幕 = 关注 &gt; 进房 &gt; 点赞 = 主动互动 &gt; 游戏解说。</p>
   </div>
 </section>
 
@@ -703,7 +713,7 @@ const EV = [
   ['danmaku', '弹幕', [['cooldown_user', '同一观众冷却(秒)'], ['probability', '回复概率(%)'], ['trigger_words', '触发词（留空=全部回复，填了只回含这些词的）', 'text']], [['ignore_emoticon', '忽略表情包弹幕'], ['read_original', 'AI 回复前先念出原弹幕']]],
   ['enter', '进入直播间', [['cooldown_user', '同一观众多久内不重复欢迎(秒)'], ['merge_window', '合并窗口(秒)'], ['max_names', '一次最多念几个名字']], []],
   ['follow', '关注', [['cooldown_user', '同一观众冷却(秒)'], ['merge_window', '合并窗口(秒)'], ['max_names', '一次最多念几个名字']], []],
-  ['gift', '礼物', [['merge_window', '连击合并窗口(秒)'], ['min_value', '付费礼物最低价值(元)']], [['thank_free', '感谢免费礼物（小心心、辣条等）']]],
+  ['gift', '礼物', [['merge_window', '连击合并窗口(秒)'], ['min_value', '付费礼物最低价值(元)']], [['thank_free', '感谢免费礼物（小心心、辣条等）'], ['tiered_thanks', '按数量和价值丰富感谢（token 口粮）']]],
   ['guard', '上舰（舰长/提督/总督）', [], []],
   ['superchat', '醒目留言 SC', [], []],
   ['like', '点赞', [['cooldown_user', '同一观众冷却(秒)'], ['merge_window', '合并窗口(秒)'], ['max_names', '一次最多念几个名字']], []],
@@ -714,6 +724,7 @@ $('#evCards').innerHTML = EV.map(([k, name, nums, checks]) => `
       <span class="seg"><label><input type="radio" name="mode_${k}" value="ai" data-k="events.${k}.mode"><span>AI 回复</span></label><label><input type="radio" name="mode_${k}" value="template" data-k="events.${k}.mode"><span>模板</span></label></span></div>
     ${nums.length ? `<div class="row">${nums.map(([f, l, t]) => `<label class="f">${l}<input ${t ? '' : 'type="number"'} data-k="events.${k}.${f}"></label>`).join('')}</div>` : ''}
     ${checks.length ? `<div class="row">${checks.map(([f, l]) => `<label class="c"><input type="checkbox" data-k="events.${k}.${f}">${l}</label>`).join('')}</div>` : ''}
+    ${k === 'gift' ? '<p class="hint">开启分档感谢后，先点名说「谢谢老板，这能买不少token了」，达到 5 / 20 / 100 个或总价值 10 / 50 / 200 元时逐档增加感谢、比心和祝福。连击按合并后的总量计算，AI 失败时使用同档模板；关闭后使用下方自定义文案。</p>' : ''}
     <div class="row"><label class="f">模板（每行一条）<textarea data-k="events.${k}.templates"></textarea></label>
     <label class="f">AI 提示<textarea data-k="events.${k}.ai_prompt"></textarea></label></div>
   </div>`).join('');
@@ -1474,9 +1485,14 @@ async function loadBroadcastAreas() {
   $('#broadcastArea').value = String(CFG.broadcast?.area_id || 0);
 }
 function updateBroadcastButtons() {
-  const active = broadcastInfo.running || broadcastInfo.phase === 'starting' || broadcastInfo.phase === 'stopping' || !!scheduleInfo.active_action;
+  const finishing = broadcastInfo.finishing || scheduleInfo.active_action === 'farewell';
+  const active = broadcastInfo.running || broadcastInfo.phase === 'starting' || broadcastInfo.phase === 'stopping' || !!scheduleInfo.active_action || finishing;
   $('#broadcastStart').disabled = broadcastBusy || active || !broadcastInfo.previewing || !broadcastAccount?.room_id || !broadcastAccount?.logged_in || !Number($('#broadcastArea').value);
   $('#broadcastStop').disabled = broadcastBusy || !active;
+  ['broadcastFinish', 'broadcastDashFinish'].forEach(id => {
+    $('#' + id).disabled = broadcastBusy || finishing || !broadcastInfo.running || broadcastInfo.phase !== 'live' || !!scheduleInfo.active_action;
+    $('#' + id).textContent = finishing ? '正在告别…' : '手动下播';
+  });
   $('#broadcastPreview').disabled = broadcastBusy || active;
   $('#broadcastPreviewStop').disabled = broadcastBusy || active || !broadcastInfo.previewing;
   ['broadcastWindow', 'broadcastAudio', 'broadcastArea', 'broadcastTitle', 'broadcastLaunchGame', 'broadcastRefreshSources', 'broadcastLogin'].forEach(id => $('#' + id).disabled = broadcastBusy || active);
@@ -1583,13 +1599,20 @@ $('#broadcastStart').onclick = () => broadcastAction(async () => {
   toast('直播已开始');
 });
 $('#broadcastStop').onclick = () => broadcastAction(async () => { const r = await api('/api/broadcast/stop', {}); if (!r.ok) throw new Error(r.error); toast('直播已停止，游戏和千音语音仍保留'); });
+$('#broadcastFinish').onclick = $('#broadcastDashFinish').onclick = () => broadcastAction(async () => {
+  $('#broadcastStatus').textContent = $('#broadcastDashState').textContent = '正在告别，说完后自动下播…';
+  toast('正在告别，说完后自动下播');
+  const r = await api('/api/broadcast/finish', {});
+  if (!r.ok) throw new Error(r.error || '手动下播失败');
+  toast('直播已停止，游戏和千音语音仍保留');
+});
 $('#broadcastWindow').onchange = $('#broadcastAudio').onchange = () => { if (broadcastInfo.previewing && !broadcastInfo.running) broadcastAction(async () => { const r = await api('/api/broadcast/preview/stop', {}); if (!r.ok) throw new Error(r.error); }); };
 $('#broadcastArea').addEventListener('change', updateBroadcastButtons);
 async function pollBroadcast() {
   try {
     broadcastInfo = await api('/api/broadcast/status');
     const labels = {idle:'尚未开播', preview:'仅本机预览', starting:'正在开播…', live:'正在直播', stopping:'正在停播…', error:'操作未完成，请查看提示'};
-    let text = labels[broadcastInfo.phase] || '尚未开播';
+    let text = broadcastInfo.finishing ? '正在告别，说完后自动下播…' : (labels[broadcastInfo.phase] || '尚未开播');
     if (broadcastInfo.phase === 'error' && broadcastInfo.error) text = broadcastInfo.error.length > 42 ? broadcastInfo.error.slice(0, 42) + '…' : broadcastInfo.error;
     $('#broadcastStatus').textContent = $('#broadcastDashState').textContent = text;
     $('#broadcastStatus').style.color = broadcastInfo.phase === 'error' ? 'var(--red)' : '';
@@ -1633,7 +1656,8 @@ async function pollSchedule(fill = false) {
     $('#scheduleLocalTime').textContent = '本机时间 ' + r.local_time;
     $('#scheduleStatus').textContent = r.enabled ? `每日 ${r.start_time} 开播、${r.stop_time} 停播${r.stop_time < r.start_time ? '（次日）' : ''}；下次开播 ${r.next_start}，下次停播 ${r.next_stop}。` : '定时直播未启用。';
     $('#scheduleSource').textContent = r.window_title ? `已保存窗口：${r.window_title}；声音：${r.audio_name}` : '启用前请先预览上方选中的窗口和声音。';
-    if (r.active_action || r.last_result) $('#scheduleResult').textContent = r.active_action ? (r.active_action === 'start' ? '正在执行定时开播…' : '正在执行定时停播…') : `${r.last_result.time} · ${r.last_result.message}`;
+    const actionLabels = {farewell: '正在告别，说完后自动下播…', start: '正在执行定时开播…', stop: '正在执行定时停播…'};
+    $('#scheduleResult').textContent = r.active_action ? actionLabels[r.active_action] || '' : r.last_result ? `${r.last_result.time} · ${r.last_result.message}` : '';
     $('#scheduleDisable').disabled = scheduleBusy || !r.enabled;
     updateBroadcastButtons();
   } catch (e) { $('#scheduleResult').textContent = e.message || String(e); }

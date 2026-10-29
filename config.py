@@ -45,8 +45,9 @@ DEFAULTS = {
         },
         "gift": {
             "enabled": True, "mode": "ai", "merge_window": 3, "min_value": 0, "thank_free": True,
-            "templates": "谢谢{name}送的{num}个{gift}！\n感谢{name}的{gift}，破费啦！",
-            "ai_prompt": "观众{name}送出了{num}个{gift}（约{value}元）。请真诚地感谢。",
+            "tiered_thanks": True,
+            "templates": "谢谢{name}老板送的{num}个{gift}！谢谢老板，这能买不少token了！",
+            "ai_prompt": "观众{name}送出了{num}个{gift}（总价值约{value}元）。请用活泼自然的口吻感谢老板，送得越多，感谢越丰富。",
         },
         "guard": {
             "enabled": True, "mode": "ai",
@@ -64,6 +65,7 @@ DEFAULTS = {
             "ai_prompt": "观众{name}给直播间点了赞，请简短感谢。",
         },
     },
+    "interaction": {"enabled": True, "idle_seconds": 20, "interval_seconds": 60},
     "filter": {
         "blocklist": "",
         "ignore_users": "",
