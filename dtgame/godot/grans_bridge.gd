@@ -5,6 +5,7 @@ const Norms = preload("res://scripts/cards/card_norms.gd")
 const PROTOCOL := "whaletalk.grans.v1"
 var _server := TCPServer.new()
 var _peers: Array[Dictionary] = []
+var _battle_ref: WeakRef
 
 func _ready() -> void:
 	if OS.get_environment("WHALETALK_GRANS_NO_TCP") == "1":
@@ -61,13 +62,39 @@ func _host() -> Node:
 	return host if is_instance_valid(host) and host.is_inside_tree() and not host.is_queued_for_deletion() else null
 
 func _busy(host: Node) -> bool:
-	return (bool(host.get("battle_over")) or GameManager.player_hp <= 0
-		or bool(host.get("_entry_in_progress")) or bool(host.get("_end_turn_guard"))
+	return (bool(host.get("_entry_in_progress")) or bool(host.get("_end_turn_guard"))
 		or bool(host.get("_player_attack_playing")) or bool(host.get("_harmony_resonance_playing"))
 		or bool(host.get("_admin_card_auth_pending")) or bool(host.get("_alice_input_blocking"))
 		or bool(host.get_meta("grans_cinematic_active", false))
 		or not (host.get_meta("_pending_card_choices", []) as Array).is_empty()
 		or host.get_node_or_null("CardChoiceLayer") != null)
+
+func _battle_host() -> Node:
+	var cached: Node = _battle_ref.get_ref() if _battle_ref != null else null
+	if is_instance_valid(cached) and cached.is_inside_tree() and not cached.is_queued_for_deletion(): return cached
+	for node in get_tree().root.find_children("BattleScene*", "Control", true, false):
+		if not node.is_queued_for_deletion() and node.has_method("_check_player_death") and node.has_method("_on_end_turn"):
+			_battle_ref = weakref(node)
+			return node
+	return null
+
+func battle_status() -> Dictionary:
+	var host := _battle_host()
+	if host == null: return _error("当前没有可恢复的战斗")
+	return {"ok": true, "protocol": PROTOCOL, "battle_id": str(host.get_instance_id()),
+		"turn": int(host.get("turn_number")), "hp": GameManager.player_hp,
+		"battle_over": bool(host.get("battle_over")), "busy": _busy(host)}
+
+func recover_death(args: Dictionary) -> Dictionary:
+	var current := battle_status()
+	if not current.get("ok", false): return current
+	if str(args.get("battle_id", "")) != current.battle_id or args.get("turn", -1) != current.turn:
+		return _error("战场或回合已变化，请重读状态", true)
+	# 免死/复活或正常结算已生效时，不额外结束活人的回合，也不重复记一次死亡。
+	if current.hp > 0 or current.battle_over: return current
+	if current.busy: return _error("战斗仍在演出或结算，暂不插入死亡检查", false, true)
+	_battle_host().call("_check_player_death")
+	return battle_status()
 
 func snapshot() -> Dictionary:
 	var host := _host()
@@ -93,8 +120,9 @@ func snapshot() -> Dictionary:
 	return {"ok": true, "protocol": PROTOCOL, "battle_id": str(host.get_instance_id()),
 		"character_id": Rules.CHAR_ID, "turn": int(host.get("turn_number")), "hand_ids": hand_ids,
 		"light": Rules.charge(host, "light"), "dark": Rules.charge(host, "dark"), "capacity": Rules.CAP,
-		"release_mode": bool(data.get("release_mode", false)), "can_switch": not _busy(host),
-		"busy": _busy(host), "cards": cards}
+		"release_mode": bool(data.get("release_mode", false)),
+		"can_switch": not _busy(host) and not bool(host.get("battle_over")) and GameManager.player_hp > 0,
+		"busy": _busy(host), "cards": cards, "life": battle_status()}
 
 func set_mode(args: Dictionary) -> Dictionary:
 	if typeof(args.get("release")) != TYPE_BOOL: return _error("release 必须是布尔值")
@@ -117,6 +145,8 @@ func dispatch(request: Dictionary) -> Dictionary:
 	match str(request.get("cmd", "")):
 		"grans_state": return snapshot()
 		"grans_mode": return set_mode(args)
+		"battle_status": return battle_status()
+		"recover_death": return recover_death(args)
 	return _error("未知格兰斯接口命令")
 
 func _exit_tree() -> void:

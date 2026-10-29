@@ -29,7 +29,9 @@ def install(project: Path, tests: bool = False) -> dict:
     changes = [(project / "addons/whaletalk/grans_bridge.gd", (SOURCE / "grans_bridge.gd").read_bytes())]
     if tests:
         for name in ("whaletalk_grans_verify.gd", "whaletalk_grans_verify.tscn",
-                     "whaletalk_grans_protocol.gd", "whaletalk_grans_protocol.tscn"):
+                     "whaletalk_grans_protocol.gd", "whaletalk_grans_protocol.tscn",
+                     "whaletalk_death_verify.gd", "whaletalk_death_verify.tscn",
+                     "whaletalk_death_protocol.gd", "whaletalk_death_protocol.tscn"):
             changes.append((project / "tests" / name, (SOURCE / name).read_bytes()))
     changes.append((settings, text.encode("utf-8")))
     backup = project.parent / "outputs" / ("whaletalk_grans_install_" + datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f"))

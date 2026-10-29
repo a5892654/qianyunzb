@@ -9,6 +9,7 @@ import socket
 import time
 
 from dtgame import grans
+from dtgame import lifecycle
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 9787
@@ -25,6 +26,7 @@ class GameBridge:
         self.grans_port = grans_port
         self._grans_snapshot = None
         self._grans_probe_after = 0.0
+        self._battle_life = None
 
     def call(self, cmd: str, args: dict | None = None, timeout: float = 45.0) -> dict:
         payload = json.dumps({"cmd": cmd, "args": args or {}}, ensure_ascii=False) + "\n"
@@ -57,8 +59,11 @@ class GameBridge:
         r = self.call("state", timeout=20)
         state = r.get("state", {})
         self._grans_snapshot = None
-        if state.get("screen") != "battle" or not grans.is_grans(state):
+        self._battle_life = None
+        if state.get("screen") != "battle":
             return state
+        if not grans.is_grans(state):
+            return self._death_state(state) if lifecycle.needs_recovery(state) else state
         if time.monotonic() < self._grans_probe_after:
             return {**state, "battle": {**state.get("battle", {}), "grans": {
                 "available": False, "error": "格兰斯游戏接口暂不可用，稍后自动重连"}}}
@@ -67,12 +72,33 @@ class GameBridge:
             state = grans.merge_snapshot(state, snapshot)
             self._grans_snapshot = snapshot
             self._grans_probe_after = 0.0
+            if snapshot.get("life"):
+                state = lifecycle.merge_life(state, snapshot["life"])
+                self._battle_life = snapshot["life"]
             return state
         except (BridgeError, ValueError) as e:
             if isinstance(e, BridgeError):
                 self._grans_probe_after = time.monotonic() + 10
             return {**state, "battle": {**state.get("battle", {}), "grans": {
                 "available": False, "error": str(e)}}}
+
+    def _death_state(self, state: dict) -> dict:
+        if time.monotonic() < self._grans_probe_after:
+            return state
+        try:
+            life = self._call_grans("battle_status")
+            state = lifecycle.merge_life(state, life)
+            self._battle_life = life
+            return state
+        except (BridgeError, ValueError):
+            # 未安装/旧版补充接口仍走正常游戏桥的结束回合/结算兜底。
+            self._grans_probe_after = time.monotonic() + 10
+            return state
+
+    def recover_death(self) -> dict:
+        life = self._battle_life or self._call_grans("battle_status")
+        lifecycle.validate_life(life)
+        return self._call_grans("recover_death", {"battle_id": life["battle_id"], "turn": life["turn"]})
 
     def _call_grans(self, cmd: str, args: dict | None = None) -> dict:
         return GameBridge(self.host, self.grans_port).call(cmd, args, timeout=1.5)

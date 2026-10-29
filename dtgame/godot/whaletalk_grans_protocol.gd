@@ -22,11 +22,14 @@ func _state() -> Dictionary:
 			"hand": hand, "enemies": [{"name": "演武傀儡", "hp": enemy(0).unit_hp, "max_hp": 900,
 				"intent": {"type": "attack", "value": 3}}]}}
 
-func _serve() -> void:
+func _prepare_protocol() -> void:
 	GameManager.energy = 3
 	give_card("grans_001")
 	give_card("grans_002")
 	give_card("grans_001")
+
+func _serve() -> void:
+	_prepare_protocol()
 	var server := TCPServer.new()
 	var error := server.listen(int(OS.get_environment("WHALETALK_TEST_PRIMARY_PORT")), "127.0.0.1")
 	_ok(error == OK, "测试旧桥监听成功")
@@ -53,7 +56,9 @@ func _serve() -> void:
 			var args: Dictionary = request.get("args", {})
 			match cmd:
 				"state": response = {"state": _state()}
-				"screen": response = {"screen": {"screen": "battle", "busy": _state().busy}}
+				"screen":
+					var current := _state()
+					response = {"screen": {"screen": current.screen, "busy": current.busy}}
 				"play_card":
 					var slot := int(args.get("slot", -1))
 					if slot >= 0 and slot < GameManager.hand.size():
@@ -64,6 +69,9 @@ func _serve() -> void:
 							GameManager.last_element_played = ""
 							await _bm._on_card_played(node.get_card_data(), node, int(args.get("target", 0)))
 							response = {"ok": not GameManager.hand.has(id)}
+				"end_turn":
+					await _bm._on_end_turn()
+					response = {"ok": true}
 				"test_finish":
 					finished = true
 					response = {"ok": true}

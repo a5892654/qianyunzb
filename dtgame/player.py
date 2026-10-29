@@ -23,6 +23,7 @@ from dtgame.bridge import BridgeError, GameBridge
 from dtgame.expedition import choose_depth, depth_settings
 from dtgame import view
 from dtgame import grans
+from dtgame import lifecycle
 
 log = logging.getLogger("dtplay")
 
@@ -129,6 +130,10 @@ class Player:
     CHARACTER_TRANSITION_TIMEOUT = 6.0
     EXPEDITION_AI_TIMEOUT = 8.0
     EXPEDITION_TRANSITION_TIMEOUT = 6.0
+    DEATH_SETTLE_GRACE = 1.5
+    DEATH_RETRY_SECONDS = 1.0
+    DEATH_BUSY_TIMEOUT = 20.0
+    DEATH_ATTEMPT_LIMIT = 3
 
     def __init__(self, cfg_ai: dict, bridge: GameBridge, speak=None, log_push=None,
                  narrate: bool = True, pipe=None, emotions=None, chars=(), on_chars=None,
@@ -147,7 +152,10 @@ class Player:
         self.fails = 0
         self.error_streak = 0
         self.ai_fails = 0
-        self.dead_waits = 0
+        self._death_stage = None
+        self._death_since = None
+        self._death_next_retry = 0.0
+        self._death_attempts = 0
         self.last_say = ""
         self._last_state = None
         self._state_time = 0.0
@@ -546,9 +554,81 @@ class Player:
                 return
             await asyncio.sleep(0.15)
 
-    async def step(self) -> dict:
+    def _reset_death_wait(self) -> None:
+        self._death_stage = None
+        self._death_since = None
+        self._death_next_retry = 0.0
+        self._death_attempts = 0
+
+    async def _advance_death(self, state: dict) -> dict:
+        """0血但仍在战场：等正常结算，随后由游戏自身判定免死/死亡，不能无限干等。"""
+        battle = state.get("battle") or {}
+        life = battle.get("life") or {}
+        settled = bool(battle.get("battle_over") or battle.get("awaiting_confirm"))
+        stage = (life.get("battle_id") or state.get("window_id") or "", settled)
+        now = time.monotonic()
+        if stage != self._death_stage:
+            self._reset_death_wait()
+            self._death_stage = stage
+            self._death_since = now
+            self._death_next_retry = now + (0 if battle.get("awaiting_confirm") else self.DEATH_SETTLE_GRACE)
+        wait = {"screen": "battle", "ok": True, "action": {"action": "wait_death"}, "say": ""}
+        if now < self._death_next_retry:
+            return wait
+        if state.get("busy") and now - self._death_since < self.DEATH_BUSY_TIMEOUT:
+            return wait
+
+        # 再读一次完整状态。免死已经回到1血、弹出了死亡分析或战场变化时，旧恢复动作必须作废。
+        latest = await asyncio.to_thread(self.bridge.state)
+        self._last_state = latest
+        self._state_time = time.monotonic()
+        if not lifecycle.needs_recovery(latest):
+            self._reset_death_wait()
+            return {"screen": "battle", "ok": False, "stale": True, "say": ""}
+        current_life = (latest.get("battle") or {}).get("life") or {}
+        if life.get("battle_id") and current_life.get("battle_id") != life["battle_id"]:
+            self._reset_death_wait()
+            return {"screen": "battle", "ok": False, "stale": True, "say": ""}
+        if latest.get("busy") and now - self._death_since < self.DEATH_BUSY_TIMEOUT:
+            return wait
+        if self._death_attempts >= self.DEATH_ATTEMPT_LIMIT:
+            msg = "0血战斗结算多次推进后仍未完成，已停止代打，请检查游戏提示或游戏桥"
+            self.log_push("error", msg)
+            self.running = False
+            return {"screen": "battle", "ok": False, "error": msg, "say": ""}
+
+        current_battle = latest.get("battle") or {}
+        settled = bool(current_battle.get("battle_over") or current_battle.get("awaiting_confirm"))
+        if settled:
+            action, call = "confirm_result", self.bridge.confirm_result
+        elif current_life.get("available"):
+            # 原生检查后仍无进展时，继续尝试玩家已验证有效的公开结束回合入口。
+            if self._death_attempts == 0:
+                action, call = "recover_death", self.bridge.recover_death
+            elif self._death_attempts == 1:
+                action, call = "end", self.bridge.end_turn
+            else:
+                action, call = "confirm_result", self.bridge.confirm_result
+        elif self._death_attempts % 2 == 0:
+            action, call = "end", self.bridge.end_turn
+        else:
+            action, call = "confirm_result", self.bridge.confirm_result
+        self._death_attempts += 1
+        self._death_next_retry = time.monotonic() + self.DEATH_RETRY_SECONDS
+        label = {"end": "结束当前回合", "confirm_result": "确认战斗结果", "recover_death": "调用游戏死亡检查"}[action]
+        self.log_push("warn", f"0血仍停在战场，{label}（{self._death_attempts}/{self.DEATH_ATTEMPT_LIMIT}）")
+        try:
+            result = await asyncio.to_thread(call)
+        except (BridgeError, ValueError) as e:
+            result = {"ok": False, "error": str(e)}
+        return {"screen": "battle", "action": {"action": action}, "ok": bool(result.get("ok")),
+                "error": result.get("error", ""), "stale": bool(result.get("stale")),
+                "recovering": True, "say": ""}
+
+    async def step(self, state: dict | None = None) -> dict:
         """走一步：读状态、问模型、执行。返回 {screen, action, ok, say}。"""
-        state = await asyncio.to_thread(self.bridge.state)
+        if state is None:
+            state = await asyncio.to_thread(self.bridge.state)
         self._last_state = state
         self._state_time = time.monotonic()
         self._remember_character(state)
@@ -558,6 +638,9 @@ class Player:
             self._character_recovery = False
         if screen not in (None, "", "hall", "menu", "other"):
             self._expedition_recovery = False
+        if lifecycle.needs_recovery(state):
+            return await self._advance_death(state)
+        self._reset_death_wait()
         if state.get("busy"):
             return {"screen": screen, "ok": True, "action": {"action": "wait"}, "say": ""}
         # 代打只看深层：读档落进浅层/教学局时先放弃回大厅，下一轮 _boot 会开深层。
@@ -608,18 +691,6 @@ class Player:
                 self._remember_expedition_result(state, "本局结算，结果见 summary")
             return {"screen": screen, "action": {"action": "return_to_hall"},
                     "ok": bool(r.get("ok")), "error": r.get("error", ""), "say": ""}
-        # 已阵亡但结算面板还没挂出来：等它自己走结算流程，别继续发命令。
-        # 但不能干等——面板可能压根不会来（被其它分支接管），超时就强制点一次。
-        if screen == "battle" and battle.get("dead"):
-            self.dead_waits += 1
-            if self.dead_waits < 12:
-                await asyncio.sleep(0.5)
-                return {"screen": screen, "ok": True, "action": {"action": "wait_death"}, "say": ""}
-            self.dead_waits = 0
-            r = await asyncio.to_thread(self.bridge.call, "confirm_result", {}, 30)
-            return {"screen": screen, "action": {"action": "confirm_result"},
-                    "ok": bool(r.get("ok")), "error": r.get("error", ""), "say": ""}
-
         text = view.render(self._character_state(state) if screen == "character_select" else state)
         if screen == "character_select":
             text += "\n" + self._rotation(state)
@@ -754,10 +825,10 @@ class Player:
         while self.running:
             try:
                 sc = await asyncio.to_thread(self.bridge.screen)
-                if sc.get("busy"):
+                screen = sc.get("screen")
+                if sc.get("busy") and screen != "battle":
                     await asyncio.sleep(0.3)
                     continue
-                screen = sc.get("screen")
                 if screen != last_screen:
                     last_screen = screen
                     self.log_push("info", f"进入界面：{screen}")
@@ -767,11 +838,18 @@ class Player:
                         self.log_push("info", msg)
                     await asyncio.sleep(1.0)
                     continue
-                # 上一句还没播完就先等：音画同步靠这里兜住，而不是在 step 里傻等。
-                if self._pending_speech is not None:
+                # 战斗忙碌也要探查HP，不能被“0血=busy”的旧桥永远挡在 step 之外。
+                state = await asyncio.to_thread(self.bridge.state) if screen == "battle" else None
+                urgent = state is not None and lifecycle.needs_recovery(state)
+                if state and state.get("busy") and not urgent:
+                    await asyncio.sleep(0.3)
+                    continue
+                # 0血结算不等待上一句语音；正常出牌仍维持原来的音画节流。
+                if self._pending_speech is not None and not urgent:
                     await self._wait_spoken(self._pending_speech)
                     self._pending_speech = None
-                r = await self.step()
+                    state = None  # 等语音期间局面可能变化，出牌前重新读取。
+                r = await self.step(state)
                 if r.get("error") and not r.get("action"):
                     await asyncio.sleep(1.0)
                 await asyncio.sleep(interval)
