@@ -383,3 +383,29 @@ class BiliBroadcastPlatform:
         if not await self._stop_started_room():
             raise PlatformError("关闭直播失败，房间号已保留，可稍后重试结束直播")
         return {"ok": True, "stopped": True, "room_id": room_id}
+
+    async def end_external(self, expected_room_id: int) -> dict:
+        """用户明确设置的直播姬/OBS 停播；与只清理本实例的 end 分开。"""
+        if self.credential.bili_jct is None:
+            raise PlatformError("请扫码登录正在直播的主播账号，停播需要完整登录凭证")
+        info = await self.account()  # account 会核对直播间 UID 属于当前账号。
+        if not info.get("logged_in"):
+            raise PlatformError("请先扫码登录正在直播的主播账号")
+        room_id = int(info.get("room_id") or 0)
+        if not room_id or room_id != int(expected_room_id or 0):
+            raise PlatformError("当前主播账号的直播间与定时停播目标不一致，请重新设置")
+        if int(info.get("live_status") or 0) != 1:
+            return {"ok": True, "stopped": False, "room_id": room_id, "message": "当前直播间未在直播，无需停播"}
+        try:
+            room = LiveRoom(room_id, credential=self.credential)
+            async with asyncio.timeout(TIMEOUT_SECONDS):
+                await room.stop()
+                for attempt in range(3):
+                    details = await room.get_room_info()
+                    if int(details["room_info"]["live_status"]) == 0:
+                        return {"ok": True, "stopped": True, "room_id": room_id}
+                    if attempt < 2:
+                        await asyncio.sleep(0.5)
+            raise PlatformError("已发送停播请求，但B站仍显示直播中，请检查直播姬是否重新开播")
+        except Exception as exc:
+            raise _friendly(exc) from None

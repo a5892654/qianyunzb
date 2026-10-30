@@ -234,6 +234,8 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
   </div>
   <div class="card">
     <h3>用直播姬开播（千音出画面）</h3>
+    <div class="row"><button class="btn" id="externalTimerStart">直播姬：启动停播倒计时</button><button class="btn" id="externalTimerCancel" disabled>取消倒计时</button><span class="hint" id="externalTimerStatus" role="status"></span></div>
+    <p class="hint">先在直播姬开播，登录同一个主播账号，再按上方“播多久自动停播”的分钟数启动倒计时。从点击开始计时，到点说完告别语后结束B站直播间。需要每天固定时间下播，可在下方选择“直播姬 / OBS：仅定时停播”。请保持本工具运行。</p>
     <p class="hint">B站对千音这条网页开播通道要求人脸认证，直播姬那条通道不用。这个模式<b>不碰 B站开播接口</b>：千音把「游戏画面 + 皮套 + 字幕」合成好开成一个窗口，直播姬直接采集它，开播由直播姬点。</p>
     <div class="row">
       <button class="btn b" id="srcStart">开启源画面</button>
@@ -269,12 +271,12 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
   </div>
   <div class="card">
     <h3>每日定时直播</h3>
-    <div class="row"><label class="c"><input type="checkbox" id="scheduleEnabled">启用每日自动开播和停播</label><span style="flex:1"></span><span class="hint" id="scheduleLocalTime"></span></div>
+    <div class="row"><label class="c"><input type="checkbox" id="scheduleEnabled">启用每日直播计划</label><label class="f" style="max-width:300px">计划模式<select id="scheduleMode"><option value="managed">本工具：自动开播和停播</option><option value="stop_only">直播姬 / OBS：仅定时停播</option></select></label><span style="flex:1"></span><span class="hint" id="scheduleLocalTime"></span></div>
     <div class="row"><label class="f">每天开播时间<input type="time" id="scheduleStartTime" value="20:00" step="60"></label><label class="f">每天停播时间<input type="time" id="scheduleStopTime" value="23:00" step="60"></label><button class="btn p" id="scheduleSave" style="margin-top:18px">保存计划</button><button class="btn" id="scheduleDisable" style="margin-top:18px">关闭定时</button></div>
     <div class="hint" id="scheduleStatus">定时直播未启用。</div>
     <div class="hint" id="scheduleSource" style="margin-top:6px"></div>
     <div class="hint" id="scheduleResult" role="status" style="margin-top:6px"></div>
-    <p class="hint">按电脑本地时间每天重复，停播时间早于开播时间则跨到次日。先登录、选择上方窗口和声音并预览，再保存启用。到点自动使用上方标题、分区和保存的采集源，不再弹确认；失败仅提示，不反复重试。</p>
+    <p class="hint">按电脑本地时间每天重复。本工具开停播模式需先登录、选择采集源并预览，停播时间早于开播时间则跨到次日。直播姬 / OBS 模式只需登录主播账号并设置停播时间，无需预览，也不会自动开播；到点会通过B站结束该账号的直播间。</p>
     <p class="hint">软件需保持运行，游戏窗口需提前打开且不要最小化；关机、睡眠或退出软件时不触发，也不会补开错过的直播。关闭定时不会立刻停止当前直播；退出或切换 B站账号会关闭定时，需要重新确认启用。</p>
   </div>
   <div class="card">
@@ -333,6 +335,15 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
       <label class="f">主动聊天最短间隔（秒）<input type="number" min="30" data-k="interaction.interval_seconds"></label>
     </div>
     <p class="hint">最近 5 分钟有观众进房、发弹幕或送礼时，冷场后会结合游戏和聊天记录找话题。观众消息优先，暂停自动回复或告别下播时停止主动聊天。</p>
+    <div class="row">
+      <label class="c"><input type="checkbox" data-k="interaction.follow_enabled">定时提醒关注 / 点赞</label>
+      <label class="f">关注点赞提醒间隔（秒）<input type="number" min="60" data-k="interaction.follow_interval_seconds"></label>
+    </div>
+    <div class="row">
+      <label class="f">关注点赞备用文案（每行一条，轮换使用）<textarea data-k="interaction.follow_templates"></textarea></label>
+      <label class="f">关注点赞 AI 提示<textarea data-k="interaction.follow_ai_prompt"></textarea></label>
+    </div>
+    <p class="hint">默认每 3 分钟由 AI 自然提醒点关注或点赞，AI 不可用时轮换备用文案。与找话题分别开关，沿用上方冷场等待和最短间隔；观众消息优先，忙碌时顺延。使用本机推流时，即使观众安静也会提醒；其他推流方式需近期有观众活动。暂停、断线或告别下播时停止。</p>
   </div>
   <div class="card">
     <h3>过滤与队列</h3>
@@ -571,7 +582,7 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
   </div>
   <div class="card">
     <h3>点歌规则</h3>
-    <p class="hint">观众先送“点歌礼物”拿到点歌券，再发弹幕 <code>点歌:歌名</code>（也支持 <code>点歌 歌名 歌手</code>）。送“插队礼物”拿到插队券：已经在排队的歌会立刻置顶，还没点歌的话下一首点的歌直接置顶。礼物名填 <code>*</code> 表示任意礼物都算。</p>
+    <p class="hint">默认直接发弹幕 <code>点歌+歌名</code> 就能免费点歌，例如 <code>点歌+晴天</code>；也支持 <code>点歌＋晴天</code>、<code>点歌:歌名</code> 和 <code>点歌 歌名 歌手</code>。打开下方“点歌需要先送礼物”后，需先获得点歌券。送“插队礼物”拿到插队券：已经在排队的歌会立刻置顶，还没点歌的话下一首点的歌直接置顶。礼物名填 <code>*</code> 表示任意礼物都算。</p>
     <div class="row">
       <label class="c" style="margin-top:18px"><input type="checkbox" data-k="songs.require_gift">点歌需要先送礼物（关掉=免费点歌）</label>
       <label class="f">点歌礼物（逗号分隔）<input data-k="songs.song_gifts"></label>
@@ -711,7 +722,7 @@ $$('nav button[data-tab]').forEach(b => b.onclick = () => {
 // ---------- 回复规则卡片 ----------
 const EV = [
   ['danmaku', '弹幕', [['cooldown_user', '同一观众冷却(秒)'], ['probability', '回复概率(%)'], ['trigger_words', '触发词（留空=全部回复，填了只回含这些词的）', 'text']], [['ignore_emoticon', '忽略表情包弹幕'], ['read_original', 'AI 回复前先念出原弹幕']]],
-  ['enter', '进入直播间', [['cooldown_user', '同一观众多久内不重复欢迎(秒)'], ['merge_window', '合并窗口(秒)'], ['max_names', '一次最多念几个名字']], []],
+  ['enter', '进入直播间', [['cooldown_user', '同一观众多久内不重复欢迎(秒)'], ['merge_window', '合并窗口(秒)'], ['max_names', '一次最多念几个名字']], [['supporter_welcome', '送过礼物的观众单独暖心欢迎']]],
   ['follow', '关注', [['cooldown_user', '同一观众冷却(秒)'], ['merge_window', '合并窗口(秒)'], ['max_names', '一次最多念几个名字']], []],
   ['gift', '礼物', [['merge_window', '连击合并窗口(秒)'], ['min_value', '付费礼物最低价值(元)']], [['thank_free', '感谢免费礼物（小心心、辣条等）'], ['tiered_thanks', '按数量和价值丰富感谢（token 口粮）']]],
   ['guard', '上舰（舰长/提督/总督）', [], []],
@@ -727,6 +738,9 @@ $('#evCards').innerHTML = EV.map(([k, name, nums, checks]) => `
     ${k === 'gift' ? '<p class="hint">开启分档感谢后，先点名说「谢谢老板，这能买不少token了」，达到 5 / 20 / 100 个或总价值 10 / 50 / 200 元时逐档增加感谢、比心和祝福。连击按合并后的总量计算，AI 失败时使用同档模板；关闭后使用下方自定义文案。</p>' : ''}
     <div class="row"><label class="f">模板（每行一条）<textarea data-k="events.${k}.templates"></textarea></label>
     <label class="f">AI 提示<textarea data-k="events.${k}.ai_prompt"></textarea></label></div>
+    ${k === 'enter' ? `<p class="hint">从程序实际收到的礼物开始记住送礼观众，重启后保留。同一观众再次进房时单独欢迎，沿用进房冷却和上方 AI / 模板模式。AI 模式用专属提示生成，模板模式或 AI 失败时用下方暖心文案。</p>
+    <div class="row"><label class="f">送礼观众欢迎模板（每行一条）<textarea data-k="events.enter.supporter_templates"></textarea></label>
+    <label class="f">送礼观众欢迎 AI 提示<textarea data-k="events.enter.supporter_ai_prompt"></textarea></label></div>` : ''}
   </div>`).join('');
 
 // ---------- 配置绑定 ----------
@@ -1180,7 +1194,7 @@ $('#wishTest').onclick = async () => {
 setInterval(() => { if ($('#songs').classList.contains('on')) pollWishlist(); }, 3000);
 
 // ---------- 点歌 ----------
-const SG_TPL = [['add', '点歌成功'], ['similar', '找到相似版本'], ['pin', '插队成功'], ['play', '开始播放'], ['fail', '没找到歌'], ['need', '没有点歌券'], ['full', '歌单排满']];
+const SG_TPL = [['add', '点歌成功'], ['similar', '找到相似版本'], ['pin', '插队成功'], ['play', '开始播放'], ['fail', '没找到歌'], ['need', '没有点歌券'], ['full', '歌单排满'], ['usage', '点歌格式提示']];
 $('#sgTpl').innerHTML = SG_TPL.map(([k, l]) => `<div class="row"><label class="c" style="width:130px"><input type="checkbox" data-k="songs.announce_${k}">${l}</label><input data-k="songs.tpl_${k}" style="flex:1"></div>`).join('');
 const fmtT = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 function renderSongs(st) {
@@ -1448,6 +1462,7 @@ $('#layoutBox').onkeydown = e => {
   else moveLayout({overlay_x: clamp(r.x + (e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0), 0, 1), overlay_y: clamp(r.y + (e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0), 0, 1)});
 };
 let scheduleInfo = {}, scheduleDirty = false, scheduleBusy = false;
+let externalTimerBusy = false;
 $('#openBroadcast').onclick = () => document.querySelector('nav button[data-tab="broadcast"]').click();
 $('#broadcastLogin').onclick = () => { broadcastLoginRequested = true; document.querySelector('nav button[data-tab="room"]').click(); $('#qrBtn').click(); };
 async function refreshBroadcastAccount() {
@@ -1652,26 +1667,38 @@ async function pollSchedule(fill = false) {
       $('#scheduleEnabled').checked = r.enabled;
       $('#scheduleStartTime').value = r.start_time;
       $('#scheduleStopTime').value = r.stop_time;
+      $('#scheduleMode').value = r.mode || 'managed';
     }
+    const stopOnly = (r.mode || 'managed') === 'stop_only';
+    $('#scheduleStartTime').disabled = $('#scheduleMode').value === 'stop_only';
     $('#scheduleLocalTime').textContent = '本机时间 ' + r.local_time;
-    $('#scheduleStatus').textContent = r.enabled ? `每日 ${r.start_time} 开播、${r.stop_time} 停播${r.stop_time < r.start_time ? '（次日）' : ''}；下次开播 ${r.next_start}，下次停播 ${r.next_stop}。` : '定时直播未启用。';
-    $('#scheduleSource').textContent = r.window_title ? `已保存窗口：${r.window_title}；声音：${r.audio_name}` : '启用前请先预览上方选中的窗口和声音。';
+    $('#scheduleStatus').textContent = r.enabled ? (stopOnly ? `直播姬 / OBS 每日 ${r.stop_time} 停播；下次停播 ${r.next_stop}。` : `每日 ${r.start_time} 开播、${r.stop_time} 停播${r.stop_time < r.start_time ? '（次日）' : ''}；下次开播 ${r.next_start}，下次停播 ${r.next_stop}。`) : '定时直播未启用。';
+    $('#scheduleSource').textContent = stopOnly ? `仅停止已登录主播的直播间${r.external_room_id ? ' ' + r.external_room_id : ''}，无需采集源预览。` : r.window_title ? `已保存窗口：${r.window_title}；声音：${r.audio_name}` : '启用前请先预览上方选中的窗口和声音。';
+    const timer = r.external_timer || {};
+    $('#externalTimerStatus').textContent = timer.enabled ? `房间 ${timer.room_id} · ${timer.deadline} 停播 · 剩余 ${Math.ceil(timer.remaining_seconds / 60)} 分钟` : '未启动停播倒计时';
+    $('#externalTimerCancel').disabled = externalTimerBusy || !timer.enabled;
+    $('#externalTimerStart').disabled = externalTimerBusy;
     const actionLabels = {farewell: '正在告别，说完后自动下播…', start: '正在执行定时开播…', stop: '正在执行定时停播…'};
     $('#scheduleResult').textContent = r.active_action ? actionLabels[r.active_action] || '' : r.last_result ? `${r.last_result.time} · ${r.last_result.message}` : '';
     $('#scheduleDisable').disabled = scheduleBusy || !r.enabled;
     updateBroadcastButtons();
   } catch (e) { $('#scheduleResult').textContent = e.message || String(e); }
 }
-['scheduleEnabled', 'scheduleStartTime', 'scheduleStopTime'].forEach(id => $('#' + id).addEventListener('change', () => scheduleDirty = true));
+['scheduleEnabled', 'scheduleStartTime', 'scheduleStopTime', 'scheduleMode'].forEach(id => $('#' + id).addEventListener('change', () => {
+  scheduleDirty = true;
+  $('#scheduleStartTime').disabled = $('#scheduleMode').value === 'stop_only';
+}));
 async function saveSchedule(disable = false) {
   if (scheduleBusy) return;
   const enabled = !disable && $('#scheduleEnabled').checked;
   const start = disable ? scheduleInfo.start_time : $('#scheduleStartTime').value;
   const stop = disable ? scheduleInfo.stop_time : $('#scheduleStopTime').value;
-  if (enabled && !confirm(`允许每天 ${start} 自动公开开播、${stop} 自动停播？将使用上方标题、分区和已预览的窗口与声音，不再弹出开播确认。`)) return;
+  const mode = (disable ? scheduleInfo.mode : $('#scheduleMode').value) || 'managed';
+  if (enabled && !confirm(mode === 'stop_only' ? `允许每天 ${stop} 自动结束已登录主播账号的B站直播间？适用于直播姬 / OBS 开播，不会自动开播。` : `允许每天 ${start} 自动公开开播、${stop} 自动停播？将使用上方标题、分区和已预览的窗口与声音，不再弹出开播确认。`)) return;
   scheduleBusy = true; $('#scheduleSave').disabled = $('#scheduleDisable').disabled = true;
   try {
-    const r = await api('/api/broadcast/schedule', {enabled, start_time: start, stop_time: stop, authorized: enabled, ...broadcastSelection(), title: $('#broadcastTitle').value.trim(), area_id: Number($('#broadcastArea').value)});
+    const selection = mode === 'stop_only' ? {} : {...broadcastSelection(), title: $('#broadcastTitle').value.trim(), area_id: Number($('#broadcastArea').value)};
+    const r = await api('/api/broadcast/schedule', {enabled, mode, start_time: start, stop_time: stop, authorized: enabled, ...selection});
     if (!r.ok) throw new Error(r.error || '保存定时计划失败');
     scheduleDirty = false;
     $('#scheduleResult').textContent = '';
@@ -1682,6 +1709,30 @@ async function saveSchedule(disable = false) {
 }
 $('#scheduleSave').onclick = () => saveSchedule();
 $('#scheduleDisable').onclick = () => saveSchedule(true);
+async function externalTimer(action) {
+  if (externalTimerBusy) return;
+  const minutes = Number($('[data-k="broadcast.auto_stop_minutes"]').value);
+  if (action === 'start' && (!Number.isInteger(minutes) || minutes < 1 || minutes > 10080)) {
+    toast('请先把“播多久自动停播”设为 1 至 10080 分钟的整数'); return;
+  }
+  externalTimerBusy = true;
+  $('#externalTimerStart').disabled = $('#externalTimerCancel').disabled = true;
+  try {
+    await flushConfig();
+    const result = await api('/api/broadcast/timer/' + action, {minutes});
+    if (!result.ok) throw new Error(result.error || '设置停播倒计时失败');
+    scheduleInfo = result;
+    toast(action === 'start' ? '直播姬停播倒计时已启动' : '停播倒计时已取消');
+  } catch (e) { toast(e.message || String(e)); }
+  finally {
+    externalTimerBusy = false;
+    $('#externalTimerStart').disabled = false;
+    $('#externalTimerCancel').disabled = !scheduleInfo.external_timer?.enabled;
+    await pollSchedule();
+  }
+}
+$('#externalTimerStart').onclick = () => externalTimer('start');
+$('#externalTimerCancel').onclick = () => externalTimer('cancel');
 setInterval(pollSchedule, 5000); pollSchedule();
 function syncPreviewStream(show) {
   for (const [id, section] of [['broadcastPreviewImage', 'broadcast'], ['layoutPreviewImage', 'layout']]) {

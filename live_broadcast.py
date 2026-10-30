@@ -425,6 +425,14 @@ class Broadcast:
             self.error = ""
             return {"ok": True}
 
+    async def stop_external(self, room_id):
+        """只在明确选择直播姬停播时使用，不改变普通关闭/退出的清理范围。"""
+        async with self.lock:
+            try:
+                return await BiliBroadcastPlatform(self.app.cfg.get("bili_cookie", "")).end_external(room_id)
+            except PlatformError as error:
+                return {"ok": False, "error": str(error)}
+
     async def close(self):
         result = await self.stop()
         await self.stop_source()

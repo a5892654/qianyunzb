@@ -14,6 +14,7 @@ config.json
 config.json.bak
 logs/
 qoder_workdir/
+gift_supporters.sqlite3*
 
 # Media / model weights / datasets (never commit)
 *.wav

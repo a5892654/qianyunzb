@@ -1,4 +1,5 @@
 import asyncio
+import collections
 import itertools
 import logging
 import re
@@ -9,7 +10,7 @@ from netease import NetEase
 
 log = logging.getLogger("song")
 
-CMD = re.compile(r"^\s*[/／]?\s*(?:点歌|點歌)\s*[:：]?\s*(.+?)\s*$")
+CMD = re.compile(r"^\s*[/／]?\s*(?:点歌|點歌)\s*[:：+＋]?\s*(.*?)\s*$")
 _qid = itertools.count(1)
 
 
@@ -28,6 +29,7 @@ class SongManager:
         self.wake = asyncio.Event()
         self.end = asyncio.Event()
         self.last_hint = {}
+        self.pending_requests = collections.Counter()
         self.account = None
         self.account_error = ""
 
@@ -113,26 +115,39 @@ class SongManager:
         m = CMD.match(ev.get("text", ""))
         if not m:
             return False
-        query = m.group(1)[:60]
+        query = m.group(1).strip()[:60]
+        if not query:
+            self.say("usage")
+            return True
         key = self._key(ev)
         rec = self._rec(key, ev.get("name"))
         gift_names = "、".join(_split(c.get("song_gifts"))) or "礼物"
-        if c.get("require_gift", True) and rec["song"] <= 0:
+        if c.get("require_gift", False) and rec["song"] <= 0:
             if time.time() - self.last_hint.get(key, 0) > 60:
                 self.last_hint[key] = time.time()
                 self.say("need", name=ev["name"], gift=gift_names, query=query, num=c.get("song_gift_count", 1))
             return True
-        mine = sum(1 for s in self.queue if s["key"] == key) + (1 if self.current and self.current["key"] == key else 0)
-        if mine >= int(c.get("max_per_user", 2)) or len(self.queue) >= int(c.get("max_queue", 20)):
+        mine = (sum(1 for s in self.queue if s["key"] == key)
+                + (1 if self.current and self.current["key"] == key else 0) + self.pending_requests[key])
+        if mine >= int(c.get("max_per_user", 2)) or len(self.queue) + self.pending_requests.total() >= int(c.get("max_queue", 20)):
             self.say("full", name=ev["name"], query=query)
             return True
-        if c.get("require_gift", True):
+        if c.get("require_gift", False):
             rec["song"] -= 1
-        asyncio.create_task(self._request(key, ev["name"], query, c.get("require_gift", True)))
+        self.pending_requests[key] += 1
+        asyncio.create_task(self._request(key, ev["name"], query, c.get("require_gift", False)))
         self.push()
         return True
 
     async def _request(self, key, name, query, paid):
+        try:
+            await self._find_and_add(key, name, query, paid)
+        finally:
+            self.pending_requests[key] -= 1
+            if self.pending_requests[key] <= 0:
+                del self.pending_requests[key]
+
+    async def _find_and_add(self, key, name, query, paid):
         rec = self._rec(key, name)
         try:
             song = await self.ne.find(query, int(float(self.cfg.get("max_minutes", 8)) * 60))

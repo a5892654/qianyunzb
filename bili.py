@@ -99,7 +99,8 @@ class _Handler(blivedm.BaseHandler):
     def _on_gift(self, client, m: wm.GiftMessage):
         paid = m.coin_type == "gold"
         self.emit({"type": "gift", "uid": m.uid, "name": m.uname, "gift": m.gift_name, "num": m.num,
-                   "value": round(m.total_coin / 1000, 2) if paid else 0.0, "paid": paid})
+                   "value": round(m.total_coin / 1000, 2) if paid else 0.0, "paid": paid,
+                   "room_id": getattr(client, "room_id", None)})
 
     def _on_user_toast_v2(self, client, m: wm.UserToastV2Message):
         if m.source == 2:
@@ -120,7 +121,8 @@ class _Handler(blivedm.BaseHandler):
     def _on_interact_word_v2(self, client, m: wm.InteractWordV2Message):
         kind = {1: "enter", 2: "follow", 5: "follow"}.get(m.msg_type)
         if kind:
-            self.emit({"type": kind, "uid": m.uid, "name": m.username})
+            self.emit({"type": kind, "uid": m.uid, "name": m.username,
+                       "room_id": getattr(client, "room_id", None)})
 
 
 class BiliLive:

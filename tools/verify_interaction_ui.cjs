@@ -7,6 +7,7 @@ const {chromium} = require('playwright');
 
 const root = path.resolve(__dirname, '..');
 const cfg = JSON.parse(execFileSync(path.join(root, '.venv/Scripts/python.exe'), ['-c', 'import config,json; print(json.dumps(config.DEFAULTS))'], {cwd: root, encoding: 'utf8'}));
+const interactionDefaults = structuredClone(cfg.interaction);
 const errors = [], patches = [];
 
 function merge(target, patch) {
@@ -51,20 +52,56 @@ function merge(target, patch) {
     await page.waitForFunction(() => document.querySelector('[data-k="interaction.idle_seconds"]').value === '20');
     assert.equal(await enabled.isChecked(), true);
     assert.equal(await interval.inputValue(), '60');
+    const followEnabled = page.locator('[data-k="interaction.follow_enabled"]');
+    const followInterval = page.locator('[data-k="interaction.follow_interval_seconds"]');
+    const followTemplates = page.locator('[data-k="interaction.follow_templates"]');
+    const followPrompt = page.locator('[data-k="interaction.follow_ai_prompt"]');
+    assert.equal(await followEnabled.isChecked(), true);
+    assert.equal(await followInterval.inputValue(), '180');
+    assert.match(await followTemplates.inputValue(), /点个关注/);
+    assert.match(await followPrompt.inputValue(), /求关注或求点赞/);
+    await followInterval.fill('240'); await followInterval.blur();
+    await followTemplates.fill('喜欢就点个关注呀！\n开心的话点点赞吧！'); await followTemplates.blur();
+    await followPrompt.fill('结合游戏自然求关注，每次换个说法。'); await followPrompt.blur();
+    await followEnabled.uncheck();
     assert.equal(await page.locator('[data-k="events.gift.tiered_thanks"]').isChecked(), true);
+    const supporterWelcome = page.locator('[data-k="events.enter.supporter_welcome"]');
+    const supporterTemplate = page.locator('[data-k="events.enter.supporter_templates"]');
+    const supporterPrompt = page.locator('[data-k="events.enter.supporter_ai_prompt"]');
+    assert.equal(await supporterWelcome.isChecked(), true);
+    assert.match(await supporterTemplate.inputValue(), /你的心意我一直记着/);
+    assert.match(await supporterPrompt.inputValue(), /以前在本直播间送过礼物/);
+    await supporterTemplate.fill('欢迎{name}回来一起开心玩！'); await supporterTemplate.blur();
+    await supporterPrompt.fill('亲切欢迎{name}，记住之前的心意。'); await supporterPrompt.blur();
+    await supporterWelcome.uncheck();
     await idle.fill('35'); await idle.blur();
     await interval.fill('90'); await interval.blur();
     await enabled.uncheck();
     await page.evaluate(() => flushConfig());
-    assert.deepEqual(cfg.interaction, {enabled: false, idle_seconds: 35, interval_seconds: 90});
+    assert.deepEqual(cfg.interaction, {...interactionDefaults, enabled: false, idle_seconds: 35, interval_seconds: 90,
+      follow_enabled: false, follow_interval_seconds: 240, follow_templates: '喜欢就点个关注呀！\n开心的话点点赞吧！',
+      follow_ai_prompt: '结合游戏自然求关注，每次换个说法。'});
     assert.ok(patches.length);
     await page.reload();
     await page.locator('nav [data-tab="rules"]').click();
     await page.waitForFunction(() => document.querySelector('[data-k="interaction.idle_seconds"]').value === '35');
     assert.equal(await enabled.isChecked(), false);
     assert.equal(await interval.inputValue(), '90');
+    assert.equal(await followEnabled.isChecked(), false);
+    assert.equal(await followInterval.inputValue(), '240');
+    assert.equal(await followTemplates.inputValue(), '喜欢就点个关注呀！\n开心的话点点赞吧！');
+    assert.equal(await followPrompt.inputValue(), '结合游戏自然求关注，每次换个说法。');
+    await followEnabled.check();
+    assert.equal(await supporterWelcome.isChecked(), false);
+    assert.equal(await supporterTemplate.inputValue(), '欢迎{name}回来一起开心玩！');
+    assert.equal(await supporterPrompt.inputValue(), '亲切欢迎{name}，记住之前的心意。');
+    await supporterWelcome.check();
+    await page.evaluate(() => flushConfig());
+    assert.equal(cfg.events.enter.supporter_welcome, true);
+    assert.equal(cfg.interaction.follow_enabled, true);
+    assert.equal(cfg.interaction.enabled, false);
     assert.deepEqual(errors, []);
-    console.log('PASS 主动互动默认开启、时间设置、关闭、自动保存及刷新保留');
+    console.log('PASS 主动聊天、定时关注点赞及暖心欢迎：默认开启、独立开关、文案与间隔设置、自动保存及刷新保留');
   } finally {
     await browser.close();
   }

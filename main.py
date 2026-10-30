@@ -718,6 +718,21 @@ def build_web(app: App):
         except ValueError as error:
             return web.json_response({"ok": False, "error": str(error)}, status=400)
 
+    @routes.post("/api/broadcast/timer/start")
+    async def broadcast_timer_start(request):
+        try:
+            data = await request.json()
+            if not isinstance(data, dict):
+                raise ValueError("请设置停播倒计时分钟数")
+            return web.json_response(await app.schedule.arm_external_timer(data.get("minutes")))
+        except ValueError as error:
+            return web.json_response({"ok": False, "error": str(error)}, status=400)
+
+    @routes.post("/api/broadcast/timer/cancel")
+    async def broadcast_timer_cancel(_):
+        app.schedule.cancel_external_timer()
+        return web.json_response(app.schedule.status())
+
     @routes.post("/api/broadcast/room/cover")
     async def broadcast_room_cover(request):
         if not request.content_type.startswith("multipart/"):

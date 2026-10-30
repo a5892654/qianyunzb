@@ -9,7 +9,7 @@ import re
 import aiohttp
 
 import procutil
-from config import BASE_DIR
+from config import BASE_DIR, SUPPORTER_WELCOME_PROMPT, SUPPORTER_WELCOME_TEMPLATES
 
 log = logging.getLogger("ai")
 
@@ -249,6 +249,10 @@ class Brain:
 
     async def reply(self, cfg, ev_cfg, ev, context=""):
         """返回 (文本, 来源, 表情)。AI 失败时自动退回模板。"""
+        if ev["type"] == "enter" and ev.get("_gift_supporter") and ev_cfg.get("supporter_welcome", True):
+            ev_cfg = {**ev_cfg,
+                      "templates": ev_cfg.get("supporter_templates") or SUPPORTER_WELCOME_TEMPLATES,
+                      "ai_prompt": ev_cfg.get("supporter_ai_prompt") or SUPPORTER_WELCOME_PROMPT}
         if ev["type"] == "gift" and ev_cfg.get("tiered_thanks", True):
             return await self._gift_reply(cfg, ev_cfg, ev)
         lines = [l.strip() for l in ev_cfg.get("templates", "").splitlines() if l.strip()]

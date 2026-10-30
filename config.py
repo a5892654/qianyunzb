@@ -20,6 +20,29 @@ DEFAULT_PERSONA = (
     "观众的进房、弹幕、礼物、上舰等消息会发给你，你要像真人主播一样用口语回应。"
 )
 
+SUPPORTER_WELCOME_TEMPLATES = (
+    "欢迎{name}回来呀！你的心意我一直记着，今天也要一起开开心心！\n"
+    "{name}来啦，见到你真开心！谢谢你之前的支持，快来一起玩吧！\n"
+    "欢迎{name}，又见到你啦！送你一个大大的比心，今天也陪你开心聊天！"
+)
+SUPPORTER_WELCOME_PROMPT = (
+    "观众{name}以前在本直播间送过礼物，现在又进入了直播间。"
+    "请像重逢一位支持过自己的老朋友一样，开心、亲切地单独欢迎，用一两句自然好听的口语。"
+    "称呼名字一次，让对方感受到心意被记住，可以轻轻比心或送上祝福。"
+    "不要播报消费金额、攀比或索要礼物，不要编造送礼细节、昵称和亲密关系，不要油腻地吹捧。"
+)
+
+FOLLOW_REMINDER_TEMPLATES = (
+    "喜欢这个直播间的话，点个关注呀，下次还来一起玩！\n"
+    "看得开心的话，帮我点点赞吧，谢谢大家的陪伴！\n"
+    "刚来的朋友，喜欢的话留个关注，以后常来一起聊天呀！"
+)
+FOLLOW_REMINDER_PROMPT = (
+    "现在到了定时互动提醒时间，请像主播一样自然地说一两句求关注或求点赞的话。"
+    "结合最近的聊天或游戏局势顺势接一句，明确邀请点关注或点赞，二者选一个就好。"
+    "语气轻松、亲切、不强求，每次换个说法，不要喊口号，也不要连续堆砌请求。"
+)
+
 DEFAULTS = {
     "room_id": 0,
     "bili_cookie": "",
@@ -31,6 +54,9 @@ DEFAULTS = {
             "enabled": True, "mode": "template", "cooldown_user": 600, "merge_window": 4, "max_names": 3,
             "templates": "欢迎{name}来到直播间！\n{name}来啦，欢迎欢迎！\n欢迎{name}，找个位置坐下吧！",
             "ai_prompt": "观众{name}进入了直播间，请热情地欢迎。",
+            "supporter_welcome": True,
+            "supporter_templates": SUPPORTER_WELCOME_TEMPLATES,
+            "supporter_ai_prompt": SUPPORTER_WELCOME_PROMPT,
         },
         "follow": {
             "enabled": True, "mode": "template", "cooldown_user": 3600, "merge_window": 4, "max_names": 3,
@@ -65,7 +91,12 @@ DEFAULTS = {
             "ai_prompt": "观众{name}给直播间点了赞，请简短感谢。",
         },
     },
-    "interaction": {"enabled": True, "idle_seconds": 20, "interval_seconds": 60},
+    "interaction": {
+        "enabled": True, "idle_seconds": 20, "interval_seconds": 60,
+        "follow_enabled": True, "follow_interval_seconds": 180,
+        "follow_templates": FOLLOW_REMINDER_TEMPLATES,
+        "follow_ai_prompt": FOLLOW_REMINDER_PROMPT,
+    },
     "filter": {
         "blocklist": "",
         "ignore_users": "",
@@ -134,7 +165,7 @@ DEFAULTS = {
         "title": "恶魔之塔 ZERO｜AI 游戏直播", "area_id": 283,
         "auto_stop_minutes": 0,
         "auto_stop_line": "下了下了，吃白饭去了，拜拜～",
-        "schedule": {"enabled": False, "start_time": "20:00", "stop_time": "23:00",
+        "schedule": {"enabled": False, "mode": "managed", "start_time": "20:00", "stop_time": "23:00",
                      "window_title": "", "audio_name": "", "last_start": "", "last_stop": ""},
     },
     "dtgame": {
@@ -170,7 +201,7 @@ DEFAULTS = {
     },
     "songs": {
         "enabled": True,
-        "require_gift": True,
+        "require_gift": False,
         "song_gifts": "小花花",
         "song_gift_count": 1,
         "pin_gifts": "人气票",
@@ -194,6 +225,8 @@ DEFAULTS = {
         "tpl_play": "下面播放{name}点的《{song}》。",
         "tpl_fail": "抱歉{name}，没找到能播放的《{query}》。",
         "tpl_need": "{name}，送{num}个{gift}就可以点歌哦！",
+        "announce_usage": True,
+        "tpl_usage": "发弹幕点歌加歌名就可以点歌啦，比如点歌加晴天！",
         "tpl_full": "{name}，歌单排满啦，等前面的播完再点吧！",
     },
     "fixed_replies": [

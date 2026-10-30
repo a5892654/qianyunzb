@@ -9,6 +9,7 @@ import numpy as np
 
 from brain import fill
 from interaction import AudienceInteraction
+from supporters import GiftSupporters
 from tts import ENV_FPS, envelope
 from tts import decode_audio_file
 
@@ -44,8 +45,9 @@ def describe(ev):
 
 
 class Pipeline:
-    def __init__(self, app):
+    def __init__(self, app, *, supporters=None):
         self.app = app
+        self.supporters = supporters if supporters is not None else GiftSupporters()
         self.jobs = []
         self.has_job = asyncio.Event()
         self.synth_q = asyncio.Queue(maxsize=1)
@@ -146,8 +148,15 @@ class Pipeline:
             return
         ev["raw_name"] = ev.get("name", "")
         ev["name"] = self._display_name(ev.get("name"))
+        room = ev.get("room_id") or getattr(self.app.bili, "room_id", None) or self.cfg.get("room_id")
         if ev["type"] == "gift":
+            # 记录送礼事实与是否开口感谢无关，暂停或关闭感谢时也能记住。
+            self.supporters.record(room, ev)
             self.app.songs.on_gift(ev)
+        if ev["type"] == "enter":
+            ev["_gift_supporter"] = bool(
+                not ev.get("test") and self.cfg["events"]["enter"].get("supporter_welcome", True)
+                and self.supporters.contains(room, ev.get("uid")))
         if ev["type"] == "danmaku" and self.app.songs.on_danmaku(ev):
             self.app.push("event", {"type": "danmaku", "tname": "点歌", "desc": describe(ev), "skip": None,
                                     "test": bool(ev.get("test"))})
@@ -168,12 +177,16 @@ class Pipeline:
         win = float(ec.get("merge_window", 0) or 0)
         now = time.time()
         if t in MERGE_BY_TYPE and win > 0:
-            m = self.merging.get(t)
+            # 送礼观众按 UID 单独合并，避免把同批普通观众也说成送过礼物。
+            key = (t, ev["uid"]) if t == "enter" and ev.get("_gift_supporter") else t
+            m = self.merging.get(key)
             if m:
-                if ev["name"] not in m["names"]:
+                if ev.get("_gift_supporter"):
+                    m["names"] = [ev["name"]]
+                elif ev["name"] not in m["names"]:
                     m["names"].append(ev["name"])
             else:
-                self.merging[t] = {"ev": dict(ev), "names": [ev["name"]], "deadline": now + win, "first": now}
+                self.merging[key] = {"ev": dict(ev), "names": [ev["name"]], "deadline": now + win, "first": now}
             return
         if t == "gift" and win > 0:
             key = ("gift", ev.get("uid") or ev["raw_name"], ev.get("gift"))
@@ -422,7 +435,7 @@ class Pipeline:
                 if not self.interaction.can_speak(item["interaction_event"]):
                     self._mark_done(item["id"])
                     continue
-                self.interaction.spoken(item["text"])
+                self.interaction.spoken(item["text"], item["interaction_event"])
             self.current = item
             clock = asyncio.create_task(self._voice_clock(item["id"]))
             try:
