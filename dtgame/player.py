@@ -24,6 +24,7 @@ from dtgame.expedition import choose_depth, depth_settings
 from dtgame import view
 from dtgame import grans
 from dtgame import lifecycle
+from dtgame.commentary import GameCommentary, scene
 
 log = logging.getLogger("dtplay")
 
@@ -107,8 +108,9 @@ SYSTEM = """你在直播玩《恶魔之塔 Zero》——一款类杀戮尖塔的
   新手教学路线固定深度0；游戏桥没给解锁上限时不填 depth，沿用当前设置。
   深度只能在大厅开始新出征前调整，不能中途改本局难度，也不要为改深度放弃现有进度。
 
-每个 JSON 都要带一个 "say" 字段，是你此刻对着观众说的一句口语中文，
-不超过 30 字，像真人打牌时随口念叨，不要念数值、不要解说规则。
+每个 JSON 都要带一个 "say" 字段，可以留空。有值得说的才随口说一句口语中文，
+不超过 30 字，不逐张牌念操作，不要念数值或解说规则。
+刚掉血、险胜、失误或拿到奖励时，依据已经发生的事实自然反应，不能提前庆祝尚未确认的结果。
 
 手牌后面标 ✕ 的牌当前打不出来，括号里是原因，别选它。
 敌人标了 ✕不可选中 的（已阵亡或隐匿）别当目标，系统会自动改成能选的那个。
@@ -160,6 +162,7 @@ class Player:
         self._last_state = None
         self._state_time = 0.0
         self.live_chat = collections.deque(maxlen=6)
+        self.commentary = GameCommentary()
         self.chars: list[str] = []   # 最近几局的角色（短名），用来逼她换人
         for x in (chars or []):
             key = self._char_key(x)
@@ -192,6 +195,9 @@ class Player:
             text += "\n刚才的游戏解说：" + self.last_say
         return text
 
+    def speech_state(self):
+        return scene(self._last_state if time.monotonic() - self._state_time < 30 else None)
+
     def remember_interaction(self, ev, reply):
         """把已安排的弹幕回复交给下一步游戏决策，避免两边各说各的。"""
         self.live_chat.append({"at": time.monotonic(), "name": str(ev.get("name", ""))[:40],
@@ -217,6 +223,7 @@ class Player:
             '\n【Live2D 表情与动作】每个决策 JSON 除 say 外，必须带独立的 "emotion" 字段，'
             '值从下面的 name 中原样选择一个，不能为空，不要把标签写进 say。'
             '根据这句话的语气和游戏局势主动选择：得手时开心、拿奖励时期待、受挫时生气、意外时惊讶等。'
+            '可选项也包含模型的道具和手势；观众要求表演时选择对应项，服装和体型只在明确要求时调整。'
             '吃饭、困倦、token 类动作只在台词和情境合适时选，不要在每次出牌时乱吃乱睡；不要机械地固定选同一项。'
             '\n当前皮套的可选项：' + json.dumps(options, ensure_ascii=False)
         )
@@ -638,6 +645,44 @@ class Player:
         """走一步：读状态、问模型、执行。返回 {screen, action, ok, say}。"""
         if state is None:
             state = await asyncio.to_thread(self.bridge.state)
+        mode = (state.get("run") or {}).get("mode")
+        if mode and mode != "deep":
+            return await self._step(state)
+        self.commentary.observe(state)
+        result = await self._step(state)
+        emotion = result.pop("_emotion", "")
+        action = (result.get("action") or {}).get("action", "")
+        if not result.get("ok") or result.get("stale") or action.startswith("wait") or action == "abandon_run":
+            return result
+        moment = self.commentary.moment()
+        say = result.get("say") or (self.commentary.fallback() if moment else "")
+        situation = scene(state)
+        say = _clean_say(say, min(30, situation["max_chars"]))
+        important = bool(moment) or state.get("screen") in ("character_select", "hall")
+        if not self.commentary.can_speak(state, say, important):
+            result["say"] = ""
+            return result
+        result["say"] = say
+        if not self.narrate:
+            return result
+        if moment and not emotion:
+            expected = {"low_health": "惊讶", "hurt": "惊讶", "boss": "期待", "heal": "开心",
+                        "death": "难过", "win": "开心", "clutch_win": "开心", "relic": "期待"}[moment["kind"]]
+            if expected in {e.get("name") for e in self.emotions()}:
+                emotion = expected
+        try:
+            reaction = getattr(self.pipe, "react", None) if self.pipe is not None else None
+            job = reaction(say, emotion) if moment and callable(reaction) else self.speak(say, emotion)
+            if job is not None or self.pipe is None:
+                self.last_say = say
+                self.commentary.spoken(state, say)
+            if job is not None:
+                self._pending_speech = job
+        except Exception as e:
+            log.warning("播报失败：%s", e)
+        return result
+
+    async def _step(self, state: dict) -> dict:
         self._last_state = state
         self._state_time = time.monotonic()
         self._observe("observe", state)
@@ -702,6 +747,7 @@ class Player:
             return {"screen": screen, "action": {"action": "return_to_hall"},
                     "ok": bool(r.get("ok")), "error": r.get("error", ""), "say": ""}
         text = view.render(self._character_state(state) if screen == "character_select" else state)
+        text += self.commentary.prompt(state)
         if screen == "character_select":
             text += "\n" + self._rotation(state)
         if screen == "hall" and self._last_expedition:
@@ -775,18 +821,6 @@ class Player:
                              f"error={result.get('error', '')}，screen_after={result.get('screen_after', screen)}"})
         del self.history[:-18]
 
-        if result.get("ok") and say and say != self.last_say:
-            self.last_say = say
-            if self.narrate:
-                try:
-                    job = self.speak(say, emotion)
-                    if job is not None:
-                        # 流式下 ~0.4s 就开口，但模型思考下一手也要 2~3 秒，
-                        # 所以这里不阻塞等待——让播报和下一步决策并行。
-                        # 真正的节流放在 run_forever 里：下一步动作前才等这句播完。
-                        self._pending_speech = job
-                except Exception as e:
-                    log.warning("播报失败：%s", e)
         if not result.get("ok"):
             err = result.get("error", "")
             self.log_push("warn", f"[{screen}] {act} 被拒：{err}")
@@ -827,7 +861,7 @@ class Player:
             self.error_streak = 0
             self.turns_taken += 1
         return {"screen": screen, "action": act, "ok": bool(result.get("ok")),
-                "error": result.get("error", ""), "say": say,
+                "error": result.get("error", ""), "say": say, "_emotion": emotion,
                 "closed": result.get("closed", False), "screen_after": result.get("screen_after", screen)}
 
     async def run_forever(self, interval: float = 0.4):

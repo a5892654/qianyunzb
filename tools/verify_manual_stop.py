@@ -105,7 +105,7 @@ class ManualStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((await (await self.post()).json())["ok"])
         await asyncio.gather(timer, return_exceptions=True)
         self.assertTrue(timer.cancelled())
-        self.app.pipe.say_job_id.assert_called_once_with(FAREWELL, "")
+        self.app.pipe.say_job_id.assert_called_once_with(FAREWELL, "", farewell=True)
 
     async def test_immediate_stop_still_skips_farewell(self):
         self.assertTrue((await (await self.post("stop")).json())["ok"])
@@ -136,6 +136,65 @@ class ManualStopTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(body["ok"])
         self.assertEqual(body["error"], "平台停播失败")
         self.assertEqual(self.app.schedule.active_action, "")
+
+    async def test_farewell_is_prioritized_and_ordinary_speech_cannot_follow_it(self):
+        self.app.pipe = Pipeline(self.app)
+        self.app.cfg["filter"]["max_queue"] = 1
+        self.app.cfg["tts"].update(stream_enabled=False)
+        self.app.engine = types.SimpleNamespace(synth=AsyncMock(
+            return_value=(np.zeros((100, 2), dtype=np.int16), 1000)))
+        self.app.player = Mock(voice_clock=lambda: 0)
+        self.app.pipe.say("尚未播放的手动通知")
+        self.app.schedule.active_action = "farewell"
+        farewell = self.app.pipe.say_job_id(FAREWELL, farewell=True)
+        self.app.pipe.say("不应挤掉结束词的醒目留言", kind="superchat")
+        self.assertEqual(self.app.pipe.jobs[0]["id"], farewell)
+        # 已经生成的解说也不能插到告别后面。
+        await self.app.pipe.play_q.put({"id": -1, "type": "narration", "text": "继续打牌"})
+        self.app.pipe.start()
+        try:
+            async with asyncio.timeout(2):
+                while not self.app.pipe.spoken_done(farewell):
+                    await asyncio.sleep(0.005)
+            self.assertEqual([d["text"] for k, d in self.app.pushes if k == "speak"], [FAREWELL])
+        finally:
+            for task in self.app.pipe.tasks:
+                task.cancel()
+            await asyncio.gather(*self.app.pipe.tasks, return_exceptions=True)
+
+    async def test_local_auto_stop_starts_farewell_before_deadline_and_waits_for_audio(self):
+        self.app.cfg["broadcast"].update(auto_stop_minutes=1, auto_stop_line="")
+        self.app.schedule.TIMER_SECONDS_PER_MINUTE = 0.3
+        self.app.pipe.spoken_done.return_value = False
+        self.app.schedule.arm_local_timer()
+        timer = self.app.auto_stop_task
+        try:
+            async with asyncio.timeout(2):
+                while not self.app.pipe.say_job_id.called:
+                    await asyncio.sleep(0.005)
+            self.app.broadcast.stop.assert_not_awaited()
+            self.assertEqual(self.app.schedule.active_action, "farewell")
+            self.app.pipe.say_job_id.assert_called_once_with(
+                config.DEFAULTS["broadcast"]["auto_stop_line"], "", farewell=True)
+            # 即使设定时刻已到，音频还没结束也不截断。
+            await asyncio.sleep(0.2)
+            self.app.broadcast.stop.assert_not_awaited()
+            self.app.pipe.spoken_done.return_value = True
+            await asyncio.wait_for(timer, 2)
+            self.app.broadcast.stop.assert_awaited_once()
+        finally:
+            timer.cancel()
+            await asyncio.gather(timer, return_exceptions=True)
+
+    async def test_disabling_duration_cancels_local_auto_stop(self):
+        self.app.cfg["broadcast"]["auto_stop_minutes"] = 1
+        self.app.schedule.arm_local_timer()
+        timer = self.app.auto_stop_task
+        self.app.cfg["broadcast"]["auto_stop_minutes"] = 0
+        self.app.schedule.refresh_auto_timer()
+        await asyncio.gather(timer, return_exceptions=True)
+        self.assertTrue(timer.cancelled())
+        self.app.broadcast.stop.assert_not_awaited()
 
 
 if __name__ == "__main__":

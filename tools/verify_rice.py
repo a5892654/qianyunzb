@@ -16,7 +16,7 @@ from aiohttp.test_utils import TestClient, TestServer
 import config
 from dtgame.player import Player
 from dtgame.rice import RiceTracker
-from live_rice import RiceCounter, RiceCompositor
+from live_rice import RiceCounter, RiceCompositor, layout_rect
 from live_capture import WindowStreamCapture
 
 
@@ -234,6 +234,22 @@ class RiceTests(unittest.TestCase):
         capture._compose_frame(source)
         np.testing.assert_array_equal(np.frombuffer(capture._frame, np.uint8).reshape(source.shape), source)
 
+    def test_rice_position_and_size_change_the_actual_composite(self):
+        settings = {"enabled": True, "overlay_x": 0.5, "overlay_y": 0.25, "overlay_size": 0.25}
+        compositor = RiceCompositor(self.counter, lambda: settings)
+        for width, height in ((1920, 1080), (1280, 720), (320, 180)):
+            for cx, cy in ((0.5, 0.25), (0, 1), (1, 0)):
+                settings.update(overlay_x=cx, overlay_y=cy)
+                frame = np.full((height, width, 4), 80, np.uint8)
+                compositor.apply(frame)
+                x, y, w, h = layout_rect(settings, width, height)
+                changed = np.any(frame[..., :3] != 80, axis=2)
+                self.assertTrue(changed[y:y+h, x:x+w].any())
+                changed[y:y+h, x:x+w] = False
+                self.assertFalse(changed.any(), "白饭必须完全画在指定位置，不残留原位置像素")
+                self.assertEqual(h, round(height * 0.25))
+        self.assertEqual(self.counter.total, 0)
+
 
 class PlayerObserverTests(unittest.IsolatedAsyncioTestCase):
     async def test_player_reports_successful_ai_action_then_winning_state(self):
@@ -286,6 +302,21 @@ class RiceRouteTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.post('/api/config', json={"rice_counter": {"total": 999}}, headers={"X-BVB": "1"})
         self.assertEqual(response.status, 400)
         self.assertEqual(self.app.rice.total, 0)
+
+    async def test_layout_is_saved_and_exposed_to_browser_source(self):
+        patch = {"overlay_x": 0.65, "overlay_y": 0.3, "overlay_size": 0.24}
+        with unittest.mock.patch('config.save') as save:
+            response = await self.client.post('/api/config', json={"rice_counter": patch}, headers={"X-BVB": "1"})
+        self.assertEqual(response.status, 200)
+        save.assert_called_once()
+        state = await (await self.client.get('/api/rice/state')).json()
+        self.assertEqual(state['layout'], {'x': 0.65, 'y': 0.3, 'size': 0.24})
+        self.assertEqual(self.app.rice.total, 0)
+        self.app.push.assert_called_with('rice', self.app.rice_state())
+        for field, value in (("overlay_x", -0.1), ("overlay_y", 1.1), ("overlay_size", 0),
+                             ("overlay_size", 0.7), ("overlay_size", None), ("overlay_x", True)):
+            response = await self.client.post('/api/config', json={"rice_counter": {field: value}}, headers={"X-BVB": "1"})
+            self.assertEqual(response.status, 400, (field, value))
 
     async def test_real_gift_packets_count_without_ai_or_voice_thanks(self):
         from bili import _Handler

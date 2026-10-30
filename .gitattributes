@@ -1,0 +1,3 @@
+live2d-models/**/*.psd.zip -text
+live2d-models/**/*.moc3 -text
+live2d-models/**/*.png -text

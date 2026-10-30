@@ -37,11 +37,15 @@ input:focus,select:focus,textarea:focus{border-color:var(--pink)}
 textarea{resize:vertical;min-height:62px}
 .btn{all:unset;cursor:pointer;padding:7px 14px;border-radius:8px;background:var(--panel2);border:1px solid var(--line);white-space:nowrap;text-align:center}
 .btn:hover{border-color:var(--pink)}
+.btn:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
 .btn:disabled{opacity:.45;cursor:not-allowed}
 .btn.p{background:var(--pink);border-color:var(--pink);color:#fff}
 .btn.b{background:var(--blue);border-color:var(--blue);color:#fff}
 .btn.r{color:var(--red)}
 .btn.sm{padding:4px 10px;font-size:12px}
+.l2d-test-grid{display:grid;grid-template-columns:minmax(0,1fr) 240px;gap:18px;align-items:start}
+.l2d-test-preview{width:100%;height:360px;border:1px solid var(--line);border-radius:10px;background:#303848}
+@media(max-width:850px){.l2d-test-grid{grid-template-columns:1fr}.l2d-test-preview{height:320px}}
 .feed{height:calc(100vh - 380px);min-height:260px;overflow:auto;font-size:13px}
 .feed .it{padding:6px 2px;border-bottom:1px dashed var(--line);display:flex;gap:8px}
 .feed .it .t{color:var(--dim);flex-shrink:0;font-variant-numeric:tabular-nums}
@@ -84,6 +88,8 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
 .layout-box>span{position:absolute;left:0;top:0;background:var(--pink);color:white;font-size:11px;padding:1px 6px;pointer-events:none}
 .layout-handle{position:absolute;right:-7px;bottom:-7px;width:18px;height:18px;padding:0;border:2px solid white;background:var(--pink);border-radius:4px;cursor:nwse-resize;touch-action:none}
 .layout-box[hidden],.layout-stage [hidden]{display:none}
+.layout-box.rice{border-color:var(--yellow)}
+.layout-box.rice>span,.layout-box.rice .layout-handle{background:var(--yellow);color:#171a23}
 </style>
 </head>
 <body>
@@ -224,7 +230,7 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
       <label class="f" style="max-width:220px">播多久自动停播（分钟，0=不限）<input type="number" min="0" step="5" data-k="broadcast.auto_stop_minutes"></label>
       <label class="f">停播前说的话<input data-k="broadcast.auto_stop_line" maxlength="120"></label>
     </div>
-    <div class="hint">保存分钟数即启用自动停播。本工具开播自动计时；直播姬 / OBS 开播由后台自动检测，并按本场开播时间计时，无需额外点击。到点结束B站直播间，告别语音失败也会继续停播。设为 0 关闭。</div>
+    <div class="hint">保存分钟数即启用自动停播。本工具开播自动计时；直播姬 / OBS 开播由后台自动检测。倒计时和每日定时停播都会提前约 30 秒说结束词，等语音播完后在设定时刻停播；结束词留空时使用默认告别语。语音失败或超时仍会继续停播。设为 0 关闭时长计时。</div>
     <div class="hint">只采集选中的窗口，不采集整个桌面。声音采集所选输出设备的游戏和千音配音，也会包含该设备的其他声音；直播前请关闭通知。画质：1080p / 30帧。</div>
   </div>
   <div class="card">
@@ -239,7 +245,7 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
   </div>
   <div class="card">
     <h3>大碗白饭 · 干饭计数</h3>
-    <div class="row"><label class="c"><input type="checkbox" data-k="rice_counter.enabled">把白饭计数叠加到直播画面左下角</label><span style="flex:1"></span><b id="riceTotal">0 碗</b></div>
+    <div class="row"><label class="c"><input type="checkbox" data-k="rice_counter.enabled">把白饭计数叠加到直播画面</label><span style="flex:1"></span><b id="riceTotal">0 碗</b></div>
     <div class="row"><label class="f" style="max-width:240px">大额礼物门槛（单次总额 / 元）<input type="number" min="0.01" step="0.01" data-k="rice_counter.large_gift_yuan"></label><span class="hint" id="riceGiftProgress">普通礼物进度 0/10</span></div>
     <div class="row"><button class="btn" id="ricePreview">试播开饭动画</button><a class="btn" href="/rice" target="_blank" rel="noopener">打开透明浏览器源</a><span class="hint" id="riceStatus" role="status"></span></div>
     <p class="hint">普通礼物累计 10 次，或单次付费送礼总额达到大额门槛，白饭 +1 并播放像素庆祝动画。大额门槛默认 10 元，大额礼物不重复计入普通进度，已有进度保留。免费礼物也计入普通进度，一次送多件记作一次；测试礼物和重复消息不计入。AI 击败第三幕 Boss 仍加 1 碗。累计碗数和普通进度重启后保留；关闭后停止计数，试播不会增加碗数。</p>
@@ -308,14 +314,18 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
   <h2>直播画面调整</h2>
   <div class="card">
     <div class="row"><button class="btn" id="layoutBack">返回一键开播</button><button class="btn" id="layoutModel">选择模型 / 调整取景</button><span class="hint" id="layoutState" role="status"></span></div>
-    <div class="row"><label class="c"><input type="checkbox" data-k="live2d.overlay_in_broadcast">把 Live2D 皮套叠加到直播画面</label></div>
-    <p class="hint">拖动粉色框移动皮套，拖动右下角调整大小。下方滑块可精细调整。预览和直播中即时生效，自动保存。</p>
+    <div class="row"><label class="c"><input type="checkbox" data-k="live2d.overlay_in_broadcast">把 Live2D 皮套叠加到直播画面</label><label class="c"><input type="checkbox" data-k="rice_counter.enabled" id="layoutRiceOn">显示大碗白饭（金色框）</label></div>
+    <p class="hint">粉色框是皮套，金色框是大碗白饭。拖动框移动，拖动右下角调整大小；下方滑块可精细调整。预览和直播中即时生效，自动保存。</p>
     <div class="layout-stage" id="layoutStage">
       <img id="layoutPreviewImage" alt="观众画面预览" hidden>
-      <div class="layout-placeholder" id="layoutPlaceholder">尚未启动游戏预览。可先调整皮套，再返回「一键开播」点击「预览画面和声音」查看完整画面。</div>
+      <div class="layout-placeholder" id="layoutPlaceholder">尚未启动游戏预览。可先调整皮套和白饭，再返回「一键开播」点击「预览画面和声音」查看完整画面。</div>
       <div class="layout-box" id="layoutBox" tabindex="0" role="group" aria-label="Live2D 位置，方向键移动，按住 Shift 加快" hidden>
         <iframe id="layoutModelPreview" title="Live2D 皮套取景" tabindex="-1"></iframe>
         <span>Live2D · 拖动移动</span><button class="layout-handle" id="layoutResize" aria-label="调整 Live2D 大小，方向键放大或缩小"></button>
+      </div>
+      <div class="layout-box rice" id="layoutRiceBox" tabindex="0" role="group" aria-label="大碗白饭位置，方向键移动，按住 Shift 加快" hidden>
+        <iframe id="layoutRicePreview" title="大碗白饭取景" tabindex="-1"></iframe>
+        <span>大碗白饭 · 拖动移动</span><button class="layout-handle" id="layoutRiceResize" aria-label="调整大碗白饭大小，方向键放大或缩小"></button>
       </div>
     </div>
     <div class="row" style="margin-top:14px">
@@ -329,6 +339,16 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
       <button class="btn" id="layoutReset" style="margin-top:18px">恢复默认位置和大小</button>
     </div>
     <div class="hint" id="layoutSaveState" role="status"></div>
+  </div>
+  <div class="card">
+    <h3>大碗白饭的位置和大小</h3>
+    <div class="row"><label class="c"><input type="checkbox" data-k="rice_counter.enabled">显示大碗白饭</label><span class="hint">可拖动画面中的金色框，也可使用下方滑块。透明浏览器源同步生效。</span></div>
+    <div class="row">
+      <label class="f">左右位置 <b id="layoutRiceXValue"></b><input type="range" id="layoutRiceX" min="0" max="100" step="0.1" aria-label="大碗白饭左右位置"></label>
+      <label class="f">上下位置 <b id="layoutRiceYValue"></b><input type="range" id="layoutRiceY" min="0" max="100" step="0.1" aria-label="大碗白饭上下位置"></label>
+      <label class="f">大小（相对画面高度）<b id="layoutRiceSizeValue"></b><input type="range" id="layoutRiceSize" min="0.04" max="0.6" step="0.01" data-k="rice_counter.overlay_size"></label>
+    </div>
+    <button class="btn" id="layoutRiceReset">恢复白饭默认位置和大小</button>
   </div>
 </section>
 
@@ -347,7 +367,7 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
       <label class="f">冷场多久主动聊（秒）<input type="number" min="10" data-k="interaction.idle_seconds"></label>
       <label class="f">主动聊天最短间隔（秒）<input type="number" min="30" data-k="interaction.interval_seconds"></label>
     </div>
-    <p class="hint">最近 5 分钟有观众进房、发弹幕或送礼时，冷场后会结合游戏和聊天记录找话题。观众消息优先，暂停自动回复或告别下播时停止主动聊天。</p>
+    <p class="hint">最近 5 分钟有观众活动时，会结合游戏和聊天记录找话题。观众接话后可顺着聊几轮，没人回应时自然收尾。间隔会小幅浮动，普通战斗少聊，紧张时先专心操作；弹幕仍优先简短回应。会避开相似台词，暂停自动回复或告别下播时停止主动聊天。</p>
     <div class="row">
       <label class="c"><input type="checkbox" data-k="interaction.follow_enabled">定时提醒关注 / 点赞</label>
       <label class="f">关注点赞提醒间隔（秒）<input type="number" min="60" data-k="interaction.follow_interval_seconds"></label>
@@ -356,7 +376,7 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
       <label class="f">关注点赞备用文案（每行一条，轮换使用）<textarea data-k="interaction.follow_templates"></textarea></label>
       <label class="f">关注点赞 AI 提示<textarea data-k="interaction.follow_ai_prompt"></textarea></label>
     </div>
-    <p class="hint">默认每 3 分钟由 AI 自然提醒点关注或点赞，AI 不可用时轮换备用文案。与找话题分别开关，沿用上方冷场等待和最短间隔；观众消息优先，忙碌时顺延。使用本机推流时，即使观众安静也会提醒；其他推流方式需近期有观众活动。暂停、断线或告别下播时停止。</p>
+    <p class="hint">默认至少间隔 3 分钟，在聊天或游戏休息的空档自然提醒关注或点赞，AI 不可用时轮换备用文案。正在战斗、有人接话或语音还在播放时顺延。与找话题分别开关；本机推流时即使观众安静也会提醒，其他推流方式需近期有观众活动。暂停、断线或告别下播时停止。</p>
   </div>
   <div class="card">
     <h3>过滤与队列</h3>
@@ -373,7 +393,7 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
       <label class="c"><input type="checkbox" data-k="filter.ignore_owner">不回复主播自己的消息</label>
       <label class="c"><input type="checkbox" data-k="filter.rename_default">打码名 / bili_xxx 默认名念成“新朋友”</label>
     </div>
-    <p class="hint">优先级：醒目留言 = 上舰 &gt; 礼物 &gt; 弹幕 = 关注 &gt; 进房 &gt; 点赞 = 主动互动 &gt; 游戏解说。</p>
+    <p class="hint">优先级：醒目留言 = 上舰 &gt; 礼物 &gt; 弹幕 = 关注 &gt; 进房 = 游戏重要反应 &gt; 点赞 = 主动互动 &gt; 普通游戏解说。</p>
   </div>
 </section>
 
@@ -662,12 +682,32 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
     <div class="row"><input id="l2dUrl" readonly><span class="btn" data-copy="#l2dUrl">复制</span></div>
     <p class="hint">建议宽 1080、高 1080（或和你的画布一样大）。直播软件不支持透明网页时，用 <code>/live2d?bg=00ff00</code> 绿幕背景再抠像。这里的取景和表情设置会直接用于「一键开播 → 皮套上镜」，开播时由软件自己渲染合成，不用另开窗口。<span id="l2dErr" style="color:var(--red)"></span></p>
   </div>
+  <div class="card" id="l2dTestPanel">
+    <h3>表情 / 动作测试</h3>
+    <p class="hint" id="l2dTestSummary">正在读取模型…</p>
+    <div class="l2d-test-grid">
+      <div>
+        <div class="row">
+          <label class="f">AI 表演选项<select id="l2dEmotionTest"></select></label>
+          <button type="button" class="btn p" id="l2dEmotionTestBtn" style="align-self:flex-end">测试 AI 表演</button>
+          <button type="button" class="btn b" id="l2dReset" style="align-self:flex-end" title="清除临时表情和动作，恢复常驻外观与正常待机">恢复默认状态</button>
+        </div>
+        <div class="hint">表情（点击名称测试 4 秒）：</div>
+        <div id="l2dExprBtns" class="row" style="gap:6px;margin-top:6px"></div>
+        <div class="hint">动作（点击名称测试）：</div>
+        <div id="l2dMotionBtns" class="row" style="gap:6px;margin-top:6px"></div>
+        <p class="hint" id="l2dTestStatus" role="status">点击左侧测试按钮，在右侧查看效果。</p>
+      </div>
+      <iframe id="l2dTestPreview" class="l2d-test-preview" title="表情动作实时预览"></iframe>
+    </div>
+  </div>
   <div class="card">
     <h3>模型</h3>
     <div class="row">
       <label class="f" style="max-width:260px">模型库（一键切换）<select id="l2dLib"></select></label>
-      <span class="hint" style="align-self:flex-end;padding-bottom:6px">切换时会把当前皮套的位置/大小/表情先记住</span>
+      <span class="hint" style="align-self:flex-end;padding-bottom:6px">每套皮套独立记住模型文件、取景、常驻表情、情绪和口型设置</span>
     </div>
+    <p class="hint" id="l2dLibraryPath"></p>
     <div class="row">
       <label class="f">模型文件夹<input data-k="live2d.model_dir"></label>
       <span class="btn" data-pick="live2d.model_dir" data-kind="dir" style="margin-top:18px">浏览…</span>
@@ -715,13 +755,6 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
     <div id="emoList"></div>
     <span class="btn p" id="emoAdd">+ 添加情绪</span>
   </div>
-  <div class="card">
-    <h3>试播表情 / 动作</h3>
-    <div class="hint">表情（点击试播 4 秒）：</div>
-    <div id="l2dExprBtns" class="row" style="gap:6px;margin-top:6px"></div>
-    <div class="hint">动作：</div>
-    <div id="l2dMotionBtns" class="row" style="gap:6px;margin-top:6px"></div>
-  </div>
 </section>
 
 <!-- ========== OBS ========== -->
@@ -750,6 +783,7 @@ $$('nav button[data-tab]').forEach(b => b.onclick = () => {
   $$('nav button[data-tab]').forEach(x => x.classList.toggle('on', x === b));
   $$('main section').forEach(s => s.classList.toggle('on', s.id === b.dataset.tab));
   syncPreviewStream(!!broadcastInfo.previewing);
+  syncL2dTestPreview();
   renderLayout();
 });
 
@@ -806,7 +840,8 @@ function queueConfig(p, delay = 500) {
     else if (el.type !== 'radio') el.value = v ?? '';
   });
   $$('[data-show]').forEach(el => el.textContent = getPath(CFG, el.dataset.show));
-  if (p.live2d) { renderLayout(); $('#layoutSaveState').textContent = '正在保存调整…'; }
+  if (p.live2d) { renderLayout(); syncL2dTestPreview(); $('#layoutSaveState').textContent = '正在保存调整…'; }
+  if (p.rice_counter) { renderLayout(); $('#layoutSaveState').textContent = '正在保存调整…'; }
   if (!saveTimer) saveTimer = setTimeout(() => flushConfig().catch(() => {}), delay);
 }
 async function flushConfig() {
@@ -816,7 +851,7 @@ async function flushConfig() {
     saveQueue = saveQueue.catch(() => {}).then(async () => {
       const r = await api('/api/config', p);
       if (!r.ok) throw new Error(r.error || '设置保存失败');
-      if (p.live2d) $('#layoutSaveState').textContent = '调整已保存，预览和直播同步生效';
+      if (p.live2d || p.rice_counter) $('#layoutSaveState').textContent = '调整已保存，预览和直播同步生效';
       else toast('设置已保存');
     }).catch(error => {
       // 保留失败的修改，下一次保存或预览时重试。
@@ -837,7 +872,7 @@ function onField(el) {
   const p = setPatch(el.dataset.k, v);
   if (el.dataset.k === 'live2d.overlay_in_broadcast' && v) p.live2d.enabled = true;
   if (['live2d.overlay_corner', 'live2d.overlay_margin'].includes(el.dataset.k)) Object.assign(p.live2d, {overlay_x: null, overlay_y: null});
-  queueConfig(p, el.dataset.k.startsWith('live2d.overlay_') ? 120 : 500);
+  queueConfig(p, /^(live2d|rice_counter)\.overlay_/.test(el.dataset.k) ? 120 : 500);
   if (el.dataset.k === 'ai.backend') fillForm();
   if (el.dataset.k === 'wishlist.action') renderWishFields();
 }
@@ -1097,6 +1132,31 @@ async function saveNow(patch, msg = '设置已保存') { deepMerge(CFG, patch); 
 
 // ---------- Live2D ----------
 let L2D = {expressions: [], motions: [], model_files: []};
+function syncL2dTestPreview() {
+  const frame = $('#l2dTestPreview');
+  const show = $('#l2d').classList.contains('on') && CFG.live2d?.enabled && !L2D.error;
+  if (show && !frame.getAttribute('src')) frame.src = '/live2d?bg=303848';
+  else if (!show) frame.removeAttribute('src');
+}
+async function testL2d(payload, label) {
+  if (!CFG.live2d?.enabled || L2D.error) { toast('请先选择并启用可用的 Live2D 模型'); return; }
+  try {
+    await flushConfig();
+    const r = await api('/api/l2d/test', payload);
+    if (!r.ok) throw new Error(r.error || '测试失败');
+    $('#l2dTestStatus').textContent = payload.motion === '@reset'
+      ? '已恢复默认状态，临时表情和动作已清除。'
+      : '正在测试：' + label + '，请查看右侧模型。';
+  } catch (error) { $('#l2dTestStatus').textContent = '测试失败：' + error.message; }
+}
+function renderL2dCoverage() {
+  const emotions = CFG.live2d?.emotions || [];
+  const expressions = new Set(emotions.flatMap(e => e.expressions || []));
+  const motions = new Set(emotions.map(e => e.motion));
+  const ne = L2D.expressions.filter(e => expressions.has(e.id)).length;
+  const nm = L2D.motions.filter(m => motions.has(m.id)).length;
+  $('#l2dTestSummary').textContent = `当前模型：${L2D.expressions.length} 个表情、${L2D.motions.length} 个动作；AI 已接入 ${ne}/${L2D.expressions.length} 个表情、${nm}/${L2D.motions.length} 个动作。无需开播即可测试。`;
+}
 async function loadL2d() {
   L2D = await api('/api/l2d/info');
   $('#l2dErr').textContent = L2D.error ? '　⚠ ' + L2D.error : '';
@@ -1104,33 +1164,47 @@ async function loadL2d() {
   $('#l2dIdle').innerHTML = '<option value="">（无，保持静止）</option>' + L2D.motions.map(m => `<option value="${esc(m.id)}">${esc(m.label)}</option>`).join('');
   const base = CFG.live2d.base_expressions || [];
   $('#l2dBase').innerHTML = L2D.expressions.map(e => `<label class="c"><input type="checkbox" data-base="${esc(e.id)}" ${base.includes(e.id) ? 'checked' : ''}>${esc(e.label)}</label>`).join('') || '<span class="hint">（没有找到表情文件）</span>';
-  $('#l2dExprBtns').innerHTML = L2D.expressions.map(e => `<span class="btn sm" data-texpr="${esc(e.id)}">${esc(e.label)}</span>`).join('');
-  $('#l2dMotionBtns').innerHTML = L2D.motions.map(m => `<span class="btn sm" data-tmotion="${esc(m.id)}">${esc(m.label)}</span>`).join('') || '<span class="hint">（无）</span>';
+  $('#l2dExprBtns').innerHTML = L2D.expressions.map(e => `<button type="button" class="btn sm" data-texpr="${esc(e.id)}">${esc(e.label)}</button>`).join('') || '<span class="hint">（无表情）</span>';
+  $('#l2dMotionBtns').innerHTML = L2D.motions.map(m => `<button type="button" class="btn sm" data-tmotion="${esc(m.id)}">${esc(m.label)}</button>`).join('') || '<span class="hint">（无动作）</span>';
   try {
     const lib = await api('/api/l2d/library');
     const cur = lib.current || '';
-    $('#l2dLib').innerHTML = lib.models.map(m => `<option value="${esc(m.key)}" ${m.key === cur ? 'selected' : ''}>${esc(m.key)}</option>`).join('') || '<option value="">（模型库为空）</option>';
+    const models = lib.models || [], known = models.some(m => m.key === cur);
+    $('#l2dLib').innerHTML = (known ? '' : `<option value="">${CFG.live2d.model_dir ? '（当前使用自选模型）' : '（请选择模型）'}</option>`) + models.map(m => `<option value="${esc(m.key)}" ${m.key === cur ? 'selected' : ''}>${esc(m.key)}</option>`).join('');
+    $('#l2dLibraryPath').textContent = lib.root ? `模型库：${lib.root}。每套模型放一个子文件夹，保留贴图、表情和动作的原有目录。` : '';
   } catch (e) { $('#l2dLib').innerHTML = '<option value="">（模型库读取失败）</option>'; }
-  renderEmotions(); renderFixed(); fillForm();
+  renderEmotions(); renderFixed(); fillForm(); syncL2dTestPreview();
 }
 $('#l2dLib').onchange = async (e) => {
   const key = e.target.value;
   if (!key) return;
-  const r = await api('/api/l2d/switch', {key});
-  if (r && r.ok === false) { toast(r.error || '切换失败'); return; }
-  toast('已切换到 ' + key);
-  await loadConfig();
-  await loadL2d();
+  e.target.disabled = true;
+  try {
+    await flushConfig();
+    const r = await api('/api/l2d/switch', {key});
+    if (!r?.ok) throw new Error(r?.error || '切换失败');
+    toast('已切换到 ' + key);
+  } catch (error) { toast('切换失败：' + error.message); }
+  finally {
+    await loadConfig();
+    await loadL2d();
+    e.target.disabled = false;
+  }
 };
 function renderEmotions() {
   const emos = CFG.live2d.emotions || [];
+  renderL2dCoverage();
+  const selected = $('#l2dEmotionTest').value;
+  $('#l2dEmotionTest').innerHTML = emos.map((e, i) => `<option value="${i}">${esc(e.name)}</option>`).join('');
+  if ([...$('#l2dEmotionTest').options].some(o => o.value === selected)) $('#l2dEmotionTest').value = selected;
+  $('#l2dEmotionTestBtn').disabled = !emos.length;
   const exprIds = L2D.expressions.map(e => `<option value="${esc(e.id)}">${esc(e.label)}</option>`).join('');
   $('#emoList').innerHTML = `<datalist id="exprIds">${exprIds}</datalist>` + emos.map((e, i) => `<div class="row emo">
     <input data-ef="name" value="${esc(e.name)}" style="width:90px" placeholder="情绪名">
     <input data-ef="expressions" value="${esc((e.expressions || []).join(','))}" list="exprIds" placeholder="表情（逗号分隔）" style="flex:1.2;min-width:120px">
-    <select data-ef="motion" style="width:180px"><option value="">（无动作）</option>${L2D.motions.map(m => `<option value="${esc(m.id)}" ${m.id === e.motion ? 'selected' : ''}>${esc(m.label)}</option>`).join('')}</select>
+    <select data-ef="motion" style="width:180px"><option value="">（无动作）</option><option value="@reset" ${e.motion === '@reset' ? 'selected' : ''}>恢复默认状态</option>${L2D.motions.map(m => `<option value="${esc(m.id)}" ${m.id === e.motion ? 'selected' : ''}>${esc(m.label)}</option>`).join('')}</select>
     <input data-ef="keywords" value="${esc(e.keywords || '')}" placeholder="关键词（模板/固定回复用来判断情绪）" style="flex:1.6;min-width:140px">
-    <span class="btn sm" data-etest="${i}">试</span><span class="btn sm r" data-edel="${i}">删</span></div>`).join('');
+    <button type="button" class="btn sm" data-etest="${i}">测试</button><span class="btn sm r" data-edel="${i}">删</span></div>`).join('');
 }
 const collectEmotions = () => $$('#emoList .emo').map(r => ({
   name: r.querySelector('[data-ef=name]').value.trim(),
@@ -1160,21 +1234,26 @@ const collectFixed = () => $$('#fixedList .fx').map(r => ({
 document.addEventListener('change', e => {
   const t = e.target;
   if (t.dataset.base !== undefined) saveNow({live2d: {base_expressions: $$('[data-base]').filter(x => x.checked).map(x => x.dataset.base)}});
-  else if (t.dataset.ef) saveNow({live2d: {emotions: collectEmotions()}}).then(renderFixed);
+  else if (t.dataset.ef) saveNow({live2d: {emotions: collectEmotions()}}).then(() => { renderFixed(); renderL2dCoverage(); });
   else if (t.dataset.ff) saveNow({fixed_replies: collectFixed()});
   else if (t.dataset.k === 'live2d.enabled' && t.checked) { const b = $('[data-k="live2d.bubble"]'); if (!b.checked) { b.checked = true; onField(b); } }
   else if (t.dataset.k === 'live2d.model_dir') setTimeout(loadL2d, 900);
 });
 document.addEventListener('click', e => {
   const d = e.target.dataset || {};
-  if (d.texpr) api('/api/l2d/test', {expressions: [d.texpr]});
-  else if (d.tmotion) api('/api/l2d/test', {motion: d.tmotion});
-  else if (d.etest !== undefined) { const em = collectEmotions()[+d.etest]; api('/api/l2d/test', {emotion: em.name, expressions: em.expressions, motion: em.motion, text: `（${em.name}）`}); }
+  if (d.texpr) testL2d({expressions: [d.texpr]}, e.target.textContent);
+  else if (d.tmotion) testL2d({motion: d.tmotion}, e.target.textContent);
+  else if (d.etest !== undefined) { const em = collectEmotions()[+d.etest]; testL2d({emotion: em.name, expressions: em.expressions, motion: em.motion, text: `（${em.name}）`}, em.name); }
   else if (d.edel !== undefined) { const l = collectEmotions(); l.splice(+d.edel, 1); saveEmotions(l); }
   else if (d.fdel !== undefined) { const l = collectFixed(); l.splice(+d.fdel, 1); saveNow({fixed_replies: l}).then(renderFixed); }
   else if (d.copy) { navigator.clipboard.writeText($(d.copy).value); toast('已复制'); }
 });
 $('#emoAdd').onclick = () => saveEmotions([...collectEmotions(), {name: '新情绪', expressions: [], motion: '', keywords: ''}]);
+$('#l2dEmotionTestBtn').onclick = () => {
+  const em = collectEmotions()[+$('#l2dEmotionTest').value];
+  if (em) testL2d({emotion: em.name, expressions: em.expressions, motion: em.motion, text: `（${em.name}）`}, em.name);
+};
+$('#l2dReset').onclick = () => testL2d({motion: '@reset'}, '恢复默认状态');
 $('#fixedAdd').onclick = () => saveNow({fixed_replies: [...collectFixed(), {enabled: true, keywords: '', match: 'contains', reply: '', emotion: ''}]}).then(renderFixed);
 $('#l2dUrl').value = `${location.origin}/live2d`;
 $('#l2dPreview').onclick = () => window.open('/live2d?bg=303848', 'l2dprev', 'width=900,height=900');
@@ -1532,6 +1611,25 @@ function layoutRect() {
   const y = c.overlay_y ?? (corner.includes('t') ? margin + h / 2 : 1 - margin - h / 2);
   return {x, y, w, h};
 }
+function riceLayoutRect() {
+  const c = CFG.rice_counter || {}, h = Number(c.overlay_size ?? 0.16), w = h * 360 / 168 * 9 / 16;
+  const x = c.overlay_x ?? 0.02 * 9 / 16 + w / 2, y = c.overlay_y ?? 1 - 0.02 - h / 2;
+  return {x: clamp(x, w / 2, 1 - w / 2), y: clamp(y, h / 2, 1 - h / 2), w, h};
+}
+function renderRiceLayout(show) {
+  const r = riceLayoutRect(), box = $('#layoutRiceBox'), frame = $('#layoutRicePreview');
+  const enabled = !!CFG.rice_counter?.enabled;
+  box.hidden = !enabled;
+  Object.assign(box.style, {left: (r.x - r.w / 2) * 100 + '%', top: (r.y - r.h / 2) * 100 + '%', width: r.w * 100 + '%', height: r.h * 100 + '%'});
+  $('#layoutRiceX').value = r.x * 100; $('#layoutRiceY').value = r.y * 100;
+  $('#layoutRiceXValue').textContent = (r.x * 100).toFixed(1) + '%';
+  $('#layoutRiceYValue').textContent = (r.y * 100).toFixed(1) + '%';
+  $('#layoutRiceSizeValue').textContent = (r.h * 100).toFixed(0) + '%';
+  frame.hidden = show;
+  if (!show && enabled && $('#layout').classList.contains('on')) {
+    if (!frame.getAttribute('src')) frame.src = '/rice?widget=1';
+  } else frame.removeAttribute('src');
+}
 function renderLayout() {
   if (!CFG.live2d) return;
   const c = CFG.live2d, r = layoutRect(), box = $('#layoutBox');
@@ -1543,6 +1641,7 @@ function renderLayout() {
   $('#layoutYValue').textContent = (r.y * 100).toFixed(1) + '%';
   $('#layoutSizeValue').textContent = (r.h * 100).toFixed(0) + '%';
   const show = !!broadcastInfo.previewing;
+  renderRiceLayout(show);
   $('#layoutPreviewImage').hidden = !show;
   $('#layoutPlaceholder').hidden = show;
   const frame = $('#layoutModelPreview');
@@ -1587,6 +1686,37 @@ $('#layoutBox').onkeydown = e => {
   const r = layoutRect(), step = e.shiftKey ? 0.05 : 0.005;
   if (e.target.id === 'layoutResize') moveLayout({overlay_size: clamp(r.h + (['ArrowRight', 'ArrowDown'].includes(e.key) ? step : -step), 0.2, 1.4)});
   else moveLayout({overlay_x: clamp(r.x + (e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0), 0, 1), overlay_y: clamp(r.y + (e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0), 0, 1)});
+};
+function moveRiceLayout(patch) { queueConfig({rice_counter: patch}, 120); }
+$('#layoutRiceX').oninput = () => moveRiceLayout({overlay_x: Number($('#layoutRiceX').value) / 100});
+$('#layoutRiceY').oninput = () => moveRiceLayout({overlay_y: Number($('#layoutRiceY').value) / 100});
+$('#layoutRiceReset').onclick = () => moveRiceLayout({overlay_x: null, overlay_y: null, overlay_size: 0.16});
+let riceLayoutDrag = null;
+$('#layoutRiceBox').onpointerdown = e => {
+  if (e.button !== 0) return;
+  e.preventDefault();
+  riceLayoutDrag = {pointer: e.pointerId, resize: e.target.id === 'layoutRiceResize', startX: e.clientX, startY: e.clientY, rect: riceLayoutRect(), stage: $('#layoutStage').getBoundingClientRect()};
+  $('#layoutRiceBox').setPointerCapture(e.pointerId);
+};
+$('#layoutRiceBox').onpointermove = e => {
+  if (!riceLayoutDrag || riceLayoutDrag.pointer !== e.pointerId) return;
+  const d = riceLayoutDrag, dx = (e.clientX - d.startX) / d.stage.width, dy = (e.clientY - d.startY) / d.stage.height;
+  if (d.resize) {
+    const ratio = 360 / 168 * 9 / 16, size = clamp(d.rect.h + (Math.abs(dx / ratio) > Math.abs(dy) ? dx / ratio : dy), 0.04, 0.6);
+    moveRiceLayout({overlay_size: size, overlay_x: clamp(d.rect.x + (size - d.rect.h) * ratio / 2, 0, 1), overlay_y: clamp(d.rect.y + (size - d.rect.h) / 2, 0, 1)});
+  } else moveRiceLayout({overlay_x: clamp(d.rect.x + dx, 0, 1), overlay_y: clamp(d.rect.y + dy, 0, 1)});
+};
+function endRiceDrag(e) {
+  if (!riceLayoutDrag || riceLayoutDrag.pointer !== e.pointerId) return;
+  riceLayoutDrag = null; flushConfig().catch(() => {});
+}
+$('#layoutRiceBox').onpointerup = $('#layoutRiceBox').onpointercancel = $('#layoutRiceBox').onlostpointercapture = endRiceDrag;
+$('#layoutRiceBox').onkeydown = e => {
+  if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) return;
+  e.preventDefault();
+  const r = riceLayoutRect(), step = e.shiftKey ? 0.05 : 0.005;
+  if (e.target.id === 'layoutRiceResize') moveRiceLayout({overlay_size: clamp(r.h + (['ArrowRight', 'ArrowDown'].includes(e.key) ? step : -step), 0.04, 0.6)});
+  else moveRiceLayout({overlay_x: clamp(r.x + (e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0), 0, 1), overlay_y: clamp(r.y + (e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0), 0, 1)});
 };
 let scheduleInfo = {}, scheduleDirty = false, scheduleBusy = false;
 let externalTimerBusy = false;
@@ -1873,7 +2003,7 @@ for (const id of ['broadcastPreviewImage', 'layoutPreviewImage']) $('#' + id).on
 function renderRice(state) {
   $('#riceTotal').textContent = `${state.total ?? 0} 碗`;
   $('#riceGiftProgress').textContent = `普通礼物进度 ${state.gift_progress ?? 0}/10`;
-  $('#riceStatus').textContent = state.error || (state.enabled ? '白饭已上镜 · 左下角' : '白饭叠加已关闭');
+  $('#riceStatus').textContent = state.error || (state.enabled ? '白饭已开启 · 位置和大小可在画面调整中修改' : '白饭叠加已关闭');
   $('#ricePreview').disabled = !state.enabled;
 }
 $('#riceUrl').textContent = location.origin + '/rice';

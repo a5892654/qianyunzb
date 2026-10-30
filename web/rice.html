@@ -4,14 +4,23 @@
 <title>大碗白饭 · 千音透明直播源</title>
 <style>
 html,body{margin:0;width:100%;height:100%;background:transparent;overflow:hidden}
-canvas{position:fixed;left:2vh;bottom:2vh;width:34.286vh;height:16vh;image-rendering:pixelated;pointer-events:none}
+canvas{position:fixed;image-rendering:pixelated;pointer-events:none}
 </style>
 <canvas width="720" height="336" aria-label="白饭累计"></canvas>
 <script>
 const canvas=document.querySelector('canvas'),ctx=canvas.getContext('2d');
 const sheet=new Image(); sheet.src='/static/assets/rice_bowl_celebrate.png';
 let state={enabled:false,total:0,celebrated_at:0},lastSuccess=0;
-function update(value){state=value;lastSuccess=Date.now();}
+const WIDGET_MODE=new URLSearchParams(location.search).get('widget')==='1';
+function layout(){
+ if(WIDGET_MODE){Object.assign(canvas.style,{left:'0px',top:'0px',width:'100%',height:'100%'});return;}
+ const c=state.layout||{},W=innerWidth,H=innerHeight;
+ const h=Math.min(Math.max(1,Math.round(H*(c.size??0.16))),H,Math.max(1,Math.floor(W*168/360)));
+ const w=Math.min(W,Math.max(1,Math.round(h*360/168))),pad=Math.max(0,Math.min(Math.round(H*.02),W-w,H-h));
+ const x=c.x==null?pad:Math.round(W*c.x-w/2),y=c.y==null?H-h-pad:Math.round(H*c.y-h/2);
+ Object.assign(canvas.style,{left:Math.max(0,Math.min(x,W-w))+'px',top:Math.max(0,Math.min(y,H-h))+'px',width:w+'px',height:h+'px'});
+}
+function update(value){state=value;lastSuccess=Date.now();layout();}
 async function refresh(){try{const r=await fetch('/api/rice/state',{cache:'no-store'});if(r.ok)update(await r.json());}catch(e){}}
 function connect(){const ws=new WebSocket(`ws://${location.host}/ws`);ws.onmessage=e=>{try{const m=JSON.parse(e.data);if(m.kind==='rice')update(m);}catch(e){}};ws.onclose=()=>setTimeout(connect,1500);ws.onopen=refresh;}
 function draw(){
@@ -28,6 +37,6 @@ function draw(){
  }
  ctx.restore();requestAnimationFrame(draw);
 }
-sheet.onload=()=>requestAnimationFrame(draw);setInterval(refresh,1000);refresh();connect();
+sheet.onload=()=>requestAnimationFrame(draw);addEventListener('resize',layout);layout();setInterval(refresh,1000);refresh();connect();
 </script>
 </html>

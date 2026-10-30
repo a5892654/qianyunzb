@@ -137,6 +137,7 @@ class SupporterWelcomeTests(unittest.IsolatedAsyncioTestCase):
         self.app.cfg["live2d"]["enabled"] = True
         original = copy.deepcopy(self.app.cfg)
         for backend in ("openai", "qoder"):
+            self.app.brain.recent_replies.clear()  # 两个后端各自验证首条欢迎，避免触发重复改写。
             self.app.cfg["ai"]["backend"] = backend
             model = getattr(self.app.brain, backend).ask
             model.return_value = "【开心】小明来啦，见到你真开心！你的心意我记着，一起玩吧！"
@@ -179,7 +180,7 @@ class SupporterWelcomeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.reply(ev))[0], "小明回来一起玩呀！")
         settings["mode"] = "ai"
         await self.reply(ev)
-        self.assertEqual(self.app.brain.openai.ask.await_args.args[2], "亲切欢迎小明回访")
+        self.assertEqual(self.app.brain.openai.ask.await_args.args[2].splitlines()[0], "亲切欢迎小明回访")
         settings.update(supporter_welcome=False, mode="template")
         self.assertEqual((await self.reply(ev))[0], "普通欢迎小明")
         self.restart()

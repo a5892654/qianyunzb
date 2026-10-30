@@ -18,6 +18,7 @@ gift_supporters.sqlite3*
 rice_counter.json*
 
 # Media / model weights / datasets (never commit)
+live2d-models/*
 *.wav
 *.mp3
 *.flac
@@ -40,3 +41,8 @@ Thumbs.db
 # Build artifacts / local backups
 QianyinAI.exe
 config.json.testbak
+
+# Model included with additional redistribution permission confirmed by the repository owner.
+!live2d-models/DeepSeek免费公皮/
+!live2d-models/DeepSeek免费公皮/**
+live2d-models/DeepSeek免费公皮/psd/*.psd

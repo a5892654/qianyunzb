@@ -237,7 +237,10 @@ class App:
         return {"ok": True}
 
     def rice_state(self):
-        return {**self.rice.state(self.cfg.get("rice_counter", {}).get("enabled", False)),
+        settings = self.cfg.get("rice_counter", {})
+        return {**self.rice.state(settings.get("enabled", False)),
+                "layout": {"size": settings.get("overlay_size", 0.16),
+                           "x": settings.get("overlay_x"), "y": settings.get("overlay_y")},
                 "error": getattr(self.broadcast.capture, "rice_error", "")}
 
     def rice_awarded(self):
@@ -526,26 +529,15 @@ def build_web(app: App):
     async def l2d_switch(request):
         d = await request.json()
         key = str(d.get("key") or "")
-        target = next((x for x in live2d.list_library() if x["key"] == key), None)
-        if not target:
-            return web.json_response({"ok": False, "error": "模型库中找不到：" + key}, status=404)
-        l2d = app.cfg["live2d"]
-        profiles = l2d.setdefault("profiles", {})
-        cur = os.path.basename(os.path.normpath(l2d.get("model_dir") or ""))
-        kept = ("model_file", "idle_motion", "emotions", "scale", "x", "y")
-        if cur:
-            profiles[cur] = {k: l2d.get(k) for k in kept}
-        # Expression and motion ids are model-specific, so each skin remembers its own set.
-        prof = profiles.get(key) or {}
-        l2d["model_dir"] = target["dir"]
-        l2d["model_file"] = target["model_file"]
-        l2d["idle_motion"] = prof.get("idle_motion", "")
-        l2d["emotions"] = prof.get("emotions", [])
-        for k in ("scale", "x", "y"):
-            if k in prof:
-                l2d[k] = prof[k]
+        try:
+            live2d.switch_model(app.cfg["live2d"], key)
+        except FileNotFoundError as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=404)
+        except (OSError, ValueError, TypeError) as e:
+            return web.json_response({"ok": False, "error": "模型无法加载：" + str(e)}, status=400)
         config.save(app.cfg)
         app.push("l2d_config", {})
+        await app.broadcast.refresh_overlay()
         return ok(key=key)
 
     @routes.post("/api/l2d/test")
@@ -856,27 +848,6 @@ def build_web(app: App):
     async def broadcast_source_stop(_):
         return web.json_response(await app.broadcast.stop_source())
 
-    async def _auto_stop_after(seconds, line):
-        """开播计时到点：先让皮套把告别语说完，再停播。"""
-        try:
-            await asyncio.sleep(seconds)
-            if not app.broadcast.running:
-                return
-            if line:
-                job = app.pipe.say_job_id(line, "")
-                for _ in range(50):  # 最多再等 25 秒，避免 TTS 出错把停播卡住
-                    if app.pipe.spoken_done(job):
-                        break
-                    await asyncio.sleep(0.5)
-                await asyncio.sleep(1.2)
-            log.info("auto stop: 已播 %d 分钟，自动停播", seconds // 60)
-            app.push("notice", {"text": "已到设定时长，自动停播"})
-            await app.schedule.stop_now()
-        except asyncio.CancelledError:
-            pass
-        except Exception:
-            log.exception("auto stop failed")
-
     @routes.post("/api/broadcast/start")
     async def broadcast_start(request):
         result = await app.broadcast.start(await request.json())
@@ -884,14 +855,7 @@ def build_web(app: App):
             app.cfg["room_id"] = result["room_id"]
             config.save(app.cfg)
             asyncio.create_task(app.connect())
-            minutes = int(app.cfg.get("broadcast", {}).get("auto_stop_minutes") or 0)
-            task = getattr(app, "auto_stop_task", None)
-            if task and not task.done():
-                task.cancel()
-            if minutes > 0:
-                line = (app.cfg.get("broadcast", {}).get("auto_stop_line") or "").strip()
-                app.auto_stop_task = asyncio.create_task(_auto_stop_after(minutes * 60, line))
-                log.info("auto stop armed: %d 分钟后停播", minutes)
+            app.schedule.arm_local_timer()
         return web.json_response(result)
 
     @routes.post("/api/broadcast/stop")

@@ -52,6 +52,9 @@ let mouth = 0, env = null, envStart = 0, envFps = 30, fakeMouth = false;
 let envPos = -1, envPosAt = 0;   // 服务端报的真实发声位置（秒），-1 = 还没收到
 let eyeBlinkFallback = false;
 let clearTimer = null, bubbleTimer = null, typeTimer = null, speakId = null;
+let activeMotion = '', motionRequest = 0, configQueue = Promise.resolve();
+let assetGeneration = 0, expressionRequest = 0;
+let defaultPartOpacities = null;
 
 // 同步渲染后读取 WebGL 画布，避免默认清空绘图缓冲后得到全透明图片。
 window.captureLive2DFrame = () => {
@@ -122,14 +125,36 @@ async function loadExpr(id) {
   if (exprData[id]) return exprData[id];
   const e = INFO.expressions.find(x => x.id === id);
   if (!e) return null;
-  try { exprData[id] = await fetch('/l2d/model/' + encodeURI(e.file)).then(r => r.json()); } catch { return null; }
+  const generation = assetGeneration;
+  try {
+    const data = await fetch('/l2d/model/' + encodeURI(e.file)).then(r => r.json());
+    if (generation !== assetGeneration) return null;
+    exprData[id] = data;
+  } catch { return null; }
   return exprData[id];
+}
+
+function configureMaskBuffers(im) {
+  const renderer = im.renderer, clipping = renderer?._clippingManager;
+  if (!clipping) return;
+  // Cubism packs at most 36 masks in one texture, or 32 per texture when
+  // using multiple buffers. This model has 49 distinct clipping masks.
+  const masks = clipping.getClippingMaskCount();
+  const buffers = masks > 36 ? Math.ceil(masks / 32) : 1;
+  if (buffers <= renderer.getRenderTextureCount()) return;
+  const gl = renderer.gl;
+  clipping.release();
+  renderer.initialize(im.coreModel, buffers);
+  if (gl) renderer._clippingManager.setGL(gl);
 }
 
 async function loadModel() {
   errBox.textContent = '';
   delete window.live2dOverlayState.error;
   if (model) { app.stage.removeChild(model); model.destroy(); model = null; }
+  clearTimeout(clearTimer);
+  activeMotion = ''; motionRequest++;
+  assetGeneration++; expressionRequest++;
   active = [];
   for (const k in exprData) delete exprData[k];
   if (!CFG.enabled) return;
@@ -138,6 +163,8 @@ async function loadModel() {
     model = await PIXI.live2d.Live2DModel.from('/l2d/model/auto.model3.json?t=' + Date.now(), {autoHitTest: false, autoFocus: false});
   } catch (e) { errBox.textContent = 'Live2D 模型加载失败：' + e; return; }
   const im = model.internalModel;
+  configureMaskBuffers(im);
+  defaultPartOpacities = im.coreModel?.getModel ? Array.from(im.coreModel.getModel().parts.opacities) : null;
   im.lipSync = false;
   if (!CFG.blink) im.eyeBlink = undefined;
   // 有些皮套没有在 model3 里声明 EyeBlink 分组，库自带的眨眼就完全不生效，这里兜底自己驱动。
@@ -182,11 +209,12 @@ function mouthSeconds() {
 
 function frame(core, dt) {
   const t = performance.now() / 1000;
-  if (CFG.breath) core.setParameterValueById('ParamBreath', (Math.sin(t * 2 * Math.PI / 3.4) + 1) / 2);
+  const params = CFG.parameter_map || {};
+  if (CFG.breath) core.setParameterValueById(params.breath || 'ParamBreath', (Math.sin(t * 2 * Math.PI / 3.4) + 1) / 2);
   if (CFG.sway) {
-    core.addParameterValueById('ParamAngleX', Math.sin(t * 2 * Math.PI / 6.5) * 4);
-    core.addParameterValueById('ParamAngleZ', Math.sin(t * 2 * Math.PI / 8.3) * 2);
-    core.addParameterValueById('ParamBodyAngleX', Math.sin(t * 2 * Math.PI / 7.1) * 2);
+    core.addParameterValueById(params.angle_x || 'ParamAngleX', Math.sin(t * 2 * Math.PI / 6.5) * 4);
+    core.addParameterValueById(params.angle_z || 'ParamAngleZ', Math.sin(t * 2 * Math.PI / 8.3) * 2);
+    core.addParameterValueById(params.body_x || 'ParamBodyAngleX', Math.sin(t * 2 * Math.PI / 7.1) * 2);
   }
   const motionState = model.internalModel.motionManager.state;
   // 一次性动作自行控制眼睛，避免把睡觉、眯眼动作强制睁开。
@@ -194,6 +222,11 @@ function frame(core, dt) {
     const p = t % 4.6;
     const v = p < 0.16 ? Math.abs(Math.cos(Math.PI * p / 0.16)) : 1;
     for (const id of EYE_IDS) core.setParameterValueById(id, v);
+  }
+  // 动作可能把张嘴写进保存参数；先清理基线，再叠加表情和当前语音，句末才会真正闭嘴。
+  const motionMouth = motionState.currentPriority > 1 && INFO.motions.some(m => m.id === motionState.currentGroup && m.mouth);
+  if (CFG.lipsync && (!motionMouth || env || fakeMouth || mouth > 0.02)) {
+    for (const id of MOUTH_IDS) core.setParameterValueById(id, 0);
   }
   const step = Math.min(1, dt / FADE);  for (const a of active) {
     a.w = a.target > a.w ? Math.min(a.target, a.w + step) : Math.max(a.target, a.w - step);
@@ -217,17 +250,56 @@ function frame(core, dt) {
 }
 
 // ---------- 表情 / 动作 ----------
+function restoreDefaultState() {
+  clearTimeout(clearTimer); clearTimeout(bubbleTimer); clearInterval(typeTimer);
+  expressionRequest++; motionRequest++;
+  activeMotion = '';
+  active = active.filter(a => a.base);
+  for (const a of active) { a.w = 1; a.target = 1; }
+  mouth = 0;
+  bubble.classList.remove('on');
+  if (!model) return;
+  const im = model.internalModel, core = im.coreModel;
+  im.motionManager.stopAllMotions();
+  for (let i = 0; i < core.getParameterCount(); i++) {
+    core.setParameterValueByIndex(i, core.getParameterDefaultValue(i));
+  }
+  if (defaultPartOpacities) core.getModel().parts.opacities.set(defaultPartOpacities);
+  core.saveParameters();
+  im.physics?.initialize();
+  // The motion manager resumes the configured Idle group on its next update.
+}
+
 async function setEmotionExprs(ids) {
+  const request = ++expressionRequest;
   for (const a of active) if (!a.base) a.target = 0;
   for (const id of ids || []) {
-    if (!await loadExpr(id)) continue;
+    const data = await loadExpr(id);
+    if (request !== expressionRequest) return;
+    if (!data) continue;
     const a = active.find(x => x.id === id && !x.base);
     if (a) a.target = 1; else active.push({id, w: 0, target: 1, base: false});
   }
 }
-function clearEmotion() { for (const a of active) if (!a.base) a.target = 0; }
-function playMotion(id) {
-  if (model && id && INFO.motions.some(m => m.id === id)) model.motion(id, 0, 3);
+function clearEmotion() { expressionRequest++; for (const a of active) if (!a.base) a.target = 0; playMotion(''); }
+async function playMotion(id) {
+  if (id === '@reset') { restoreDefaultState(); return; }
+  const request = ++motionRequest, target = model;
+  if (!target) return;
+  const reset = CFG.motion_resets?.[activeMotion];
+  activeMotion = '';
+  if (reset && id !== reset) {
+    const clip = INFO.motions.find(m => m.id === reset);
+    if (clip) {
+      await target.motion(reset, 0, 3);
+      if (id) await new Promise(r => setTimeout(r, Math.max(0, Math.min(5, clip.duration || 1)) * 1000));
+    }
+  }
+  if (request !== motionRequest || target !== model || !id) return;
+  if (INFO.motions.some(m => m.id === id)) {
+    activeMotion = id;
+    await target.motion(id, 0, 3);
+  }
 }
 // 合成表情：不少皮套（如大肥鱼）的表情文件只是道具开关，没有五官变化。
 // 这里用标准面部参数补一层，情绪到达时和皮套自带表情一起淡入。
@@ -244,8 +316,9 @@ const FACE_PRESETS = {
 function applyEmotion(name) {
   const emo = (CFG.emotions || []).find(e => e.name === name);
   if (!emo) return false;
+  if (emo.motion === '@reset') { restoreDefaultState(); return true; }
   const ids = [];
-  const preset = FACE_PRESETS[emo.name];
+  const preset = CFG.face_presets?.[emo.name] || FACE_PRESETS[emo.name];
   if (preset) {
     const pid = '@face:' + emo.name;
     exprData[pid] = {Parameters: Object.entries(preset).map(([Id, Value]) => ({Id, Value, Blend: 'Overwrite'}))};
@@ -332,18 +405,23 @@ function onSpeakEnd(m) {
 }
 async function onTest(m) {
   if (!CFG.enabled) return;
+  if (m.motion === '@reset') { restoreDefaultState(); return; }
   clearTimeout(clearTimer);
   if (m.emotion) applyEmotion(m.emotion);
   else { await setEmotionExprs(m.expressions); playMotion(m.motion); }
   if (m.text) { if (!OVERLAY_MODE) { showBubble(m.text, m.text.length * 0.2); hideBubbleLater(m.text.length * 0.2 + (CFG.bubble_hold ?? 4)); } }
   clearTimer = setTimeout(clearEmotion, 4000);
 }
-async function onConfig() {
+async function updateConfig() {
   const before = modelKey;
   await fetchInfo();
   modelKey = JSON.stringify([CFG.enabled, CFG.model_dir, CFG.model_file, CFG.idle_motion, CFG.blink, CFG.base_expressions]);
-  if (modelKey !== before) await loadModel(); else layout();
+  if (modelKey !== before || (CFG.enabled && !model)) await loadModel(); else layout();
   if (!CFG.enabled || (!CFG.bubble && !OVERLAY_MODE)) bubble.classList.remove('on');
+}
+function onConfig() {
+  configQueue = configQueue.catch(() => {}).then(updateConfig);
+  return configQueue;
 }
 function connect() {
   const ws = new WebSocket(`ws://${location.host}/ws`);

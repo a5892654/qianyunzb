@@ -16,9 +16,10 @@ from tts import decode_audio_file
 log = logging.getLogger("pipe")
 
 TYPE_NAMES = {"enter": "进房", "follow": "关注", "danmaku": "弹幕", "gift": "礼物", "guard": "上舰",
-              "superchat": "醒目留言", "like": "点赞", "manual": "手动", "narration": "游戏解说", "interaction": "主动互动"}
-PRIORITY = {"manual": 0, "superchat": 0, "guard": 0, "gift": 1, "danmaku": 2, "follow": 2,
-            "enter": 3, "like": 4, "interaction": 4, "narration": 5}
+              "superchat": "醒目留言", "like": "点赞", "manual": "手动", "farewell": "下播告别",
+              "narration": "游戏解说", "reaction": "游戏反应", "interaction": "主动互动"}
+PRIORITY = {"farewell": -1, "manual": 0, "superchat": 0, "guard": 0, "gift": 1, "danmaku": 2, "follow": 2,
+            "enter": 3, "reaction": 3, "like": 4, "interaction": 4, "narration": 5}
 MERGE_BY_TYPE = ("enter", "follow", "like")
 _seq = itertools.count(1)
 
@@ -32,7 +33,7 @@ def describe(ev):
     n = ev.get("name", "")
     if t == "danmaku":
         return f"{n}：{ev.get('text', '')}"
-    if t in ("manual", "narration", "interaction"):
+    if t in ("manual", "farewell", "narration", "reaction", "interaction"):
         return ev.get("text", "")
     if t == "gift":
         v = f"（{ev['value']}元）" if ev.get("value") else "（免费）"
@@ -230,7 +231,7 @@ class Pipeline:
         job = {"id": next(_seq), "type": ev["type"], "ev": ev, "text": text, "ts": time.time(),
                "prio": PRIORITY.get(ev["type"], 3)}
         self.jobs.append(job)
-        if ev["type"] not in ("narration", "interaction"):
+        if ev["type"] not in ("narration", "reaction", "interaction"):
             self.pending_replies.add(job["id"])
         limit = max(1, int(self.cfg["filter"].get("max_queue", 6)))
         while len(self.jobs) > limit:
@@ -252,7 +253,13 @@ class Pipeline:
 
     def narrate(self, text, emotion=""):
         """普通游戏解说排在观众互动后面，保留手动播报的原有优先级。"""
-        return self.say(text, emotion, kind="narration")
+        return self._enqueue({"type": "narration", "name": "", "text": text, "emotion": emotion,
+                              "expires_at": time.monotonic() + 20}, text=text)
+
+    def react(self, text, emotion=""):
+        """真实变化的短反应优先于闲聊，排队太久就作废，不播过时的惊呼。"""
+        return self._enqueue({"type": "reaction", "name": "", "text": text, "emotion": emotion,
+                              "expires_at": time.monotonic() + 12}, text=text)
 
     def play_audio(self, filename, text="心愿单奖励", emotion="开心"):
         """本地 AI 翻唱与普通播报共用队列、音频设备和口型时钟。"""
@@ -261,9 +268,9 @@ class Pipeline:
                        "audio_file": filename}, text=text)
         return next((j["id"] for j in self.jobs if j["id"] not in before), None)
 
-    def say_job_id(self, text, emotion=""):
+    def say_job_id(self, text, emotion="", *, farewell=False):
         """把一句话送进合成+播放队列，返回它的 job id（用于等待播完）。"""
-        return self.say(text, emotion)
+        return self.say(text, emotion, kind="farewell" if farewell else "manual")
 
     def spoken_done(self, job_id) -> bool:
         """这句话是否已播完或被取消；合成/排队中仍然要等。"""
@@ -291,6 +298,14 @@ class Pipeline:
                                           for j in sorted(self.jobs, key=lambda j: (j["prio"], j["ts"]))]})
 
     # ---------- 工作线 ----------
+    def _during_farewell(self, item):
+        return (getattr(getattr(self.app, "schedule", None), "active_action", "") == "farewell"
+                and item["type"] != "farewell")
+
+    @staticmethod
+    def _expired(item):
+        return time.monotonic() >= item.get("expires_at", float("inf"))
+
     async def _gen_worker(self):
         while True:
             await self.has_job.wait()
@@ -302,10 +317,13 @@ class Pipeline:
             if not self.jobs:
                 self.has_job.clear()
             self._push_queue()
+            if self._during_farewell(job) or self._expired(job["ev"]):
+                self._mark_done(job["id"])
+                continue
             max_wait = float(self.cfg["filter"].get("max_wait", 60))
             if job["prio"] == 0:
                 max_wait *= 3
-            if time.time() - job["ts"] > max_wait:
+            if job["type"] != "farewell" and time.time() - job["ts"] > max_wait:
                 self.app.push("log", {"level": "warn", "msg": f"等待超过 {int(max_wait)} 秒，放弃：{describe(job['ev'])}"})
                 self._mark_done(job["id"])
                 continue
@@ -324,8 +342,12 @@ class Pipeline:
                 else:
                     t0 = time.time()
                     context = dt.commentary_context() if dt and job["type"] in ("danmaku", "superchat") else ""
+                    cfg, conversation = self.cfg, ""
+                    if job["type"] in ("danmaku", "superchat"):
+                        cfg = self.interaction.reply_config(job["ev"])
+                        conversation = self.interaction.conversation_context(job["ev"])
                     text, src, emotion = await self.app.brain.reply(
-                        self.cfg, self.cfg["events"][job["type"]], job["ev"], context=context)
+                        cfg, self.cfg["events"][job["type"]], job["ev"], context=context, conversation=conversation)
                     src += f" {time.time() - t0:.1f}s"
             except Exception as e:
                 log.exception("生成回复失败")
@@ -341,8 +363,15 @@ class Pipeline:
             emotion = emotion or self.detect_emotion(text)
             item = {"id": job["id"], "type": job["type"], "text": text, "src": src, "emotion": emotion,
                     "desc": describe(job["ev"]) if job["text"] is None else ""}
+            if self._during_farewell(item):
+                self._mark_done(item["id"])
+                continue
             if job["type"] == "interaction":
                 item["interaction_event"] = job["ev"]
+            elif job["type"] in ("danmaku", "superchat"):
+                item["conversation_event"] = job["ev"]
+            if "expires_at" in job["ev"]:
+                item["expires_at"] = job["ev"]["expires_at"]
             if job["ev"].get("audio_file"):
                 item["audio_file"] = job["ev"]["audio_file"]
                 item["src"] = "心愿单音频"
@@ -357,6 +386,9 @@ class Pipeline:
     async def _synth_worker(self):
         while True:
             item = await self.synth_q.get()
+            if self._during_farewell(item) or self._expired(item):
+                self._mark_done(item["id"])
+                continue
             tts = self.cfg["tts"]
             if item.get("audio_file"):
                 try:
@@ -431,11 +463,18 @@ class Pipeline:
         loop = asyncio.get_running_loop()
         while True:
             item = await self.play_q.get()
+            if self._during_farewell(item) or self._expired(item):
+                self._mark_done(item["id"])
+                continue
             if item["type"] == "interaction":
                 if not self.interaction.can_speak(item["interaction_event"]):
                     self._mark_done(item["id"])
                     continue
                 self.interaction.spoken(item["text"], item["interaction_event"])
+            else:
+                self.interaction.remember_spoken(item["text"])
+            if item.get("conversation_event"):
+                self.interaction.remember_spoken_reply(item["conversation_event"], item["text"])
             self.current = item
             clock = asyncio.create_task(self._voice_clock(item["id"]))
             try:
