@@ -32,6 +32,8 @@ class SongManager:
         self.pending_requests = collections.Counter()
         self.account = None
         self.account_error = ""
+        self.last_error = ""
+        self._loading_task = None
 
     @property
     def cfg(self):
@@ -42,7 +44,7 @@ class SongManager:
         pos, dur = self.app.player.music_progress()
         cur = dict(self.current, pos=round(pos), total=round(dur) or self.current.get("dur", 0),
                    paused=self.paused) if self.current else None
-        return {"current": cur, "queue": self.queue,
+        return {"current": cur, "queue": self.queue, "paused": self.paused, "error": self.last_error,
                 "credits": [dict(v, key=k) for k, v in self.credits.items() if v["song"] or v["pin"] or v["song_prog"] or v["pin_prog"]],
                 "account": self.account, "account_error": self.account_error}
 
@@ -164,9 +166,7 @@ class SongManager:
 
     def add(self, song, name, key="__host__", query=""):
         rec = self._rec(key, name)
-        s = {"qid": next(_qid), "id": song["id"], "name": song["name"], "artist": song.get("artist", ""),
-             "dur": song.get("dur", 0), "by": name, "key": key, "query": query, "pinned": False,
-             "similar": not song.get("exact", True)}
+        s = self._entry(song, name, key, query)
         if rec["pin"] > 0:
             rec["pin"] -= 1
             self._insert_pinned(s)
@@ -180,11 +180,50 @@ class SongManager:
         self.wake.set()
         self.push()
 
+    @staticmethod
+    def _entry(song, name="主播", key="__host__", query=""):
+        return {"qid": next(_qid), "id": song["id"], "name": song["name"], "artist": song.get("artist", ""),
+                "dur": song.get("dur", 0), "by": name, "key": key, "query": query, "pinned": False,
+                "similar": not song.get("exact", True)}
+
+    def enqueue_selected(self, songs, by="主播", play_now=False):
+        if not self.cfg.get("enabled"):
+            raise ValueError("请先开启“启用点歌”，再播放或加入队列")
+        if not songs:
+            raise ValueError("所选歌曲不能完整播放，可能需要 VIP、已下架或账号暂无播放权限")
+        entries = [self._entry(s, by) for s in songs]
+        self.last_error = ""
+        if play_now:
+            self.queue[0:0] = entries
+            self.control("skip")
+            self.paused = False
+            self.app.player.pause_music(False)
+        else:
+            self.queue.extend(entries)
+        self.app.push("log", {"level": "info", "msg": f"主播{'立即播放' if play_now else '加入队列'}：{len(entries)} 首歌曲"})
+        self.wake.set()
+        self.push()
+
+    async def _prepare(self, song, device):
+        url = await self.ne.url(song["id"])
+        if not url:
+            raise RuntimeError("不能完整播放，可能需要 VIP、已下架或账号暂无播放权限")
+        data = await self.ne.download(url)
+        return await asyncio.get_running_loop().run_in_executor(None, self.app.player.decode_music, data, device)
+
     # ---------- 播放 ----------
     async def run(self):
         loop = asyncio.get_running_loop()
-        asyncio.create_task(self._ticker())
-        asyncio.create_task(self.refresh_account())
+        ticker = asyncio.create_task(self._ticker())
+        account = asyncio.create_task(self.refresh_account())
+        try:
+            await self._run_queue(loop)
+        finally:
+            ticker.cancel()
+            account.cancel()
+            await asyncio.gather(ticker, account, return_exceptions=True)
+
+    async def _run_queue(self, loop):
         while True:
             if not self.queue or not self.cfg.get("enabled") or self.paused:
                 self.wake.clear()
@@ -192,26 +231,34 @@ class SongManager:
                 continue
             s = self.queue.pop(0)
             self.current = s
+            self.current["loading"] = True
+            self.end = asyncio.Event()
             self.push()
             dev = self.app.cfg["audio"].get("device", "")
             try:
-                url = await self.ne.url(s["id"])
-                if not url:
-                    raise RuntimeError("这首歌现在不能播放（可能需要VIP或已下架）")
-                data = await self.ne.download(url)
-                pcm, sr = await loop.run_in_executor(None, self.app.player.decode_music, data, dev)
+                self._loading_task = asyncio.create_task(self._prepare(s, dev))
+                pcm, sr = await self._loading_task
+                if self.end.is_set():
+                    continue
+                self.current["loading"] = False
+                self._apply_volume()
+                self.say("play", name=s["by"], song=s["name"], artist=s["artist"])
+                ended = self.end
+                self.app.player.play_music(pcm, sr, dev, lambda ended=ended: loop.call_soon_threadsafe(ended.set))
+                self.app.player.pause_music(self.paused)
+                self.last_error = ""
+                self.push()
+                await self.end.wait()
+            except asyncio.CancelledError:
+                if asyncio.current_task().cancelling():
+                    raise
             except Exception as e:
-                self.app.push("log", {"level": "error", "msg": f"播放《{s['name']}》失败：{e}"})
+                self.last_error = f"播放《{s['name']}》失败：{e}"
+                self.app.push("log", {"level": "error", "msg": self.last_error})
+            finally:
+                self._loading_task = None
                 self.current = None
-                continue
-            self._apply_volume()
-            self.end.clear()
-            self.say("play", name=s["by"], song=s["name"], artist=s["artist"])
-            self.app.player.play_music(pcm, sr, dev, lambda: loop.call_soon_threadsafe(self.end.set))
-            self.push()
-            await self.end.wait()
-            self.current = None
-            self.push()
+                self.push()
 
     async def _ticker(self):
         while True:
@@ -248,6 +295,8 @@ class SongManager:
         if action == "skip":
             self.app.player.stop_music()
             self.end.set()
+            if self._loading_task and not self._loading_task.done():
+                self._loading_task.cancel()
         elif action == "pause":
             self.paused = True
             self.app.player.pause_music(True)
@@ -259,7 +308,15 @@ class SongManager:
             self.queue.clear()
         elif idx is not None:
             s = self.queue[idx]
-            if action == "remove":
+            if action == "play":
+                if not self.cfg.get("enabled"):
+                    raise ValueError("请先开启“启用点歌”")
+                self.queue.insert(0, self.queue.pop(idx))
+                self.control("skip")
+                self.paused = False
+                self.app.player.pause_music(False)
+                self.wake.set()
+            elif action == "remove":
                 self.queue.pop(idx)
             elif action == "pin":
                 self.queue.pop(idx)

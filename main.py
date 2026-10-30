@@ -982,9 +982,12 @@ def build_web(app: App):
 
     @routes.post("/api/songs/control")
     async def songs_control(request):
-        d = await request.json()
-        app.songs.control(d.get("action"), d.get("qid"))
-        return ok()
+        try:
+            d = await request.json()
+            app.songs.control(d.get("action"), d.get("qid"))
+            return ok()
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e)})
 
     @routes.post("/api/songs/search")
     async def songs_search(request):
@@ -996,9 +999,43 @@ def build_web(app: App):
 
     @routes.post("/api/songs/add")
     async def songs_add(request):
-        d = await request.json()
-        app.songs.add(d["song"], d.get("by") or "主播", "__host__")
-        return ok()
+        try:
+            d = await request.json()
+            if not app.songs.cfg.get("enabled"):
+                raise ValueError("请先开启“启用点歌”，再播放或加入队列")
+            ids = d.get("ids")
+            if ids is None:
+                ids = [(d.get("song") or {}).get("id")]
+            if (not isinstance(ids, list) or not 1 <= len(ids) <= 100
+                    or any(isinstance(i, bool) or not re.fullmatch(r"[1-9]\d{0,19}", str(i)) for i in ids)):
+                raise ValueError("请选择 1 至 100 首有效歌曲")
+            mode = d.get("mode", "queue")
+            if mode not in ("queue", "play"):
+                raise ValueError("无效的播放方式")
+            ids = list(dict.fromkeys(int(i) for i in ids))
+            songs = {s["id"]: s for s in await app.songs.ne.details(ids)}
+            urls = await app.songs.ne.urls(ids)
+            selected = [songs[i] for i in ids if i in songs and urls.get(i)]
+            app.songs.enqueue_selected(selected, d.get("by") or "主播", play_now=mode == "play")
+            return ok(added=len(selected), skipped=len(ids) - len(selected), paused=app.songs.paused)
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e) or "加入歌曲失败，请重试"})
+
+    @routes.get("/api/songs/playlists")
+    async def songs_playlists(request):
+        try:
+            offset = max(0, int(request.query.get("offset", 0)))
+            return ok(**await app.songs.ne.playlists(offset))
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e) or "读取歌单失败，请重试"})
+
+    @routes.post("/api/songs/playlist")
+    async def songs_playlist(request):
+        try:
+            d = await request.json()
+            return ok(**await app.songs.ne.playlist(d.get("id"), max(0, int(d.get("offset", 0)))))
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e) or "读取歌单失败，请重试"})
 
     @routes.post("/api/songs/give")
     async def songs_give(request):

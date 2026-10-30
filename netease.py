@@ -7,7 +7,7 @@ import re
 import secrets
 import time
 from http.cookies import CookieError, SimpleCookie
-from urllib.parse import urlencode
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import aiohttp
 from Cryptodome.Cipher import AES
@@ -41,6 +41,33 @@ def _weapi_encrypt(payload):
     return {"params": base64.b64encode(params).decode("ascii"), "encSecKey": f"{wrapped:0256x}"}
 
 
+def music_reference(value, kind="song"):
+    """普通文字留给搜索；歌曲/歌单 ID 和官方分享链接按 ID 精确读取。"""
+    value = str(value or "").strip()
+    if re.fullmatch(r"[1-9]\d{0,19}", value):
+        return kind, int(value)
+    links = re.findall(r"https?://[^\s<>\"“”]+", value)
+    if not links:
+        return None
+    for link in links:
+        url = urlparse(link)
+        if url.hostname not in ("music.163.com", "y.music.163.com"):
+            continue
+        path = urlparse("/" + url.fragment.lstrip("/")) if url.fragment else url
+        match = re.fullmatch(r"/(?:m/)?(song|playlist)/?", path.path)
+        resource_id = (parse_qs(path.query).get("id") or [""])[0]
+        if match and re.fullmatch(r"[1-9]\d{0,19}", resource_id):
+            return match[1], int(resource_id)
+    raise ValueError("请粘贴 music.163.com 的歌曲/歌单链接，或直接填写数字 ID")
+
+
+def _song(item):
+    return {"id": int(item["id"]), "name": item.get("name") or "已失效的歌曲",
+            "artist": "、".join(a["name"] for a in item.get("ar") or item.get("artists") or []),
+            "album": (item.get("al") or item.get("album") or {}).get("name", ""),
+            "dur": round((item.get("dt") or item.get("duration") or 0) / 1000)}
+
+
 class NetEase:
     def __init__(self, get_cookie):
         self.get_cookie = get_cookie
@@ -71,19 +98,81 @@ class NetEase:
 
     async def search(self, kw, limit=15):
         d = await self._get("/api/search/get/web", {"s": kw, "type": 1, "limit": limit, "offset": 0})
-        out = []
-        for s in (d.get("result") or {}).get("songs") or []:
-            out.append({"id": s["id"], "name": s["name"],
-                        "artist": "、".join(a["name"] for a in s.get("artists") or []),
-                        "album": (s.get("album") or {}).get("name", ""), "dur": round((s.get("duration") or 0) / 1000)})
-        return out
+        self._check(d)
+        return [_song(s) for s in (d.get("result") or {}).get("songs") or []]
+
+    @staticmethod
+    def _check(data):
+        code = str(data.get("code", 200))
+        if code in ("301", "302"):
+            raise RuntimeError("网易云登录已失效，请重新登录")
+        if code != "200":
+            raise RuntimeError(f"网易云请求失败（{code}），请稍后重试或检查账号权限")
+
+    async def _post(self, path, payload):
+        headers = self._headers()
+        cookie = SimpleCookie()
+        cookie.load(headers.get("Cookie", ""))
+        csrf = cookie["__csrf"].value if "__csrf" in cookie else ""
+        try:
+            async with aiohttp.ClientSession(headers=headers) as session:
+                async with session.post(BASE + "/weapi/" + path.removeprefix("/api/"),
+                                        data=_weapi_encrypt({**payload, "csrf_token": csrf}),
+                                        timeout=aiohttp.ClientTimeout(total=20)) as response:
+                    response.raise_for_status()
+                    data = await response.json(content_type=None)
+                    if not isinstance(data, dict):
+                        raise ValueError("无效响应")
+                    self._check(data)
+                    return data
+        except TimeoutError as e:
+            raise RuntimeError("连接网易云超时，请检查网络后重试") from e
+        except (aiohttp.ClientError, ValueError) as e:
+            raise RuntimeError("连接网易云失败或返回异常，请稍后重试") from e
+
+    async def details(self, ids):
+        ids = list(dict.fromkeys(int(i) for i in ids))
+        out = {}
+        for offset in range(0, len(ids), 100):
+            data = await self._post("/api/v3/song/detail", {"c": json.dumps([{"id": i} for i in ids[offset:offset + 100]])})
+            out.update((int(s["id"]), _song(s)) for s in data.get("songs") or [])
+        return [out[i] for i in ids if i in out]
+
+    async def playlists(self, offset=0):
+        account = await self.account() if self.get_cookie() else None
+        if not account or not account.get("uid"):
+            raise RuntimeError("请先登录网易云账号，再读取我的歌单")
+        data = await self._post("/api/user/playlist", {"uid": account["uid"], "limit": 100, "offset": offset, "includeVideo": True})
+        items = [{"id": p["id"], "name": p["name"], "count": p.get("trackCount", 0),
+                  "creator": (p.get("creator") or {}).get("nickname", "")} for p in data.get("playlist") or []]
+        return {"playlists": items, "more": bool(data.get("more")), "offset": offset + len(items)}
+
+    async def playlist(self, reference, offset=0):
+        ref = music_reference(reference, "playlist")
+        if not ref or ref[0] != "playlist":
+            raise ValueError("请填写网易云歌单链接或歌单 ID")
+        data = await self._post("/api/v6/playlist/detail", {"id": ref[1], "n": 100000, "s": 0})
+        playlist = data.get("playlist")
+        if not isinstance(playlist, dict):
+            raise RuntimeError("无法读取此歌单，请检查歌单是否存在及账号访问权限")
+        tracks = playlist.get("tracks") or []
+        ids = [int(t["id"]) for t in playlist.get("trackIds") or tracks]
+        page_ids = ids[offset:offset + 100]
+        details = {s["id"]: s for s in await self.details(page_ids)} if page_ids else {}
+        songs = [details.get(i, {"id": i, "name": "已下架或无法读取的歌曲", "artist": "", "dur": 0}) for i in page_ids]
+        await self._status(songs)
+        return {"id": ref[1], "name": playlist.get("name", "歌单"), "songs": songs,
+                "total": len(ids), "offset": offset, "more": offset + len(page_ids) < len(ids),
+                "incomplete": int(playlist.get("trackCount") or 0) > len(ids)}
 
     async def urls(self, ids, br=320000):
-        d = await self._get("/api/song/enhance/player/url", {"ids": json.dumps(ids), "br": br})
         out = {}
-        for it in d.get("data") or []:
-            ok = bool(it.get("url")) and not it.get("freeTrialInfo")
-            out[it["id"]] = it["url"] if ok else None
+        for offset in range(0, len(ids), 100):
+            d = await self._get("/api/song/enhance/player/url", {"ids": json.dumps(ids[offset:offset + 100]), "br": br})
+            self._check(d)
+            for it in d.get("data") or []:
+                ok = bool(it.get("url")) and not it.get("freeTrialInfo")
+                out[int(it["id"])] = it["url"] if ok else None
         return out
 
     async def url(self, song_id):
@@ -91,6 +180,9 @@ class NetEase:
 
     async def find(self, query, max_dur=0):
         """搜索并返回最匹配且能完整播放的歌；原词找不到就逐步放宽关键词找相似的。"""
+        if music_reference(query):
+            songs = await self.search_with_status(query)
+            return next((dict(s, exact=True) for s in songs if s["playable"] and (not max_dur or s["dur"] <= max_dur)), None)
         tried = []
         for kw in _variants(query):
             if kw in tried:
@@ -114,12 +206,18 @@ class NetEase:
         return None
 
     async def search_with_status(self, kw):
-        songs = await self.search(kw, limit=20)
+        ref = music_reference(kw)
+        if ref and ref[0] != "song":
+            raise ValueError("这是歌单链接，请在“网易云歌单”中读取歌单")
+        songs = await self.details([ref[1]]) if ref else await self.search(kw, limit=20)
+        await self._status(songs)
+        return songs
+
+    async def _status(self, songs):
         if songs:
             playable = await self.urls([s["id"] for s in songs])
             for s in songs:
                 s["playable"] = bool(playable.get(s["id"]))
-        return songs
 
     async def download(self, url):
         async with aiohttp.ClientSession(headers={"User-Agent": UA}) as s:
@@ -220,7 +318,8 @@ class NetEase:
         prof, acc = d.get("profile") or {}, d.get("account") or {}
         if not prof:
             return None
-        return {"nickname": prof.get("nickname", ""), "vip": int(acc.get("vipType") or prof.get("vipType") or 0)}
+        return {"uid": prof.get("userId") or acc.get("id"), "nickname": prof.get("nickname", ""),
+                "vip": int(acc.get("vipType") or prof.get("vipType") or 0)}
 
 
 def _tokens(q):
