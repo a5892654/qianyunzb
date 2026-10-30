@@ -34,6 +34,9 @@ class SongManager:
         self.account_error = ""
         self.last_error = ""
         self._loading_task = None
+        self.loop_playlist = None
+        self._playlist_version = 0
+        self._refilling_playlist = False
 
     @property
     def cfg(self):
@@ -44,7 +47,9 @@ class SongManager:
         pos, dur = self.app.player.music_progress()
         cur = dict(self.current, pos=round(pos), total=round(dur) or self.current.get("dur", 0),
                    paused=self.paused) if self.current else None
-        return {"current": cur, "queue": self.queue, "paused": self.paused, "error": self.last_error,
+        playlist = {"id": self.loop_playlist["id"], "name": self.loop_playlist["name"],
+                    "total": len(self.loop_playlist["ids"]), "loop": True} if self.loop_playlist else None
+        return {"current": cur, "queue": self.queue, "paused": self.paused, "error": self.last_error, "playlist": playlist,
                 "credits": [dict(v, key=k) for k, v in self.credits.items() if v["song"] or v["pin"] or v["song_prog"] or v["pin_prog"]],
                 "account": self.account, "account_error": self.account_error}
 
@@ -81,9 +86,13 @@ class SongManager:
         if self._autoplay(self.current) and not self.end.is_set():
             song = dict(self.current)
             song.pop("loading", None)
-            self.queue.insert(self._autoplay_index(), song)
+            if ("playlist_version" not in song
+                    or self.loop_playlist and song["playlist_version"] == self.loop_playlist["version"]):
+                self.queue.insert(self._autoplay_index(), song)
             self.control("skip")
             return True
+        if self._refilling_playlist and self._loading_task:
+            self._loading_task.cancel()
         return False
 
     # ---------- 弹幕 / 礼物 ----------
@@ -201,6 +210,52 @@ class SongManager:
         self.wake.set()
         self.push()
 
+    async def play_playlist(self, reference):
+        if not self.cfg.get("enabled"):
+            raise ValueError("请先开启“启用点歌”，再播放歌单")
+        self._playlist_version += 1
+        version = self._playlist_version
+        info = await self.ne.playlist_info(reference)
+        if version != self._playlist_version:
+            raise RuntimeError("歌单播放请求已取消或已选择其他歌单")
+        if not info["ids"]:
+            raise ValueError("这个歌单为空，无法循环播放")
+        if info.get("incomplete"):
+            raise ValueError("网易云仅返回部分歌曲，请登录有权访问此歌单的账号后重试")
+        if not self.cfg.get("enabled"):
+            raise ValueError("请先开启“启用点歌”，再播放歌单")
+        self.loop_playlist = {**info, "cursor": 0, "version": version, "failed_ids": set()}
+        self.queue[:] = [song for song in self.queue if not self._autoplay(song)]
+        if self._autoplay(self.current) or self._refilling_playlist:
+            self.control("skip")
+        self.paused = False
+        self.app.player.pause_music(False)
+        self.last_error = ""
+        self.wake.set()
+        self.push()
+        return self.state()["playlist"]
+
+    async def _fill_playlist(self, context):
+        ids, checked = context["ids"], 0
+        while checked < len(ids) and self.loop_playlist is context:
+            start = context["cursor"]
+            batch = ids[start:start + min(100, len(ids) - checked)]
+            candidates = [song_id for song_id in batch if song_id not in context["failed_ids"]]
+            songs = await self.ne.songs_by_ids(candidates) if candidates else []
+            if self.loop_playlist is not context:
+                return
+            context["cursor"] = (start + len(batch)) % len(ids)
+            checked += len(batch)
+            playable = [song for song in songs if song.get("playable")]
+            if playable:
+                entries = [dict(self._entry(song, source="autoplay"), playlist_version=context["version"])
+                           for song in playable]
+                self.queue.extend(entries)
+                self.push()
+                return
+        if self.loop_playlist is context:
+            raise RuntimeError("当前歌单暂无可完整播放的歌曲，已停止循环，请检查账号权限后重新播放全部")
+
     @staticmethod
     def _entry(song, name="主播", key="__host__", query="", source="request"):
         return {"qid": next(_qid), "id": song["id"], "name": song["name"], "artist": song.get("artist", ""),
@@ -258,6 +313,26 @@ class SongManager:
 
     async def _run_queue(self, loop):
         while True:
+            if not self.queue and self.loop_playlist and self.cfg.get("enabled") and not self.paused:
+                context = self.loop_playlist
+                self._refilling_playlist = True
+                try:
+                    self._loading_task = asyncio.create_task(self._fill_playlist(context))
+                    await self._loading_task
+                except asyncio.CancelledError:
+                    if asyncio.current_task().cancelling():
+                        raise
+                except Exception as error:
+                    if self.loop_playlist is context:
+                        self.loop_playlist = None
+                        self.last_error = f"歌单循环播放失败：{error}"
+                        self.app.push("log", {"level": "error", "msg": self.last_error})
+                finally:
+                    self._refilling_playlist = False
+                    self._loading_task = None
+                    self.push()
+                if not self.queue and self.loop_playlist:
+                    continue
             if not self.queue or not self.cfg.get("enabled") or self.paused:
                 self.wake.clear()
                 await self.wake.wait()
@@ -287,6 +362,8 @@ class SongManager:
                 if asyncio.current_task().cancelling():
                     raise
             except Exception as e:
+                if self.loop_playlist and s.get("playlist_version") == self.loop_playlist["version"]:
+                    self.loop_playlist["failed_ids"].add(s["id"])
                 self.last_error = f"播放《{s['name']}》失败：{e}"
                 self.app.push("log", {"level": "error", "msg": self.last_error})
             finally:
@@ -339,7 +416,11 @@ class SongManager:
             self.app.player.pause_music(False)
             self.wake.set()
         elif action == "clear":
+            self._playlist_version += 1
+            self.loop_playlist = None
             self.queue.clear()
+            if self._refilling_playlist and self._loading_task:
+                self._loading_task.cancel()
         elif idx is not None:
             s = self.queue[idx]
             if action == "play":

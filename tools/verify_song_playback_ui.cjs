@@ -15,7 +15,7 @@ const songs = [
 ];
 const state = {current: null, paused: false, queue: [], credits: [], account, error: ''};
 let socket, qid = 0, addError = '', delayedAdd = false, releaseAdd, delayedPlaylist = false, releasePlaylist;
-const errors = [], addBodies = [], controls = [], playlistBodies = [];
+const errors = [], addBodies = [], controls = [], playlistBodies = [], playlistPlayBodies = [];
 const push = () => socket?.send(JSON.stringify({kind: 'songs', ...state}));
 
 (async () => {
@@ -56,6 +56,12 @@ const push = () => socket?.send(JSON.stringify({kind: 'songs', ...state}));
       } else if (url.pathname === '/api/songs/search') {
         if (body.q === 'bad') return route.fulfill({status: 500, contentType: 'text/html', body: 'upstream failed'});
         result = {ok: true, songs: [songs[2]]};
+      } else if (url.pathname === '/api/songs/playlist/play') {
+        playlistPlayBodies.push(body);
+        state.playlist = {id: Number(body.id), name: Number(body.id) === 789 ? '第二个歌单' : '我喜欢的音乐', total: Number(body.id) === 789 ? 3 : 101, loop: true};
+        state.queue = state.queue.filter(s => s.source !== 'autoplay');
+        state.queue.push(...songs.filter(s => s.playable).map(s => ({...s, qid: ++qid, source: 'autoplay', by: '歌单自动播放'})));
+        result = {ok: true, playlist: state.playlist}; push();
       } else if (url.pathname === '/api/songs/add') {
         addBodies.push(body);
         if (delayedAdd) { delayedAdd = false; await new Promise(resolve => { releaseAdd = resolve; }); }
@@ -74,6 +80,7 @@ const push = () => socket?.send(JSON.stringify({kind: 'songs', ...state}));
           const index = state.queue.findIndex(s => s.qid === body.qid);
           state.current = {...state.queue.splice(index, 1)[0], pos: 0, total: 180}; state.paused = false;
         } else if (body.action === 'resume') state.paused = false;
+        else if (body.action === 'clear') { state.queue = []; state.playlist = null; }
         result = {ok: true}; push();
       } else if (url.pathname === '/api/songs/cookie') { state.account = null; result = {ok: true, account: null}; push(); }
       await route.fulfill({contentType: 'application/json', body: JSON.stringify(result)});
@@ -98,20 +105,31 @@ const push = () => socket?.send(JSON.stringify({kind: 'songs', ...state}));
     console.log('PASS 歌单内指定歌曲立即播放、加入队列、从队列选歌立即播放');
 
     await page.locator('#sgPlayPlaylist').click();
-    await page.waitForFunction(() => document.querySelector('#toast').textContent.includes('跳过 1 首'));
-    assert.deepEqual(addBodies.at(-1), {ids: ['1', '2', '3'], mode: 'play', source: 'autoplay'});
+    await page.waitForFunction(() => document.querySelector('#toast').textContent.includes('已开启循环播放'));
+    assert.deepEqual(playlistPlayBodies.at(-1), {id: 456});
+    assert.equal(state.playlist.loop, true);
+    assert.equal(state.playlist.total, 101);
+    assert.ok((await page.locator('#sgLoopHint').textContent()).includes('正在循环歌单：我喜欢的音乐'));
+    assert.equal(await page.locator('#sgLoopHint').isVisible(), true);
     assert.ok((await page.locator('#sgNow').textContent()).includes('第一首'));
     assert.ok((await page.locator('#sgQueue').textContent()).includes('歌单自动播放'));
     assert.equal(await page.locator('#sgQueue [data-sgq="pin"]').count(), 0);
     assert.ok((await page.locator('#toast').textContent()).includes('静默播放，观众点歌优先'));
-    console.log('PASS 整页歌曲标记为静默背景播放，页面区分点播与自动播放');
+    assert.equal(await page.locator('#sgPlayPlaylist').textContent(), '播放全部');
+    console.log('PASS 播放全部无需额外设置，默认循环整份歌单并显示循环状态');
     await page.locator('#sgPlaylistNext').click();
     await page.waitForFunction(() => document.querySelector('#sgPlaylistSongs').textContent.includes('第101首'));
     assert.equal(playlistBodies.at(-1).offset, 100);
     assert.equal(await page.locator('#sgPlaylistNext').isDisabled(), true);
+    await page.locator('#sgPlayPlaylist').click();
+    await page.waitForFunction(() => document.querySelector('#toast').textContent.includes('已开启循环播放'));
+    assert.deepEqual(playlistPlayBodies.at(-1), {id: 456});
     await page.locator('#sgPlaylistPrev').click();
     await page.waitForFunction(() => document.querySelector('#sgPlaylistSongs').textContent.includes('指定的第三首'));
-    console.log('PASS 本页播放按原序提交并显示跳过数量，歌单支持翻页');
+    await page.locator('#sgAddPlaylist').click();
+    await page.waitForFunction(() => document.querySelector('#toast').textContent.includes('跳过 1 首'));
+    assert.deepEqual(addBodies.at(-1), {ids: ['1', '2', '3'], mode: 'queue', source: 'autoplay'});
+    console.log('PASS 列表翻页不改变播放全部的范围，仍可将本页单独加入背景队列');
 
     await page.locator('#sgQ').fill('https://music.163.com/song?id=3');
     await page.locator('#sgQ').press('Enter');
@@ -141,6 +159,9 @@ const push = () => socket?.send(JSON.stringify({kind: 'songs', ...state}));
     state.error = '播放《第一首》失败：不能完整播放'; push();
     await page.waitForFunction(() => !document.querySelector('#sgError').hidden);
     assert.ok((await page.locator('#sgError').textContent()).includes('不能完整播放'));
+    await page.locator('[data-sg="clear"]').click();
+    await page.waitForFunction(() => document.querySelector('#sgLoopHint').hidden);
+    assert.equal(state.playlist, null);
     console.log('PASS 空闲暂停可继续，真实播放错误显示在播放区');
 
     delayedPlaylist = true;

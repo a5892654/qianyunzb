@@ -1053,6 +1053,14 @@ def build_web(app: App):
         except Exception as e:
             return web.json_response({"ok": False, "error": str(e) or "读取歌单失败，请重试"})
 
+    @routes.post("/api/songs/playlist/play")
+    async def songs_playlist_play(request):
+        try:
+            d = await request.json()
+            return ok(playlist=await app.songs.play_playlist(d.get("id")))
+        except Exception as e:
+            return web.json_response({"ok": False, "error": str(e) or "播放歌单失败，请重试"})
+
     @routes.post("/api/songs/give")
     async def songs_give(request):
         d = await request.json()
