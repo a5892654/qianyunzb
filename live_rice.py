@@ -82,7 +82,6 @@ class RiceCompositor:
         font_path = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts", "msyh.ttc")
         title_font = ImageFont.truetype(font_path, 18)
         number_font = ImageFont.truetype(font_path, 42)
-        small_font = ImageFont.truetype(font_path, 13)
         plus_font = ImageFont.truetype(font_path, 23)
         cw, ch = self._sheet.width // 4, self._sheet.height // 2
         tiles = []
@@ -94,7 +93,6 @@ class RiceCompositor:
             image.alpha_composite(bowl.resize((134, 134), Image.Resampling.NEAREST), (3, 29))
             draw.text((145, 42), "大碗白饭", font=title_font, fill=(231, 212, 176, 255))
             draw.text((142, 66), f"{count} 碗", font=number_font, fill=(255, 245, 216, 255))
-            draw.text((145, 128), "AI 通关 · 开饭！", font=small_font, fill=(188, 180, 167, 255))
             size = (max(1, round(WIDTH * target_h / HEIGHT)), target_h)
             tiles.append(cv2.cvtColor(np.asarray(image.resize(size, Image.Resampling.NEAREST)), cv2.COLOR_RGBA2BGRA))
         # 飘字单独缓存，不让静态饭碗也出现 +1。
