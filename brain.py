@@ -243,9 +243,10 @@ REPLY_STYLES = (
 
 
 class Brain:
-    def __init__(self):
+    def __init__(self, live_context=None):
         self.qoder = QoderSession()
         self.openai = OpenAIChat()
+        self.live_context = live_context
         self.recent_replies = collections.defaultdict(lambda: collections.deque(maxlen=8))
         self.reply_turns = collections.Counter()
 
@@ -273,6 +274,10 @@ class Brain:
         """返回 (文本, 表情名或空)。"""
         cfg_ai = cfg["ai"]
         sp = self.system_prompt(cfg)
+        if self.live_context is not None:
+            context = self.live_context()
+            if context:
+                prompt += "\n\n" + context
         if cfg_ai.get("backend") == "openai":
             raw = await self.openai.ask(cfg_ai, sp, prompt)
         else:

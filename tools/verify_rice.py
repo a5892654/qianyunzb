@@ -14,9 +14,10 @@ import numpy as np
 from aiohttp.test_utils import TestClient, TestServer
 
 import config
+from brain import Brain
 from dtgame.player import Player
 from dtgame.rice import RiceTracker
-from live_rice import RiceCounter, RiceCompositor, layout_rect
+from live_rice import RiceCounter, RiceCompositor, ai_context, layout_rect
 from live_capture import WindowStreamCapture
 
 
@@ -269,6 +270,29 @@ class PlayerObserverTests(unittest.IsolatedAsyncioTestCase):
         observer.pause.assert_called_once()
 
 
+class RiceContextTests(unittest.TestCase):
+    def test_enabled_context_has_actual_count_position_progress_and_custom_rule(self):
+        text = ai_context({"enabled": True, "large_gift_yuan": 25}, {"total": 3, "gift_progress": 7})
+        for expected in ("左下角", '"当前显示碗数": 3', "7/10", "25元", "第三幕Boss", "试播不会增加碗数"):
+            self.assertIn(expected, text)
+        self.assertIn("不是游戏里的物品", text)
+
+    def test_moved_overlay_uses_current_position_and_zero_bowls_is_valid(self):
+        text = ai_context({"enabled": True, "overlay_x": 0.85, "overlay_y": 0.1},
+                          {"total": 0, "gift_progress": 0})
+        self.assertIn("右上角", text)
+        self.assertNotIn("左下角", text)
+        self.assertIn('"当前显示碗数": 0', text)
+
+    def test_disabled_or_failed_overlay_cannot_be_claimed_visible(self):
+        disabled = ai_context({"enabled": False}, {"total": 99})
+        self.assertIn("已关闭", disabled)
+        self.assertNotIn("99", disabled)
+        failed = ai_context({"enabled": True}, {"total": 99, "error": "fixture composition error"})
+        self.assertIn("暂时无法确认实际显示", failed)
+        self.assertNotIn("左下角", failed)
+
+
 class RiceRouteTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         import main
@@ -377,6 +401,65 @@ class RiceRouteTests(unittest.IsolatedAsyncioTestCase):
             response = await self.client.post('/api/config', json={"rice_counter": {"large_gift_yuan": amount}}, headers={"X-BVB": "1"})
             self.assertEqual(response.status, 400)
         self.assertEqual(self.app.cfg["rice_counter"]["large_gift_yuan"], 10)
+
+    async def test_ai_test_reads_live_count_layout_and_toggle_without_resetting_model(self):
+        self.app.cfg["ai"]["backend"] = "openai"
+        self.app.cfg["rice_counter"]["enabled"] = True
+        self.app.brain = Brain(live_context=self.app.live_context)
+        self.app.brain.openai.ask = AsyncMock(return_value="这是直播间的大碗白饭计数。")
+        self.app.rice.award("first")
+        original_system = self.app.brain.system_prompt(self.app.cfg)
+        for expected in (1, 2):
+            if expected == 2:
+                self.app.rice.award("second")
+                self.app.cfg["rice_counter"].update(overlay_x=0.85, overlay_y=0.1)
+            response = await self.client.post('/api/ai/test', json={"prompt": "画面里的饭碗是什么？"}, headers={"X-BVB": "1"})
+            self.assertTrue((await response.json())["ok"])
+            cfg, system, prompt = self.app.brain.openai.ask.await_args.args
+            self.assertEqual(system, original_system)
+            self.assertIn(f'"当前显示碗数": {expected}', prompt)
+            self.assertIn("左下角" if expected == 1 else "右上角", prompt)
+        self.app.cfg["rice_counter"]["enabled"] = False
+        await self.app.brain.ai(self.app.cfg, "刚才那个饭碗还在吗？")
+        prompt = self.app.brain.openai.ask.await_args.args[2]
+        self.assertIn("素材已关闭", prompt)
+        self.assertNotIn("当前显示碗数", prompt)
+        self.assertEqual(self.app.rice.total, 2)
+
+    async def test_both_ai_backends_receive_rice_context_without_game(self):
+        self.app.cfg["rice_counter"]["enabled"] = True
+        self.app.brain = Brain(live_context=self.app.live_context)
+        for backend in ("openai", "qoder"):
+            self.app.cfg["ai"]["backend"] = backend
+            model = AsyncMock(return_value="左下角是大碗白饭，现在累计零碗。")
+            getattr(self.app.brain, backend).ask = model
+            text, _ = await self.app.brain.ai(self.app.cfg, "左下角那个是什么？")
+            self.assertIn("大碗白饭", text)
+            self.assertIn('"当前显示碗数": 0', model.await_args.args[2])
+            self.assertIsNone(self.app.dt)
+
+    async def test_real_danmaku_queue_and_game_decision_share_rice_facts(self):
+        from pipeline import Pipeline
+        self.app.cfg["ai"]["backend"] = "openai"
+        self.app.cfg["rice_counter"]["enabled"] = True
+        self.app.brain = Brain(live_context=self.app.live_context)
+        self.app.brain.openai.ask = AsyncMock(return_value="左下角是大碗白饭，现在累计一碗。")
+        self.app.rice.award("first")
+        self.app.songs = Mock(on_danmaku=Mock(return_value=False))
+        self.app.bili.owner_uid, self.app.bili.room_id, self.app.bili.connected = 999, 42, True
+        self.app.pipe = Pipeline(self.app, supporters=Mock())
+        self.app.on_event({"type": "danmaku", "uid": 123, "name": "小明", "text": "左下角的白饭是什么？"})
+        worker = asyncio.create_task(self.app.pipe._gen_worker())
+        try:
+            item = await asyncio.wait_for(self.app.pipe.synth_q.get(), 2)
+            self.assertIn("大碗白饭", item["text"])
+            self.assertIn('"当前显示碗数": 1', self.app.brain.openai.ask.await_args.args[2])
+            player = Player({}, Mock(), pipe=self.app.pipe)
+            self.assertIn('"当前显示碗数": 1', player._chat_context())
+            self.assertEqual((self.app.rice.total, self.app.rice.gift_progress), (1, 0))
+        finally:
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
 
 
 if __name__ == '__main__': unittest.main(verbosity=2)

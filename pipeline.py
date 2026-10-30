@@ -256,6 +256,11 @@ class Pipeline:
         return self._enqueue({"type": "narration", "name": "", "text": text, "emotion": emotion,
                               "expires_at": time.monotonic() + 20}, text=text)
 
+    def live_context(self):
+        provider = getattr(self.app, "live_context", None)
+        value = provider() if callable(provider) else ""
+        return value if isinstance(value, str) else ""
+
     def react(self, text, emotion=""):
         """真实变化的短反应优先于闲聊，排队太久就作废，不播过时的惊呼。"""
         return self._enqueue({"type": "reaction", "name": "", "text": text, "emotion": emotion,

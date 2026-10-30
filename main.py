@@ -21,7 +21,7 @@ from dtgame.bridge import BridgeError, GameBridge
 from dtgame.launcher import GameProcess, find_godot
 from dtgame.player import Player as DTPlayer
 from dtgame.rice import RiceTracker
-from live_rice import RiceCounter, validate_settings as validate_rice_settings
+from live_rice import RiceCounter, ai_context as rice_ai_context, validate_settings as validate_rice_settings
 from live_broadcast import Broadcast
 from live_schedule import DailyBroadcastSchedule
 from pipeline import Pipeline
@@ -67,7 +67,7 @@ class App:
         self.loop = None
         self.ws = set()
         self.history = collections.deque(maxlen=300)
-        self.brain = Brain()
+        self.brain = Brain(live_context=self.live_context)
         self.engine = GsvEngine()
         self.player = Player()
         self.bili = BiliLive(self.on_event, lambda m: self.push("log", {"level": "info", "msg": m}))
@@ -242,6 +242,9 @@ class App:
                 "layout": {"size": settings.get("overlay_size", 0.16),
                            "x": settings.get("overlay_x"), "y": settings.get("overlay_y")},
                 "error": getattr(self.broadcast.capture, "rice_error", "")}
+
+    def live_context(self):
+        return rice_ai_context(self.cfg.get("rice_counter", {}), self.rice_state())
 
     def rice_awarded(self):
         self.push("rice", self.rice_state())
