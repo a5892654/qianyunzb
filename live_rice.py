@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from pathlib import Path
 import threading
@@ -56,6 +57,27 @@ class RiceCounter:
             self.preview()
             return True
 
+    def record_gift(self, event, room_id=None):
+        """每条真实送礼消息记一碗，不依赖礼物数量、金额或感谢开关。"""
+        if event.get("type") != "gift" or event.get("test"):
+            return False
+        quantity = event.get("num")
+        if isinstance(quantity, bool):
+            return False
+        try:
+            if int(quantity) <= 0:
+                return False
+        except (TypeError, ValueError, OverflowError):
+            return False
+        identity = next(((field, str(event[field])) for field in ("gift_tid", "gift_rnd")
+                         if str(event.get(field) or "").strip() not in ("", "0")), None)
+        if identity is None:
+            # 没有事务ID时只对同一事件对象去重，不能吞掉同一秒内的独立送礼。
+            identity = ("event", event.setdefault("_rice_gift_id", uuid.uuid4().hex))
+        payload = [str(event.get("room_id") or room_id or ""), str(event.get("uid") or ""), *identity]
+        key = hashlib.sha256(("gift:" + json.dumps(payload, ensure_ascii=False)).encode()).hexdigest()
+        return self.award(key)
+
     def preview(self):
         """试播动画不计入真实战绩，也不写入累计文件。"""
         with self.lock:
@@ -82,7 +104,6 @@ class RiceCompositor:
         font_path = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts", "msyh.ttc")
         title_font = ImageFont.truetype(font_path, 18)
         number_font = ImageFont.truetype(font_path, 42)
-        small_font = ImageFont.truetype(font_path, 13)
         plus_font = ImageFont.truetype(font_path, 23)
         cw, ch = self._sheet.width // 4, self._sheet.height // 2
         tiles = []
@@ -92,9 +113,8 @@ class RiceCompositor:
             draw.rounded_rectangle((0, 25, WIDTH - 1, HEIGHT - 1), radius=14, fill=(22, 25, 36, 228), outline=(206, 175, 120, 210), width=2)
             bowl = self._sheet.crop(((i % 4) * cw, (i // 4) * ch, (i % 4 + 1) * cw, (i // 4 + 1) * ch))
             image.alpha_composite(bowl.resize((134, 134), Image.Resampling.NEAREST), (3, 29))
-            draw.text((145, 42), "大碗白饭", font=title_font, fill=(231, 212, 176, 255))
-            draw.text((142, 66), f"{count} 碗", font=number_font, fill=(255, 245, 216, 255))
-            draw.text((145, 128), "AI 通关 · 开饭！", font=small_font, fill=(188, 180, 167, 255))
+            draw.text((145, 54), "大碗白饭", font=title_font, fill=(231, 212, 176, 255))
+            draw.text((142, 78), f"{count} 碗", font=number_font, fill=(255, 245, 216, 255))
             size = (max(1, round(WIDTH * target_h / HEIGHT)), target_h)
             tiles.append(cv2.cvtColor(np.asarray(image.resize(size, Image.Resampling.NEAREST)), cv2.COLOR_RGBA2BGRA))
         # 飘字单独缓存，不让静态饭碗也出现 +1。

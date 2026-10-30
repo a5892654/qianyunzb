@@ -25,6 +25,11 @@ def battle(act=3, run_id="run1", hp=30):
                        "enemies": [{"id": "fallen_knight_boss", "name": "灰烬骑士", "hp": 90}]}}
 
 
+def gift(**overrides):
+    return {"type": "gift", "uid": 123, "room_id": 42, "gift": "小花花", "num": 1,
+            "paid": True, "gift_tid": "send1", **overrides}
+
+
 class RiceTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -123,6 +128,42 @@ class RiceTests(unittest.TestCase):
         self.assertEqual(self.counter.total, 0)
         self.assertNotIn("once", self.counter.seen)
 
+    def test_real_gifts_count_per_send_and_dedupe_after_restart(self):
+        self.assertTrue(self.counter.record_gift(gift(num=10)))
+        self.assertFalse(self.counter.record_gift(gift(num=10)))
+        self.assertTrue(self.counter.record_gift(gift(paid=False, gift_tid="free1")))
+        self.assertEqual(self.counter.total, 2)
+        restarted = RiceCounter(self.path)
+        self.assertFalse(restarted.record_gift(gift(num=10)))
+        self.assertEqual(restarted.total, 2)
+
+    def test_gift_random_id_and_room_identity_are_respected(self):
+        self.assertTrue(self.counter.record_gift(gift(gift_tid="", gift_rnd="random1")))
+        self.assertFalse(self.counter.record_gift(gift(gift_tid="", gift_rnd="random1")))
+        self.assertTrue(self.counter.record_gift(gift(gift_tid="", gift_rnd="random1", room_id=84)))
+        self.assertEqual(self.counter.total, 2)
+
+    def test_gifts_without_transaction_id_do_not_swallow_distinct_sends(self):
+        first = gift(gift_tid="")
+        self.assertTrue(self.counter.record_gift(first))
+        self.assertFalse(self.counter.record_gift(first))
+        self.assertTrue(self.counter.record_gift(gift(gift_tid="")))
+        self.assertEqual(self.counter.total, 2)
+
+    def test_simulated_empty_and_non_gift_events_do_not_count(self):
+        for event in [gift(test=True), gift(type="danmaku"), *(gift(num=n) for n in (0, -1, None, "bad", True))]:
+            self.assertFalse(self.counter.record_gift(event))
+        self.assertEqual(self.counter.total, 0)
+
+    def test_gifts_and_bosses_share_total_and_celebration(self):
+        self.counter.record_gift(gift())
+        event_id = self.counter.event_id
+        self.arm()
+        self.tracker.observe(self.won())
+        self.assertEqual(self.counter.total, 2)
+        self.assertNotEqual(self.counter.event_id, event_id)
+        self.assertEqual(RiceCounter(self.path).total, 2)
+
     def test_native_overlay_is_bottom_left_and_independent_of_live2d(self):
         self.counter.preview()
         settings = {"enabled": True}
@@ -196,6 +237,42 @@ class RiceRouteTests(unittest.IsolatedAsyncioTestCase):
     async def test_config_cannot_inject_real_count(self):
         response = await self.client.post('/api/config', json={"rice_counter": {"total": 999}}, headers={"X-BVB": "1"})
         self.assertEqual(response.status, 400)
+        self.assertEqual(self.app.rice.total, 0)
+
+    async def test_real_gift_packets_count_without_ai_or_voice_thanks(self):
+        from bili import _Handler
+        from blivedm.models.web import GiftMessage
+        from pipeline import Pipeline
+        self.app.cfg["rice_counter"]["enabled"] = True
+        self.app.cfg["events"]["gift"].update(enabled=False, thank_free=False)
+        self.app.bili.room_id = 42
+        self.app.bili.owner_uid = 999
+        self.app.songs = Mock()
+        self.app.pipe = Pipeline(self.app, supporters=Mock())
+        self.app.pipe.paused = True
+        handler = _Handler(self.app.on_event)
+        client = SimpleNamespace(room_id=42)
+        paid = GiftMessage(uid=123, uname="小明", gift_name="小花花", num=10,
+                           coin_type="gold", total_coin=5000, tid="paid1", rnd="rnd1")
+        handler._on_gift(client, paid)
+        handler._on_gift(client, paid)
+        handler._on_gift(client, GiftMessage(uid=123, uname="小明", gift_name="小心心", num=1,
+                                            coin_type="silver", tid="free1"))
+        self.assertEqual(self.app.rice.total, 2)
+        self.assertFalse(self.app.pipe.jobs)
+        self.assertIsNone(self.app.dt)
+        self.assertEqual(len([c for c in self.app.push.call_args_list if c.args[0] == "rice"]), 2)
+
+    async def test_disabled_simulated_or_unsaved_gifts_do_not_break_event_flow(self):
+        self.app.pipe = Mock()
+        self.app.on_event(gift())
+        self.assertEqual(self.app.rice.total, 0)
+        self.app.cfg["rice_counter"]["enabled"] = True
+        self.app.on_event(gift(test=True))
+        self.assertEqual(self.app.rice.total, 0)
+        with patch('live_rice.os.replace', side_effect=OSError("fixture")):
+            self.app.on_event(gift())
+        self.assertEqual(self.app.pipe.on_event.call_count, 3)
         self.assertEqual(self.app.rice.total, 0)
 
 

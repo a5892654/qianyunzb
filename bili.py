@@ -100,7 +100,8 @@ class _Handler(blivedm.BaseHandler):
         paid = m.coin_type == "gold"
         self.emit({"type": "gift", "uid": m.uid, "name": m.uname, "gift": m.gift_name, "num": m.num,
                    "value": round(m.total_coin / 1000, 2) if paid else 0.0, "paid": paid,
-                   "room_id": getattr(client, "room_id", None)})
+                   "room_id": getattr(client, "room_id", None), "gift_id": m.gift_id,
+                   "gift_tid": m.tid, "gift_rnd": m.rnd})
 
     def _on_user_toast_v2(self, client, m: wm.UserToastV2Message):
         if m.source == 2:

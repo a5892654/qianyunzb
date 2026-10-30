@@ -6,7 +6,7 @@
 html,body{margin:0;width:100%;height:100%;background:transparent;overflow:hidden}
 canvas{position:fixed;left:2vh;bottom:2vh;width:34.286vh;height:16vh;image-rendering:pixelated;pointer-events:none}
 </style>
-<canvas width="720" height="336" aria-label="AI 通关白饭累计"></canvas>
+<canvas width="720" height="336" aria-label="白饭累计"></canvas>
 <script>
 const canvas=document.querySelector('canvas'),ctx=canvas.getContext('2d');
 const sheet=new Image(); sheet.src='/static/assets/rice_bowl_celebrate.png';
@@ -22,9 +22,8 @@ function draw(){
   ctx.beginPath();ctx.roundRect(1,26,358,141,14);ctx.fill();ctx.stroke();
   ctx.imageSmoothingEnabled=false;const cw=sheet.naturalWidth/4,ch=sheet.naturalHeight/2;
   ctx.drawImage(sheet,i%4*cw,Math.floor(i/4)*ch,cw,ch,3,29,134,134);
-  ctx.font='18px "Microsoft YaHei",sans-serif';ctx.fillStyle='#e7d4b0';ctx.fillText('大碗白饭',145,62);
-  ctx.font='42px "Microsoft YaHei",sans-serif';ctx.fillStyle='#fff5d8';ctx.fillText(`${state.total} 碗`,142,111);
-  ctx.font='13px "Microsoft YaHei",sans-serif';ctx.fillStyle='#bcb4a7';ctx.fillText('AI 通关 · 开饭！',145,145);
+  ctx.font='18px "Microsoft YaHei",sans-serif';ctx.fillStyle='#e7d4b0';ctx.fillText('大碗白饭',145,74);
+  ctx.font='42px "Microsoft YaHei",sans-serif';ctx.fillStyle='#fff5d8';ctx.fillText(`${state.total} 碗`,142,123);
   if(animated){ctx.font='23px "Microsoft YaHei",sans-serif';ctx.fillStyle='#ffdd81';ctx.fillText('+1 碗！',160,23);}
  }
  ctx.restore();requestAnimationFrame(draw);
