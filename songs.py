@@ -135,6 +135,13 @@ class SongManager:
         n = sum(1 for x in self.queue if x["pinned"])
         self.queue.insert(n, s)
 
+    def _hint(self, kind, key, **kw):
+        hint_key = (key, kind)
+        now = time.time()
+        if now - self.last_hint.get(hint_key, 0) > 60:
+            self.last_hint[hint_key] = now
+            self.say(kind, **kw)
+
     def on_danmaku(self, ev):
         """是点歌指令就返回 True（这条弹幕不再走 AI 回复）。"""
         c = self.cfg
@@ -149,11 +156,11 @@ class SongManager:
             return True
         key = self._key(ev)
         rec = self._rec(key, ev.get("name"))
+        require_follow = bool(c.get("require_follow", False))
+        paid = bool(c.get("require_gift", False) and not require_follow)
         gift_names = "、".join(_split(c.get("song_gifts"))) or "礼物"
-        if c.get("require_gift", False) and rec["song"] <= 0:
-            if time.time() - self.last_hint.get(key, 0) > 60:
-                self.last_hint[key] = time.time()
-                self.say("need", name=ev["name"], gift=gift_names, query=query, num=c.get("song_gift_count", 1))
+        if paid and rec["song"] <= 0:
+            self._hint("need", key, name=ev["name"], gift=gift_names, query=query, num=c.get("song_gift_count", 1))
             return True
         requests = [s for s in self.queue if not self._autoplay(s)]
         mine = (sum(1 for s in requests if s["key"] == key)
@@ -162,15 +169,28 @@ class SongManager:
         if mine >= int(c.get("max_per_user", 2)) or len(requests) + self.pending_requests.total() >= int(c.get("max_queue", 20)):
             self.say("full", name=ev["name"], query=query)
             return True
-        if c.get("require_gift", False):
+        if paid:
             rec["song"] -= 1
         self.pending_requests[key] += 1
-        asyncio.create_task(self._request(key, ev["name"], query, c.get("require_gift", False)))
+        follow_uid = (ev.get("uid") or 0) if require_follow else None
+        asyncio.create_task(self._request(key, ev["name"], query, paid, follow_uid))
         self.push()
         return True
 
-    async def _request(self, key, name, query, paid):
+    async def _request(self, key, name, query, paid, follow_uid=None):
         try:
+            if follow_uid is not None:
+                try:
+                    following = await self.app.bili.is_following(follow_uid)
+                except Exception as error:
+                    self.app.push("log", {"level": "warn", "msg": f"关注点歌校验失败：{error}"})
+                    self._hint("follow_error", key, name=name, query=query)
+                    return
+                if not following:
+                    self._hint("need_follow", key, name=name, query=query)
+                    return
+                if not self.cfg.get("enabled"):
+                    return
             await self._find_and_add(key, name, query, paid)
         finally:
             self.pending_requests[key] -= 1

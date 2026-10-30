@@ -8,6 +8,7 @@ import yarl
 
 import blivedm
 import blivedm.models.web as wm
+from bilibili_api import Credential, user as bili_user
 
 log = logging.getLogger("bili")
 logging.getLogger("blivedm").setLevel(logging.ERROR)
@@ -120,7 +121,7 @@ class _Handler(blivedm.BaseHandler):
                    "price": m.price, "value": float(m.price)})
 
     def _on_interact_word_v2(self, client, m: wm.InteractWordV2Message):
-        kind = {1: "enter", 2: "follow", 5: "follow"}.get(m.msg_type)
+        kind = {1: "enter", 2: "follow", 4: "follow", 5: "follow"}.get(m.msg_type)
         if kind:
             self.emit({"type": kind, "uid": m.uid, "name": m.username,
                        "room_id": getattr(client, "room_id", None)})
@@ -139,9 +140,13 @@ class BiliLive:
         self.login_error = ""
         self.connected = False
         self._watch = None
+        self._follow_cache = {}
+        self._cookie = ""
 
     def _emit(self, ev):
         ev["ts"] = time.time()
+        if ev.get("type") == "follow" and ev.get("uid") and ev.get("room_id"):
+            self._follow_cache[(str(ev["room_id"]), str(ev["uid"]))] = time.monotonic() + 60
         if ev.get("name"):
             ev["name"] = str(ev["name"]).strip()
         try:
@@ -151,6 +156,7 @@ class BiliLive:
 
     async def start(self, room_id, cookie):
         await self.stop()
+        self._cookie = cookie
         self.session = make_session(cookie)
         if parse_cookie(cookie):
             await self.refresh_login()
@@ -193,6 +199,43 @@ class BiliLive:
             await self.session.close()
             self.session = None
         self.connected = False
+        self._follow_cache.clear()
+        self._cookie = ""
+
+    async def is_following(self, uid):
+        """先用当前房间的新关注消息，否则查询观众是否关注已登录的主播。"""
+        if not self.connected or not self.owner_uid:
+            raise RuntimeError("请先连接主播的直播间")
+        try:
+            uid = int(uid)
+        except (TypeError, ValueError):
+            uid = 0
+        if uid <= 0:
+            raise RuntimeError("无法识别观众 UID，请登录主播账号后重新连接直播间")
+        context = (self.session, self.room_id, self.owner_uid, self.login_uid)
+        key = (str(self.room_id), str(uid))
+        if self._follow_cache.get(key, 0) > time.monotonic():
+            return True
+        if str(self.login_uid or "") != str(self.owner_uid):
+            raise RuntimeError("请登录当前直播间的主播账号，以核实老观众的关注状态")
+        cookies = parse_cookie(self._cookie)
+        credential = Credential(sessdata=cookies.get("SESSDATA"), bili_jct=cookies.get("bili_jct"),
+                                buvid3=cookies.get("buvid3"), buvid4=cookies.get("buvid4"),
+                                dedeuserid=cookies.get("DedeUserID"), ac_time_value=cookies.get("ac_time_value"))
+        try:
+            async with asyncio.timeout(8):
+                relation = await bili_user.User(uid, credential=credential).get_relation()
+            # be_relation 是观众 -> 当前登录主播；relation 则是主播 -> 观众。
+            attribute = int(relation["be_relation"]["attribute"])
+        except Exception:
+            raise RuntimeError("关注状态查询失败，请检查 B站登录状态或稍后重试") from None
+        if not self.connected or context != (self.session, self.room_id, self.owner_uid, self.login_uid):
+            raise RuntimeError("直播间连接已改变，请重新点歌")
+        # 查询过程中收到的新关注消息比接口的短暂延迟更可靠。
+        following = attribute in (1, 2, 6) or self._follow_cache.get(key, 0) > time.monotonic()
+        if following:
+            self._follow_cache[key] = time.monotonic() + 60
+        return following
 
     async def refresh_login(self):
         self.login_uid, self.login_name, self.login_error = None, "", ""
