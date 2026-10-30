@@ -43,6 +43,7 @@ def make(iso="2026-10-01 07:00", **st):
     br.sources, br.preview = AsyncMock(return_value=src()), AsyncMock(return_value={"ok": True})
     br.stop_preview = AsyncMock(return_value={"ok": True})
     br.start, br.stop = AsyncMock(return_value={"ok": True, "room_id": 42}), AsyncMock(return_value={"ok": True})
+    br.account = AsyncMock(return_value={"ok": True, "logged_in": True, "room_id": 42, "live_status": 0})
     app = types.SimpleNamespace(broadcast=br, pushes=[], connect=AsyncMock(),
                                 ensure_game_and_dt=AsyncMock(return_value={"ok": True}),
                                 cfg={"bili_cookie": "FAKE-SESSDATA", "room_id": 0, "audio": {},

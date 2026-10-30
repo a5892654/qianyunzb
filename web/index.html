@@ -219,7 +219,7 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
       <label class="f" style="max-width:220px">播多久自动停播（分钟，0=不限）<input type="number" min="0" step="5" data-k="broadcast.auto_stop_minutes"></label>
       <label class="f">停播前说的话<input data-k="broadcast.auto_stop_line" maxlength="120"></label>
     </div>
-    <div class="hint">到点后皮套会先把上面这句话说完，再自动停播（从点击「开始直播」算起）。</div>
+    <div class="hint">保存分钟数即启用自动停播。本工具开播自动计时；直播姬 / OBS 开播由后台自动检测，并按本场开播时间计时，无需额外点击。到点结束B站直播间，告别语音失败也会继续停播。设为 0 关闭。</div>
     <div class="hint">只采集选中的窗口，不采集整个桌面。声音采集所选输出设备的游戏和千音配音，也会包含该设备的其他声音；直播前请关闭通知。画质：1080p / 30帧。</div>
   </div>
   <div class="card">
@@ -234,8 +234,8 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
   </div>
   <div class="card">
     <h3>用直播姬开播（千音出画面）</h3>
-    <div class="row"><button class="btn" id="externalTimerStart">直播姬：启动停播倒计时</button><button class="btn" id="externalTimerCancel" disabled>取消倒计时</button><span class="hint" id="externalTimerStatus" role="status"></span></div>
-    <p class="hint">先在直播姬开播，登录同一个主播账号，再按上方“播多久自动停播”的分钟数启动倒计时。从点击开始计时，到点说完告别语后结束B站直播间。需要每天固定时间下播，可在下方选择“直播姬 / OBS：仅定时停播”。请保持本工具运行。</p>
+    <div class="row"><span class="hint" id="externalTimerStatus" role="status">设置停播分钟数后自动监测开播</span><button class="btn" id="externalTimerCancel" disabled>关闭自动停播</button></div>
+    <p class="hint">登录同一个主播账号，设置上方“播多久自动停播”，直播姬开播后会自动计时、到点自动结束B站直播间。能读取本场开播时间时，重启后继续按原时间计时；否则从首次检测到开播算起。每天固定时间下播可选下方“直播姬 / OBS：仅定时停播”。请保持本工具运行。</p>
     <p class="hint">B站对千音这条网页开播通道要求人脸认证，直播姬那条通道不用。这个模式<b>不碰 B站开播接口</b>：千音把「游戏画面 + 皮套 + 字幕」合成好开成一个窗口，直播姬直接采集它，开播由直播姬点。</p>
     <div class="row">
       <button class="btn b" id="srcStart">开启源画面</button>
@@ -1675,9 +1675,9 @@ async function pollSchedule(fill = false) {
     $('#scheduleStatus').textContent = r.enabled ? (stopOnly ? `直播姬 / OBS 每日 ${r.stop_time} 停播；下次停播 ${r.next_stop}。` : `每日 ${r.start_time} 开播、${r.stop_time} 停播${r.stop_time < r.start_time ? '（次日）' : ''}；下次开播 ${r.next_start}，下次停播 ${r.next_stop}。`) : '定时直播未启用。';
     $('#scheduleSource').textContent = stopOnly ? `仅停止已登录主播的直播间${r.external_room_id ? ' ' + r.external_room_id : ''}，无需采集源预览。` : r.window_title ? `已保存窗口：${r.window_title}；声音：${r.audio_name}` : '启用前请先预览上方选中的窗口和声音。';
     const timer = r.external_timer || {};
-    $('#externalTimerStatus').textContent = timer.enabled ? `房间 ${timer.room_id} · ${timer.deadline} 停播 · 剩余 ${Math.ceil(timer.remaining_seconds / 60)} 分钟` : '未启动停播倒计时';
-    $('#externalTimerCancel').disabled = externalTimerBusy || !timer.enabled;
-    $('#externalTimerStart').disabled = externalTimerBusy;
+    const autoMinutes = Number(timer.auto_minutes ?? CFG.broadcast?.auto_stop_minutes ?? 0);
+    $('#externalTimerStatus').textContent = timer.enabled ? `房间 ${timer.room_id} · ${timer.deadline} 自动结束直播间 · 剩余 ${Math.ceil(timer.remaining_seconds / 60)} 分钟` : timer.message || (autoMinutes > 0 ? '已开启自动停播，等待检测直播姬开播' : '自动停播已关闭，设置分钟数即可启用');
+    $('#externalTimerCancel').disabled = externalTimerBusy || (!timer.enabled && autoMinutes <= 0);
     const actionLabels = {farewell: '正在告别，说完后自动下播…', start: '正在执行定时开播…', stop: '正在执行定时停播…'};
     $('#scheduleResult').textContent = r.active_action ? actionLabels[r.active_action] || '' : r.last_result ? `${r.last_result.time} · ${r.last_result.message}` : '';
     $('#scheduleDisable').disabled = scheduleBusy || !r.enabled;
@@ -1709,30 +1709,26 @@ async function saveSchedule(disable = false) {
 }
 $('#scheduleSave').onclick = () => saveSchedule();
 $('#scheduleDisable').onclick = () => saveSchedule(true);
-async function externalTimer(action) {
+async function cancelExternalTimer() {
   if (externalTimerBusy) return;
-  const minutes = Number($('[data-k="broadcast.auto_stop_minutes"]').value);
-  if (action === 'start' && (!Number.isInteger(minutes) || minutes < 1 || minutes > 10080)) {
-    toast('请先把“播多久自动停播”设为 1 至 10080 分钟的整数'); return;
-  }
   externalTimerBusy = true;
-  $('#externalTimerStart').disabled = $('#externalTimerCancel').disabled = true;
+  $('#externalTimerCancel').disabled = true;
   try {
     await flushConfig();
-    const result = await api('/api/broadcast/timer/' + action, {minutes});
-    if (!result.ok) throw new Error(result.error || '设置停播倒计时失败');
+    const result = await api('/api/broadcast/timer/cancel', {});
+    if (!result.ok) throw new Error(result.error || '关闭自动停播失败');
     scheduleInfo = result;
-    toast(action === 'start' ? '直播姬停播倒计时已启动' : '停播倒计时已取消');
+    CFG.broadcast.auto_stop_minutes = 0;
+    $('[data-k="broadcast.auto_stop_minutes"]').value = 0;
+    toast('自动停播已关闭');
   } catch (e) { toast(e.message || String(e)); }
   finally {
     externalTimerBusy = false;
-    $('#externalTimerStart').disabled = false;
-    $('#externalTimerCancel').disabled = !scheduleInfo.external_timer?.enabled;
+    $('#externalTimerCancel').disabled = !scheduleInfo.external_timer?.enabled && !scheduleInfo.external_timer?.auto_minutes;
     await pollSchedule();
   }
 }
-$('#externalTimerStart').onclick = () => externalTimer('start');
-$('#externalTimerCancel').onclick = () => externalTimer('cancel');
+$('#externalTimerCancel').onclick = cancelExternalTimer;
 setInterval(pollSchedule, 5000); pollSchedule();
 function syncPreviewStream(show) {
   for (const [id, section] of [['broadcastPreviewImage', 'broadcast'], ['layoutPreviewImage', 'layout']]) {

@@ -8,7 +8,7 @@ const {chromium} = require('playwright');
 const root = path.resolve(__dirname, '..');
 const cfg = JSON.parse(execFileSync(path.join(root, '.venv/Scripts/python.exe'), ['-c', 'import config,json; print(json.dumps(config.DEFAULTS))'], {cwd: root, encoding: 'utf8'}));
 let running = false, finishing = false, finishCount = 0, complete;
-let timerStarts = 0, timerCancels = 0, timerFailure = '';
+let timerStarts = 0, timerCancels = 0, remoteLive = false;
 const schedule = {ok: true, enabled: false, mode: 'managed', start_time: '20:00', stop_time: '23:00',
   local_time: '2026-10-30 20:00', external_timer: {enabled: false}};
 const scheduleSaves = [], confirmations = [];
@@ -51,19 +51,23 @@ function merge(target, patch) {
           const data = request.postDataJSON(); scheduleSaves.push(data);
           Object.assign(schedule, data, {external_room_id: 42, next_stop: '2026-10-30 23:00'});
         }
+        const minutes = cfg.broadcast.auto_stop_minutes;
+        if (minutes > 0 && remoteLive && !schedule.external_timer.enabled) {
+          schedule.external_timer = {enabled: true, auto_minutes: minutes, room_id: 42,
+            deadline: '2026-10-30 20:05:00', remaining_seconds: minutes * 60};
+        } else if (!schedule.external_timer.enabled) {
+          schedule.external_timer = {enabled: false, auto_minutes: minutes,
+            message: minutes > 0 ? '已开启自动停播，等待直播姬 / OBS 开播' : '自动停播已关闭，设置分钟数即可启用'};
+        }
         result = {...schedule, active_action: finishing ? 'farewell' : ''};
       } else if (url.pathname === '/api/broadcast/timer/start') {
-        assert.equal(request.headers()['x-bvb'], '1');
-        assert.equal(request.postDataJSON().minutes, 5);
         timerStarts++;
-        if (timerFailure) result = {ok: false, error: timerFailure};
-        else {
-          schedule.external_timer = {enabled: true, room_id: 42, deadline: '2026-10-30 20:05:00', remaining_seconds: 300};
-          result = schedule;
-        }
+        throw new Error('自动停播不应要求调用手动启动接口');
       } else if (url.pathname === '/api/broadcast/timer/cancel') {
         assert.equal(request.headers()['x-bvb'], '1');
-        timerCancels++; schedule.external_timer = {enabled: false}; result = schedule;
+        timerCancels++; cfg.broadcast.auto_stop_minutes = 0;
+        schedule.external_timer = {enabled: false, auto_minutes: 0, message: '自动停播已关闭，设置分钟数即可启用'};
+        result = schedule;
       }
       else if (url.pathname === '/api/broadcast/finish') {
         assert.equal(request.method(), 'POST');
@@ -122,20 +126,23 @@ function merge(target, patch) {
     await page.evaluate(() => pollBroadcast());
     await page.locator('[data-k="broadcast.auto_stop_minutes"]').fill('5');
     await page.locator('[data-k="broadcast.auto_stop_minutes"]').blur();
-    await page.locator('#externalTimerStart').click();
+    await page.evaluate(() => flushConfig());
+    await page.evaluate(() => pollSchedule());
+    assert.match(await page.locator('#externalTimerStatus').textContent(), /等待直播姬/);
+    assert.equal(await page.locator('#externalTimerStart').count(), 0);
+    remoteLive = true;
+    await page.evaluate(() => pollSchedule());
     await page.waitForFunction(() => document.querySelector('#externalTimerStatus').textContent.includes('剩余 5 分钟'));
-    assert.equal(timerStarts, 1);
+    assert.match(await page.locator('#externalTimerStatus').textContent(), /自动结束直播间/);
+    assert.equal(timerStarts, 0);
     assert.equal(cfg.broadcast.auto_stop_minutes, 5);
     assert.equal(await page.locator('#externalTimerCancel').isEnabled(), true);
     await page.locator('#externalTimerCancel').click();
-    await page.waitForFunction(() => document.querySelector('#externalTimerStatus').textContent.includes('未启动'));
+    await page.waitForFunction(() => document.querySelector('#externalTimerStatus').textContent.includes('已关闭'));
     assert.equal(timerCancels, 1);
+    assert.equal(cfg.broadcast.auto_stop_minutes, 0);
+    assert.equal(await page.locator('[data-k="broadcast.auto_stop_minutes"]').inputValue(), '0');
     assert.equal(await page.locator('#externalTimerCancel').isDisabled(), true);
-    timerFailure = '当前登录主播的直播间尚未开播';
-    await page.locator('#externalTimerStart').click();
-    await page.waitForFunction(() => document.querySelector('#toast').textContent.includes('尚未开播'));
-    await page.waitForFunction(() => !document.querySelector('#externalTimerStart').disabled);
-    assert.equal(await page.locator('#externalTimerStart').isEnabled(), true);
 
     await page.locator('#scheduleMode').selectOption('stop_only');
     assert.equal(await page.locator('#scheduleStartTime').isDisabled(), true);
@@ -162,7 +169,8 @@ function merge(target, patch) {
     await page.locator('nav [data-tab="songs"]').click();
     await page.waitForFunction(() => document.querySelector('[data-k="songs.require_gift"]').checked);
     assert.deepEqual(errors, []);
-    console.log('PASS 手动下播、直播姬倒计时启停和错误恢复、仅定时停播免预览、免费点歌默认与送礼限制保存');
+    assert.equal(timerStarts, 0);
+    console.log('PASS 保存时长后自动监测开播和计时、无需启动按钮、到点结束直播间、关闭自动停播及每日停播设置');
   } finally {
     await browser.close();
   }

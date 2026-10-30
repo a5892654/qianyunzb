@@ -547,6 +547,10 @@ def build_web(app: App):
         patch.pop("bili_cookie", None)
         if isinstance(patch.get("broadcast"), dict) and "schedule" in patch["broadcast"]:
             return web.json_response({"ok": False, "error": "请通过定时直播计划的保存按钮确认修改"}, status=400)
+        if isinstance(patch.get("broadcast"), dict) and "auto_stop_minutes" in patch["broadcast"]:
+            minutes = patch["broadcast"]["auto_stop_minutes"]
+            if type(minutes) is not int or not 0 <= minutes <= 10080:
+                return web.json_response({"ok": False, "error": "自动停播时长需为 0 至 10080 分钟的整数"}, status=400)
         if isinstance(patch.get("songs"), dict):
             patch["songs"].pop("netease_cookie", None)
             patch["songs"].pop("_ne_logged_in", None)
@@ -561,6 +565,8 @@ def build_web(app: App):
         old_room = app.cfg.get("room_id")
         app.cfg = config.merge(app.cfg, patch)
         config.save(app.cfg)
+        if isinstance(patch.get("broadcast"), dict) and "auto_stop_minutes" in patch["broadcast"]:
+            app.schedule.refresh_auto_timer()
         if "live2d" in patch:
             app.push("l2d_config", {})
             await app.broadcast.refresh_overlay()
@@ -730,7 +736,10 @@ def build_web(app: App):
 
     @routes.post("/api/broadcast/timer/cancel")
     async def broadcast_timer_cancel(_):
+        app.cfg["broadcast"]["auto_stop_minutes"] = 0
+        config.save(app.cfg)
         app.schedule.cancel_external_timer()
+        app.schedule.refresh_auto_timer()
         return web.json_response(app.schedule.status())
 
     @routes.post("/api/broadcast/room/cover")

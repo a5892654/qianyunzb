@@ -6,6 +6,7 @@ import ipaddress
 import re
 import time
 import urllib.parse
+from datetime import datetime, timedelta, timezone
 
 from bili import parse_cookie
 from bilibili_api import live as bili_live
@@ -27,6 +28,19 @@ START_APPSEC = "af125a0d5279fd576c1b4418a3e8276d"
 PRE_LIVE_INFO_URL = "https://api.live.bilibili.com/xlive/app-blink/v1/preLive/UpdatePreLiveInfo"
 TIMEOUT_SECONDS = 15.0
 PICTURE_TIMEOUT_SECONDS = 30.0
+
+
+def _live_started_at(value):
+    """兼容房间信息的秒时间戳和北京时间字符串；缺失时由监测端记录首次开播。"""
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError):
+        try:
+            timestamp = datetime.strptime(str(value), "%Y-%m-%d %H:%M:%S").replace(
+                tzinfo=timezone(timedelta(hours=8))).timestamp()
+        except (ValueError, OverflowError, OSError):
+            return 0
+    return timestamp if 0 < timestamp <= time.time() + 300 else 0
 
 # B站错误码 -> 中文人工处理提示（只保留安全文案，不携带原始响应）
 MANUAL_HINTS = {
@@ -210,6 +224,8 @@ class BiliBroadcastPlatform:
                     raise PlatformError("直播间不属于当前登录账号，已拒绝开播")
                 result["room_id"] = int(info["room_id"])
                 result["live_status"] = int(info["live_status"])
+                result["live_started_at"] = (_live_started_at(info.get("live_start_time"))
+                                             or _live_started_at(info.get("live_time")))
                 result["title"] = str(info.get("title") or "")
                 result["cover"] = str(info.get("cover") or "")
                 # room_info.cover 有时指向已清理的动态链（会 404），keyframe 通常还在

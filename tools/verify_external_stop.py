@@ -3,7 +3,7 @@ import asyncio
 import copy
 import sys
 import unittest
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import config
 import main
 from live_broadcast import Broadcast
-from live_platform import BiliBroadcastPlatform, PlatformError
+from live_platform import BiliBroadcastPlatform, PlatformError, _live_started_at
 from live_schedule import DailyBroadcastSchedule
 
 
@@ -80,8 +80,14 @@ class ExternalPlatformTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue((await broadcast.stop_external(42))["stopped"])
         fake.end_external.assert_awaited_once_with(42)
 
+    def test_platform_start_time_accepts_china_time_and_epoch(self):
+        for value in (1704067200, "1704067200", "2024-01-01 08:00:00"):
+            self.assertEqual(_live_started_at(value), 1704067200)
+        for value in (None, "0000-00-00 00:00:00", "invalid", 0, float("nan"), float("inf")):
+            self.assertEqual(_live_started_at(value), 0)
 
-class ExternalScheduleTests(unittest.IsolatedAsyncioTestCase):
+
+class ExternalScheduleTestCase(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.now = [datetime(2026, 10, 30, 19, 0)]
         self.app = SimpleNamespace(cfg=copy.deepcopy(config.DEFAULTS), pushes=[], auto_stop_task=None)
@@ -110,6 +116,8 @@ class ExternalScheduleTests(unittest.IsolatedAsyncioTestCase):
     async def drain(self):
         await asyncio.gather(*list(self.schedule.jobs))
 
+
+class ExternalScheduleTests(ExternalScheduleTestCase):
     async def test_stop_only_saves_without_preview_and_only_lists_next_stop(self):
         status = await self.enable_stop_only()
         self.assertNotIn("next_start", status)
@@ -206,15 +214,31 @@ class ExternalScheduleTests(unittest.IsolatedAsyncioTestCase):
         self.app.pipe.say_job_id.assert_not_called()
         self.assertFalse(self.schedule.last_result["ok"])
 
-    async def test_farewell_timeout_does_not_claim_stream_stopped(self):
+    async def test_automatic_stop_continues_when_farewell_times_out(self):
         self.schedule.TIMER_SECONDS_PER_MINUTE = 0.01
         self.schedule.FAREWELL_TIMEOUT = 0.01
         self.app.pipe.spoken_done.return_value = False
         await self.schedule.arm_external_timer(1)
         await asyncio.wait_for(self.schedule.external_timer_task, 2)
-        self.app.broadcast.stop_external.assert_not_awaited()
-        self.assertFalse(self.schedule.last_result["ok"])
-        self.assertIn("超时", self.schedule.last_result["message"])
+        self.app.broadcast.stop_external.assert_awaited_once_with(42)
+        self.assertTrue(self.schedule.last_result["ok"])
+        self.assertTrue(any(kind == "log" and "超时" in data.get("msg", "") for kind, data in self.app.pushes))
+
+    async def test_automatic_stop_continues_when_farewell_cannot_be_queued(self):
+        self.schedule.TIMER_SECONDS_PER_MINUTE = 0.01
+        self.app.pipe.say_job_id.return_value = None
+        await self.schedule.arm_external_timer(1)
+        await asyncio.wait_for(self.schedule.external_timer_task, 2)
+        self.app.broadcast.stop_external.assert_awaited_once_with(42)
+        self.assertTrue(self.schedule.last_result["ok"])
+
+    async def test_default_daily_stop_also_ends_livehime_room_without_local_output(self):
+        self.schedule.settings.update(enabled=True, stop_time="23:00")
+        self.now[0] = datetime(2026, 10, 30, 23, 0)
+        self.schedule.tick()
+        await self.drain()
+        self.app.broadcast.stop_external.assert_awaited_once_with(42)
+        self.app.broadcast.stop.assert_not_awaited()
 
     async def test_external_routes_require_header_and_accept_start_cancel_and_stop_only(self):
         client = TestClient(TestServer(main.build_web(self.app)))
@@ -233,6 +257,138 @@ class ExternalScheduleTests(unittest.IsolatedAsyncioTestCase):
         response = await client.post("/api/broadcast/schedule", json={"enabled": True, "authorized": True,
             "mode": "stop_only", "stop_time": "23:00"}, headers=headers)
         self.assertEqual((await response.json())["mode"], "stop_only")
+
+
+class AutomaticExternalStopTests(ExternalScheduleTestCase):
+    async def probe(self, seconds=0):
+        self.now[0] += timedelta(seconds=seconds)
+        self.schedule.tick()
+        if self.schedule.auto_check_task:
+            await self.schedule.auto_check_task
+
+    async def wait_for_stop(self):
+        async with asyncio.timeout(2):
+            while not self.app.broadcast.stop_external.await_count:
+                await asyncio.sleep(0.005)
+
+    async def test_saved_duration_waits_for_livehime_then_arms_automatically(self):
+        self.app.cfg["broadcast"]["auto_stop_minutes"] = 60
+        self.app.broadcast.account.return_value["live_status"] = 0
+        await self.probe()
+        self.assertIsNone(self.schedule.external_timer_task)
+        self.assertIn("等待", self.schedule.auto_message)
+        self.app.broadcast.account.return_value["live_status"] = 1
+        await self.probe(16)
+        self.assertTrue(self.schedule.timer_automatic)
+        self.assertEqual(self.schedule.timer_room_id, 42)
+        self.assertEqual(self.schedule.timer_deadline, self.now[0] + timedelta(hours=1))
+        timer = self.schedule.external_timer_task
+        await self.probe(16)
+        self.assertIs(self.schedule.external_timer_task, timer)
+
+    async def test_timer_uses_actual_session_start_and_recalculates_changed_duration(self):
+        start = self.now[0]
+        self.app.broadcast.account.return_value["live_started_at"] = start.timestamp()
+        self.now[0] += timedelta(minutes=10)
+        self.app.cfg["broadcast"]["auto_stop_minutes"] = 60
+        await self.probe()
+        self.assertEqual(self.schedule.timer_deadline, start + timedelta(hours=1))
+        self.app.cfg["broadcast"]["auto_stop_minutes"] = 20
+        await self.probe()
+        self.assertEqual(self.schedule.timer_deadline, start + timedelta(minutes=20))
+        self.app.cfg["broadcast"]["auto_stop_minutes"] = 0
+        await self.probe()
+        self.assertIsNone(self.schedule.external_timer_task)
+        self.app.broadcast.stop_external.assert_not_awaited()
+
+    async def test_restarting_during_overdue_stream_stops_room_without_button(self):
+        self.app.cfg["broadcast"]["auto_stop_minutes"] = 20
+        self.app.broadcast.account.return_value["live_started_at"] = (self.now[0] - timedelta(minutes=30)).timestamp()
+        await self.probe()
+        await self.wait_for_stop()
+        self.app.broadcast.stop_external.assert_awaited_once_with(42)
+        self.app.broadcast.stop.assert_not_awaited()
+
+    async def test_background_scheduler_detects_start_and_stops_without_any_web_request(self):
+        self.app.cfg["broadcast"]["auto_stop_minutes"] = 1
+        self.schedule.TIMER_SECONDS_PER_MINUTE = 0.01
+        self.schedule.start()
+        await self.wait_for_stop()
+        self.app.broadcast.stop_external.assert_awaited_once_with(42)
+        await self.probe(16)
+        self.app.broadcast.stop_external.assert_awaited_once()
+
+    async def test_offline_then_new_session_gets_a_new_timer(self):
+        self.app.cfg["broadcast"]["auto_stop_minutes"] = 60
+        await self.probe()
+        original = self.schedule.external_timer_task
+        self.app.broadcast.account.return_value["live_status"] = 0
+        await self.probe(16)
+        self.assertIsNone(self.schedule.external_timer_task)
+        self.app.broadcast.account.return_value["live_status"] = 1
+        await self.probe(16)
+        self.assertIsNot(self.schedule.external_timer_task, original)
+        self.assertEqual(self.schedule.timer_deadline, self.now[0] + timedelta(hours=1))
+
+    async def test_transient_network_failure_retries_without_losing_armed_deadline(self):
+        self.app.cfg["broadcast"]["auto_stop_minutes"] = 60
+        self.app.broadcast.account.side_effect = RuntimeError("暂时断网")
+        await self.probe()
+        self.assertIsNone(self.schedule.external_timer_task)
+        self.app.broadcast.account.side_effect = None
+        await self.probe(16)
+        timer = self.schedule.external_timer_task
+        self.app.broadcast.account.side_effect = RuntimeError("暂时断网")
+        await self.probe(16)
+        self.assertIs(self.schedule.external_timer_task, timer)
+
+    async def test_local_output_and_disabled_duration_do_not_probe_external_account(self):
+        self.app.cfg["broadcast"]["auto_stop_minutes"] = 60
+        self.app.broadcast.running = True
+        await self.probe()
+        self.app.broadcast.account.assert_not_awaited()
+        self.app.broadcast.running = False
+        self.app.cfg["broadcast"]["auto_stop_minutes"] = 0
+        await self.probe()
+        self.app.broadcast.account.assert_not_awaited()
+
+    async def test_api_saving_minutes_arms_automatically_and_disabling_clears_setting(self):
+        client = TestClient(TestServer(main.build_web(self.app)))
+        await client.start_server()
+        self.addAsyncCleanup(client.close)
+        headers = {"X-BVB": "1"}
+        response = await client.post("/api/config", json={"broadcast": {"auto_stop_minutes": 60}}, headers=headers)
+        self.assertTrue((await response.json())["ok"])
+        await self.schedule.auto_check_task
+        self.assertTrue(self.schedule.timer_automatic)
+        response = await client.post("/api/broadcast/timer/cancel", json={}, headers=headers)
+        status = await response.json()
+        self.assertEqual(self.app.cfg["broadcast"]["auto_stop_minutes"], 0)
+        self.assertFalse(status["external_timer"]["enabled"])
+        self.assertEqual(status["external_timer"]["auto_minutes"], 0)
+        self.app.broadcast.stop_external.assert_not_awaited()
+        for minutes in (-1, True, 1.5, 10081):
+            response = await client.post("/api/config", json={"broadcast": {"auto_stop_minutes": minutes}}, headers=headers)
+            self.assertEqual(response.status, 400)
+        self.assertEqual(self.app.cfg["broadcast"]["auto_stop_minutes"], 0)
+
+    async def test_saving_zero_during_probe_cannot_arm_a_stale_timer(self):
+        self.app.cfg["broadcast"]["auto_stop_minutes"] = 60
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def account():
+            started.set()
+            await release.wait()
+            return {"ok": True, "logged_in": True, "room_id": 42, "live_status": 1}
+
+        self.app.broadcast.account.side_effect = account
+        self.schedule.refresh_auto_timer()
+        await started.wait()
+        self.app.cfg["broadcast"]["auto_stop_minutes"] = 0
+        self.schedule.refresh_auto_timer()
+        release.set()
+        await self.schedule.auto_check_task
+        self.assertIsNone(self.schedule.external_timer_task)
 
 
 if __name__ == "__main__":
