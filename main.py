@@ -101,6 +101,7 @@ class App:
                 asyncio.ensure_future(ws.send_str(text))
 
     def on_event(self, ev):
+        self.rice_gift(ev)
         self.pipe.on_event(ev)
 
     # ---------- 后台任务 ----------
@@ -242,6 +243,16 @@ class App:
     def rice_awarded(self):
         self.push("rice", self.rice_state())
         self.push("log", {"level": "info", "msg": f"AI 击败第三幕 Boss，白饭 +1，累计 {self.rice.total} 碗！"})
+
+    def rice_gift(self, ev):
+        if ev.get("type") != "gift" or not self.cfg.get("rice_counter", {}).get("enabled"):
+            return
+        try:
+            room = ev.get("room_id") or getattr(self.bili, "room_id", None) or self.cfg.get("room_id")
+            if self.rice.record_gift(ev, room):
+                self.push("rice", self.rice_state())
+        except (OSError, ValueError) as error:
+            log.warning("礼物白饭计数保存失败：%s", error)
 
     @staticmethod
     def _task_died(task: asyncio.Task):
