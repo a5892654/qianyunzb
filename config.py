@@ -161,7 +161,7 @@ DEFAULTS = {
     # duck_game：说话时把游戏那个进程的音量压低；duck_level 是压到百分之多少
     "audio": {"device": "", "volume": 130, "duck_game": True, "duck_level": 25},
     "overlay": {"seconds": 8},
-    "rice_counter": {"enabled": False},
+    "rice_counter": {"enabled": False, "large_gift_yuan": 10},
     "broadcast": {
         "title": "恶魔之塔 ZERO｜AI 游戏直播", "area_id": 283,
         "auto_stop_minutes": 0,

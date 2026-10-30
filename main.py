@@ -21,7 +21,7 @@ from dtgame.bridge import BridgeError, GameBridge
 from dtgame.launcher import GameProcess, find_godot
 from dtgame.player import Player as DTPlayer
 from dtgame.rice import RiceTracker
-from live_rice import RiceCounter
+from live_rice import RiceCounter, validate_settings as validate_rice_settings
 from live_broadcast import Broadcast
 from live_schedule import DailyBroadcastSchedule
 from pipeline import Pipeline
@@ -249,7 +249,8 @@ class App:
             return
         try:
             room = ev.get("room_id") or getattr(self.bili, "room_id", None) or self.cfg.get("room_id")
-            if self.rice.record_gift(ev, room):
+            threshold = self.cfg.get("rice_counter", {}).get("large_gift_yuan", 10)
+            if self.rice.record_gift(ev, room, threshold):
                 self.push("rice", self.rice_state())
         except (OSError, ValueError) as error:
             log.warning("礼物白饭计数保存失败：%s", error)
@@ -593,9 +594,10 @@ def build_web(app: App):
             patch["songs"].pop("netease_cookie", None)
             patch["songs"].pop("_ne_logged_in", None)
         if "rice_counter" in patch:
-            rice_patch = patch["rice_counter"]
-            if not isinstance(rice_patch, dict) or set(rice_patch) - {"enabled"} or ("enabled" in rice_patch and type(rice_patch["enabled"]) is not bool):
-                return web.json_response({"ok": False, "error": "白饭计数开关无效"}, status=400)
+            try:
+                validate_rice_settings(patch["rice_counter"])
+            except ValueError as error:
+                return web.json_response({"ok": False, "error": str(error)}, status=400)
         if "wishlist" in patch:
             try:
                 if not isinstance(patch["wishlist"], dict):
