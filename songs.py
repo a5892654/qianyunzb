@@ -69,6 +69,23 @@ class SongManager:
     def _key(ev):
         return str(ev.get("uid") or ev.get("raw_name") or ev.get("name"))
 
+    @staticmethod
+    def _autoplay(song):
+        return bool(song) and song.get("source") == "autoplay"
+
+    def _autoplay_index(self):
+        return next((i for i, song in enumerate(self.queue) if self._autoplay(song)), len(self.queue))
+
+    def _interrupt_autoplay(self):
+        """点播准备好后让出背景音乐；被打断的背景歌留待点播结束后重播。"""
+        if self._autoplay(self.current) and not self.end.is_set():
+            song = dict(self.current)
+            song.pop("loading", None)
+            self.queue.insert(self._autoplay_index(), song)
+            self.control("skip")
+            return True
+        return False
+
     # ---------- 弹幕 / 礼物 ----------
     def on_gift(self, ev):
         c = self.cfg
@@ -96,7 +113,7 @@ class SongManager:
     def _apply_pin(self, key, rec):
         """用户已经有排队中的歌：用掉一张插队券，把它置顶。"""
         for i, s in enumerate(self.queue):
-            if s["key"] == key and not s["pinned"]:
+            if s["key"] == key and not s["pinned"] and not self._autoplay(s):
                 rec["pin"] -= 1
                 self.queue.pop(i)
                 self._insert_pinned(s)
@@ -129,9 +146,11 @@ class SongManager:
                 self.last_hint[key] = time.time()
                 self.say("need", name=ev["name"], gift=gift_names, query=query, num=c.get("song_gift_count", 1))
             return True
-        mine = (sum(1 for s in self.queue if s["key"] == key)
-                + (1 if self.current and self.current["key"] == key else 0) + self.pending_requests[key])
-        if mine >= int(c.get("max_per_user", 2)) or len(self.queue) + self.pending_requests.total() >= int(c.get("max_queue", 20)):
+        requests = [s for s in self.queue if not self._autoplay(s)]
+        mine = (sum(1 for s in requests if s["key"] == key)
+                + (1 if self.current and not self._autoplay(self.current) and self.current["key"] == key else 0)
+                + self.pending_requests[key])
+        if mine >= int(c.get("max_per_user", 2)) or len(requests) + self.pending_requests.total() >= int(c.get("max_queue", 20)):
             self.say("full", name=ev["name"], query=query)
             return True
         if c.get("require_gift", False):
@@ -172,8 +191,10 @@ class SongManager:
             self._insert_pinned(s)
             self.say("pin", name=name, song=s["name"], artist=s["artist"], emotion="惊讶")
         else:
-            self.queue.append(s)
-            pos = len(self.queue) + (1 if self.current else 0)
+            self.queue.insert(self._autoplay_index(), s)
+        self._interrupt_autoplay()
+        if not s["pinned"]:
+            pos = self.queue.index(s) + 1 + (1 if self.current and not self._autoplay(self.current) else 0)
             self.say("similar" if s["similar"] else "add", name=name, song=s["name"], artist=s["artist"], pos=pos, query=query)
         self.app.push("log", {"level": "info", "msg": f"点歌：{name} → 《{s['name']}》- {s['artist']}"
                                                       + ("（相似）" if s["similar"] else "")})
@@ -181,26 +202,38 @@ class SongManager:
         self.push()
 
     @staticmethod
-    def _entry(song, name="主播", key="__host__", query=""):
+    def _entry(song, name="主播", key="__host__", query="", source="request"):
         return {"qid": next(_qid), "id": song["id"], "name": song["name"], "artist": song.get("artist", ""),
-                "dur": song.get("dur", 0), "by": name, "key": key, "query": query, "pinned": False,
+                "dur": song.get("dur", 0), "by": "歌单自动播放" if source == "autoplay" else name,
+                "key": "__autoplay__" if source == "autoplay" else key, "source": source, "query": query, "pinned": False,
                 "similar": not song.get("exact", True)}
 
-    def enqueue_selected(self, songs, by="主播", play_now=False):
+    def enqueue_selected(self, songs, by="主播", play_now=False, source="request"):
+        if source not in ("request", "autoplay"):
+            raise ValueError("无效的歌曲来源")
         if not self.cfg.get("enabled"):
             raise ValueError("请先开启“启用点歌”，再播放或加入队列")
         if not songs:
             raise ValueError("所选歌曲不能完整播放，可能需要 VIP、已下架或账号暂无播放权限")
-        entries = [self._entry(s, by) for s in songs]
+        entries = [self._entry(s, by, source=source) for s in songs]
         self.last_error = ""
         if play_now:
-            self.queue[0:0] = entries
-            self.control("skip")
+            index = self._autoplay_index() if source == "autoplay" else 0
+            self.queue[index:index] = entries
+            if source == "request":
+                if not self._interrupt_autoplay():
+                    self.control("skip")
+            elif self._autoplay(self.current):
+                self.control("skip")
             self.paused = False
             self.app.player.pause_music(False)
         else:
-            self.queue.extend(entries)
-        self.app.push("log", {"level": "info", "msg": f"主播{'立即播放' if play_now else '加入队列'}：{len(entries)} 首歌曲"})
+            index = len(self.queue) if source == "autoplay" else self._autoplay_index()
+            self.queue[index:index] = entries
+            if source == "request":
+                self._interrupt_autoplay()
+        label = "歌单自动播放" if source == "autoplay" else "主播点歌"
+        self.app.push("log", {"level": "info", "msg": f"{label}：加入 {len(entries)} 首歌曲"})
         self.wake.set()
         self.push()
 
@@ -242,7 +275,8 @@ class SongManager:
                     continue
                 self.current["loading"] = False
                 self._apply_volume()
-                self.say("play", name=s["by"], song=s["name"], artist=s["artist"])
+                if not self._autoplay(s):
+                    self.say("play", name=s["by"], song=s["name"], artist=s["artist"])
                 ended = self.end
                 self.app.player.play_music(pcm, sr, dev, lambda ended=ended: loop.call_soon_threadsafe(ended.set))
                 self.app.player.pause_music(self.paused)
@@ -311,23 +345,32 @@ class SongManager:
             if action == "play":
                 if not self.cfg.get("enabled"):
                     raise ValueError("请先开启“启用点歌”")
-                self.queue.insert(0, self.queue.pop(idx))
-                self.control("skip")
+                self.queue.pop(idx)
+                self.queue.insert(self._autoplay_index() if self._autoplay(s) else 0, s)
+                if self._autoplay(s):
+                    if self._autoplay(self.current):
+                        self.control("skip")
+                elif not self._interrupt_autoplay():
+                    self.control("skip")
                 self.paused = False
                 self.app.player.pause_music(False)
                 self.wake.set()
             elif action == "remove":
                 self.queue.pop(idx)
             elif action == "pin":
+                if self._autoplay(s):
+                    return
                 self.queue.pop(idx)
                 self._insert_pinned(s)
             elif action == "unpin":
+                if self._autoplay(s):
+                    return
                 self.queue.pop(idx)
                 s["pinned"] = False
                 self.queue.insert(sum(1 for x in self.queue if x["pinned"]), s)
             elif action in ("up", "down"):
                 j = idx - 1 if action == "up" else idx + 1
-                if 0 <= j < len(self.queue):
+                if 0 <= j < len(self.queue) and self._autoplay(self.queue[j]) == self._autoplay(s):
                     self.queue[idx], self.queue[j] = self.queue[j], self.queue[idx]
         self.push()
 

@@ -29,6 +29,7 @@ const push = () => socket?.send(JSON.stringify({kind: 'songs', ...state}));
       const request = route.request(), url = new URL(request.url());
       if (url.origin !== 'http://127.0.0.1:18787') return route.fulfill({body: ''});
       if (url.pathname === '/') return route.fulfill({contentType: 'text/html', body: fs.readFileSync(path.join(root, 'web/index.html'), 'utf8')});
+      if (url.pathname === '/songs') return route.fulfill({contentType: 'text/html', body: fs.readFileSync(path.join(root, 'web/songs.html'), 'utf8')});
       const body = request.method() === 'POST' ? request.postDataJSON() : undefined;
       let result = {};
       if (body && url.pathname.startsWith('/api/songs/')) assert.equal(request.headers()['x-bvb'], '1');
@@ -60,9 +61,10 @@ const push = () => socket?.send(JSON.stringify({kind: 'songs', ...state}));
         if (delayedAdd) { delayedAdd = false; await new Promise(resolve => { releaseAdd = resolve; }); }
         if (addError) result = {ok: false, error: addError};
         else {
-          const selected = body.ids.map(id => songs.find(s => s.id === Number(id))).filter(s => s?.playable).map(s => ({...s, qid: ++qid, by: '主播'}));
-          if (body.mode === 'play') { state.current = {...selected.shift(), pos: 0, total: 180}; state.queue.unshift(...selected); state.paused = false; }
-          else state.queue.push(...selected);
+          const selected = body.ids.map(id => songs.find(s => s.id === Number(id))).filter(s => s?.playable).map(s => ({...s, qid: ++qid, by: '主播', source: body.source || 'request'}));
+          if (body.source === 'autoplay') state.queue.push(...selected);
+          else if (body.mode === 'play') { state.current = {...selected.shift(), pos: 0, total: 180}; state.queue.unshift(...selected); state.paused = false; }
+          else { const index = state.queue.findIndex(s => s.source === 'autoplay'); state.queue.splice(index < 0 ? state.queue.length : index, 0, ...selected); }
           result = {ok: true, added: body.ids.filter(id => Number(id) !== 2).length, skipped: body.ids.filter(id => Number(id) === 2).length, paused: state.paused};
           push();
         }
@@ -97,7 +99,12 @@ const push = () => socket?.send(JSON.stringify({kind: 'songs', ...state}));
 
     await page.locator('#sgPlayPlaylist').click();
     await page.waitForFunction(() => document.querySelector('#toast').textContent.includes('跳过 1 首'));
-    assert.deepEqual(addBodies.at(-1), {ids: ['1', '2', '3'], mode: 'play'});
+    assert.deepEqual(addBodies.at(-1), {ids: ['1', '2', '3'], mode: 'play', source: 'autoplay'});
+    assert.ok((await page.locator('#sgNow').textContent()).includes('第一首'));
+    assert.ok((await page.locator('#sgQueue').textContent()).includes('歌单自动播放'));
+    assert.equal(await page.locator('#sgQueue [data-sgq="pin"]').count(), 0);
+    assert.ok((await page.locator('#toast').textContent()).includes('静默播放，观众点歌优先'));
+    console.log('PASS 整页歌曲标记为静默背景播放，页面区分点播与自动播放');
     await page.locator('#sgPlaylistNext').click();
     await page.waitForFunction(() => document.querySelector('#sgPlaylistSongs').textContent.includes('第101首'));
     assert.equal(playlistBodies.at(-1).offset, 100);
@@ -121,6 +128,7 @@ const push = () => socket?.send(JSON.stringify({kind: 'songs', ...state}));
     assert.equal(addBodies.length, before + 1);
     releaseAdd();
     await page.waitForFunction(() => !document.querySelector('#sgResults [data-mode="queue"]').disabled);
+    assert.equal(state.queue[0].source, 'request');
     await page.locator('#sgQ').fill('bad');
     await page.locator('#sgSearch').click();
     await page.waitForFunction(() => document.querySelector('#sgResults').textContent.includes('HTTP 500'));
@@ -152,7 +160,11 @@ const push = () => socket?.send(JSON.stringify({kind: 'songs', ...state}));
     await page.locator('#neLogout').click();
     await page.waitForFunction(() => document.querySelector('#sgPlaylistTools').hidden);
     assert.equal(await page.locator('#sgPlaylistSelect option').count(), 1);
+    state.current = {...songs[0], by: '歌单自动播放', source: 'autoplay', pos: 0, total: 180};
+    await page.goto('http://127.0.0.1:18787/songs');
+    await page.waitForFunction(() => document.querySelector('.sub')?.textContent.includes('歌单自动播放'));
+    assert.ok(!(await page.locator('.sub').textContent()).includes('点歌：'));
     assert.deepEqual(errors, []);
-    console.log('PASS 退出登录清除旧账号歌单，页面无未捕获异常');
+    console.log('PASS 退出登录清除旧账号歌单，OBS 歌单区分自动播放，页面无未捕获异常');
   } finally { await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

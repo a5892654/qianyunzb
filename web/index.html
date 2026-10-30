@@ -580,7 +580,7 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
     <p class="hint" id="sgLibraryHint" role="status">可选择账号内的歌单，也可直接粘贴公开歌单链接。</p>
     <div id="sgPlaylistTools" hidden>
       <div class="row"><b id="sgPlaylistTitle" style="flex:1"></b><button class="btn b" id="sgPlayPlaylist">播放本页</button><button class="btn" id="sgAddPlaylist">本页加入队列</button></div>
-      <p class="hint">每页最多 100 首，按歌单顺序播放并跳过无法完整播放的歌曲；可逐首立即播放或加入队列。</p>
+      <p class="hint">本页作为背景歌单自动播放，不播报歌名，也不占点歌名额。观众点歌优先切入，点播结束后继续歌单；每页最多 100 首。</p>
     </div>
     <div id="sgPlaylistSongs" class="queue" style="max-height:360px;color:var(--text)"></div>
     <div class="row" id="sgPlaylistPages" style="margin-top:10px" hidden><button class="btn sm" id="sgPlaylistPrev">上一页</button><span class="hint" id="sgPlaylistPage"></span><button class="btn sm" id="sgPlaylistNext">下一页</button></div>
@@ -1231,17 +1231,16 @@ const fmtT = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2
 let sgAccountKey = null, sgSearchVersion = 0, sgLibraryVersion = 0, sgLibraryOffset = 0, sgPlaylistVersion = 0, sgPlaylist = null;
 function renderSongs(st) {
   const c = st.current;
-  $('#sgNow').innerHTML = c ? `${c.paused ? '⏸' : '🎵'} ${esc(c.name)} - ${esc(c.artist)} <span class="dim">${c.loading ? '正在加载…　' : ''}点歌：${esc(c.by)}　${fmtT(c.pos)} / ${fmtT(c.total)}</span>` : '<span class="dim">现在没有在放歌</span>';
+  $('#sgNow').innerHTML = c ? `${c.paused ? '⏸' : '🎵'} ${esc(c.name)} - ${esc(c.artist)} <span class="dim">${c.loading ? '正在加载…　' : ''}${c.source === 'autoplay' ? '歌单自动播放' : '点歌：' + esc(c.by)}　${fmtT(c.pos)} / ${fmtT(c.total)}</span>` : '<span class="dim">现在没有在放歌</span>';
   $('#sgPause').textContent = (st.paused || c?.paused) ? '继续' : '暂停';
   $('#sgPause').dataset.paused = (st.paused || c?.paused) ? '1' : '';
   $('#sgError').textContent = st.error || '';
   $('#sgError').hidden = !st.error;
   $('#sgQueue').innerHTML = st.queue.length ? st.queue.map((s, i) => `<div class="row" style="margin-bottom:4px">
       <b style="width:22px;color:var(--pink)">${i + 1}</b>
-      <span style="flex:1">${s.pinned ? '<span class="tag guard">插队</span> ' : ''}${esc(s.name)} - ${esc(s.artist)} <span class="hint">· ${esc(s.by)}${s.similar ? ' · 相似匹配（点的是“' + esc(s.query) + '”）' : ''}</span></span>
+      <span style="flex:1">${s.pinned ? '<span class="tag guard">插队</span> ' : ''}${esc(s.name)} - ${esc(s.artist)} <span class="hint">· ${s.source === 'autoplay' ? '歌单自动播放' : esc(s.by)}${s.similar ? ' · 相似匹配（点的是“' + esc(s.query) + '”）' : ''}</span></span>
       <span class="btn sm" data-sgq="up" data-qid="${s.qid}">↑</span><span class="btn sm" data-sgq="down" data-qid="${s.qid}">↓</span>
-      <button class="btn sm b" data-sgq="play" data-qid="${s.qid}">立即播放</button>
-      <span class="btn sm" data-sgq="${s.pinned ? 'unpin' : 'pin'}" data-qid="${s.qid}">${s.pinned ? '取消置顶' : '置顶'}</span>
+      ${s.source === 'autoplay' ? '' : `<button class="btn sm b" data-sgq="play" data-qid="${s.qid}">立即播放</button><span class="btn sm" data-sgq="${s.pinned ? 'unpin' : 'pin'}" data-qid="${s.qid}">${s.pinned ? '取消置顶' : '置顶'}</span>`}
       <span class="btn sm r" data-sgq="remove" data-qid="${s.qid}">删除</span></div>`).join('') : '<span class="hint">歌单是空的</span>';
   $('#sgCredits').innerHTML = st.credits.length ? st.credits.map(r => `<div class="row" style="margin-bottom:4px;color:var(--text)">
       <span style="flex:1">${esc(r.name)}</span><span style="width:110px">点歌券 <b>${r.song}</b></span><span style="width:110px">插队券 <b>${r.pin}</b></span>
@@ -1275,11 +1274,12 @@ $('#sgPause').onclick = () => neApi('/api/songs/control', {action: $('#sgPause')
 function songRows(songs) {
   return songs.map(s => `<div class="row song-row"><span style="flex:1;min-width:160px">${esc(s.name)} - ${esc(s.artist)} <span class="hint">${fmtT(s.dur)}</span></span>${s.playable ? `<button class="btn sm b" data-song-id="${s.id}" data-mode="play">立即播放</button><button class="btn sm" data-song-id="${s.id}" data-mode="queue">加入队列</button>` : '<span class="hint">不能完整播放（权限或下架）</span>'}</div>`).join('');
 }
-async function addSelectedSongs(ids, mode, button) {
+async function addSelectedSongs(ids, mode, button, source = 'request') {
   button.disabled = true;
   try {
-    const r = await neApi('/api/songs/add', {ids, mode});
-    toast(`${mode === 'play' ? '已安排立即播放' : '已加入队列'} ${r.added} 首${r.skipped ? `，跳过 ${r.skipped} 首无法播放的歌曲` : ''}${r.paused ? '（当前已暂停，点击继续开始播放）' : ''}`);
+    const r = await neApi('/api/songs/add', {ids, mode, ...(source === 'autoplay' ? {source} : {})});
+    const message = source === 'autoplay' ? '已安排歌单自动播放' : (mode === 'play' ? '已安排立即播放' : '已加入队列');
+    toast(`${message} ${r.added} 首${r.skipped ? `，跳过 ${r.skipped} 首无法播放的歌曲` : ''}${source === 'autoplay' ? '（静默播放，观众点歌优先）' : ''}${r.paused ? '（当前已暂停，点击继续开始播放）' : ''}`);
   } finally { button.disabled = false; }
 }
 $('#sgSearch').onclick = async () => {
@@ -1338,7 +1338,7 @@ $('#sgPlaylistNext').onclick = () => { if (sgPlaylist) loadSongPlaylist(sgPlayli
 for (const [id, mode] of [['sgPlayPlaylist', 'play'], ['sgAddPlaylist', 'queue']]) {
   $('#' + id).onclick = async e => {
     if (!sgPlaylist) return;
-    try { await addSelectedSongs(sgPlaylist.songs.map(s => String(s.id)), mode, e.currentTarget); }
+    try { await addSelectedSongs(sgPlaylist.songs.map(s => String(s.id)), mode, e.currentTarget, 'autoplay'); }
     catch (error) { toast(error.message); }
   };
 }

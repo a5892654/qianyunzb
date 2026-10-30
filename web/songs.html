@@ -35,11 +35,11 @@ const fmt = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2,
 function render(st) {
   const c = st.current;
   document.getElementById('now').innerHTML = c
-    ? `<div class="now">${c.paused ? '⏸' : '▶'} ${esc(c.name)} - ${esc(c.artist)}</div><div class="sub">点歌：${esc(c.by)}　${fmt(c.pos)} / ${fmt(c.total)}</div><div class="bar"><i style="width:${c.total ? Math.min(100, c.pos / c.total * 100) : 0}%"></i></div>`
+    ? `<div class="now">${c.paused ? '⏸' : '▶'} ${esc(c.name)} - ${esc(c.artist)}</div><div class="sub">${c.source === 'autoplay' ? '歌单自动播放' : '点歌：' + esc(c.by)}　${fmt(c.pos)} / ${fmt(c.total)}</div><div class="bar"><i style="width:${c.total ? Math.min(100, c.pos / c.total * 100) : 0}%"></i></div>`
     : '<div class="empty">现在没有在放歌，发送“点歌:歌名”来点歌吧</div><div style="height:8px"></div>';
   document.getElementById('hint').textContent = st.queue.length ? `共 ${st.queue.length} 首待播` : '';
   document.getElementById('list').innerHTML = st.queue.slice(0, MAX).map((s, i) =>
-    `<li><span class="n">${i + 1}</span><span class="s">${s.pinned ? '<span class="pin">插队</span>' : ''}${esc(s.name)} - ${esc(s.artist)}</span><span class="by">${esc(s.by)}</span></li>`).join('')
+    `<li><span class="n">${i + 1}</span><span class="s">${s.pinned ? '<span class="pin">插队</span>' : ''}${esc(s.name)} - ${esc(s.artist)}</span><span class="by">${s.source === 'autoplay' ? '自动播放' : esc(s.by)}</span></li>`).join('')
     + (st.queue.length > MAX ? `<li><span class="n"></span><span class="s by">……还有 ${st.queue.length - MAX} 首</span></li>` : '');
 }
 fetch('/api/songs/state').then(r => r.json()).then(render).catch(() => {});
