@@ -14,9 +14,10 @@ import numpy as np
 from aiohttp.test_utils import TestClient, TestServer
 
 import config
+from brain import Brain
 from dtgame.player import Player
 from dtgame.rice import RiceTracker
-from live_rice import RiceCounter, RiceCompositor
+from live_rice import RiceCounter, RiceCompositor, ai_context, layout_rect
 from live_capture import WindowStreamCapture
 
 
@@ -234,6 +235,22 @@ class RiceTests(unittest.TestCase):
         capture._compose_frame(source)
         np.testing.assert_array_equal(np.frombuffer(capture._frame, np.uint8).reshape(source.shape), source)
 
+    def test_rice_position_and_size_change_the_actual_composite(self):
+        settings = {"enabled": True, "overlay_x": 0.5, "overlay_y": 0.25, "overlay_size": 0.25}
+        compositor = RiceCompositor(self.counter, lambda: settings)
+        for width, height in ((1920, 1080), (1280, 720), (320, 180)):
+            for cx, cy in ((0.5, 0.25), (0, 1), (1, 0)):
+                settings.update(overlay_x=cx, overlay_y=cy)
+                frame = np.full((height, width, 4), 80, np.uint8)
+                compositor.apply(frame)
+                x, y, w, h = layout_rect(settings, width, height)
+                changed = np.any(frame[..., :3] != 80, axis=2)
+                self.assertTrue(changed[y:y+h, x:x+w].any())
+                changed[y:y+h, x:x+w] = False
+                self.assertFalse(changed.any(), "白饭必须完全画在指定位置，不残留原位置像素")
+                self.assertEqual(h, round(height * 0.25))
+        self.assertEqual(self.counter.total, 0)
+
 
 class PlayerObserverTests(unittest.IsolatedAsyncioTestCase):
     async def test_player_reports_successful_ai_action_then_winning_state(self):
@@ -251,6 +268,29 @@ class PlayerObserverTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(observer.observe.call_count, 2)
         player.stop()
         observer.pause.assert_called_once()
+
+
+class RiceContextTests(unittest.TestCase):
+    def test_enabled_context_has_actual_count_position_progress_and_custom_rule(self):
+        text = ai_context({"enabled": True, "large_gift_yuan": 25}, {"total": 3, "gift_progress": 7})
+        for expected in ("左下角", '"当前显示碗数": 3', "7/10", "25元", "第三幕Boss", "试播不会增加碗数"):
+            self.assertIn(expected, text)
+        self.assertIn("不是游戏里的物品", text)
+
+    def test_moved_overlay_uses_current_position_and_zero_bowls_is_valid(self):
+        text = ai_context({"enabled": True, "overlay_x": 0.85, "overlay_y": 0.1},
+                          {"total": 0, "gift_progress": 0})
+        self.assertIn("右上角", text)
+        self.assertNotIn("左下角", text)
+        self.assertIn('"当前显示碗数": 0', text)
+
+    def test_disabled_or_failed_overlay_cannot_be_claimed_visible(self):
+        disabled = ai_context({"enabled": False}, {"total": 99})
+        self.assertIn("已关闭", disabled)
+        self.assertNotIn("99", disabled)
+        failed = ai_context({"enabled": True}, {"total": 99, "error": "fixture composition error"})
+        self.assertIn("暂时无法确认实际显示", failed)
+        self.assertNotIn("左下角", failed)
 
 
 class RiceRouteTests(unittest.IsolatedAsyncioTestCase):
@@ -286,6 +326,21 @@ class RiceRouteTests(unittest.IsolatedAsyncioTestCase):
         response = await self.client.post('/api/config', json={"rice_counter": {"total": 999}}, headers={"X-BVB": "1"})
         self.assertEqual(response.status, 400)
         self.assertEqual(self.app.rice.total, 0)
+
+    async def test_layout_is_saved_and_exposed_to_browser_source(self):
+        patch = {"overlay_x": 0.65, "overlay_y": 0.3, "overlay_size": 0.24}
+        with unittest.mock.patch('config.save') as save:
+            response = await self.client.post('/api/config', json={"rice_counter": patch}, headers={"X-BVB": "1"})
+        self.assertEqual(response.status, 200)
+        save.assert_called_once()
+        state = await (await self.client.get('/api/rice/state')).json()
+        self.assertEqual(state['layout'], {'x': 0.65, 'y': 0.3, 'size': 0.24})
+        self.assertEqual(self.app.rice.total, 0)
+        self.app.push.assert_called_with('rice', self.app.rice_state())
+        for field, value in (("overlay_x", -0.1), ("overlay_y", 1.1), ("overlay_size", 0),
+                             ("overlay_size", 0.7), ("overlay_size", None), ("overlay_x", True)):
+            response = await self.client.post('/api/config', json={"rice_counter": {field: value}}, headers={"X-BVB": "1"})
+            self.assertEqual(response.status, 400, (field, value))
 
     async def test_real_gift_packets_count_without_ai_or_voice_thanks(self):
         from bili import _Handler
@@ -346,6 +401,65 @@ class RiceRouteTests(unittest.IsolatedAsyncioTestCase):
             response = await self.client.post('/api/config', json={"rice_counter": {"large_gift_yuan": amount}}, headers={"X-BVB": "1"})
             self.assertEqual(response.status, 400)
         self.assertEqual(self.app.cfg["rice_counter"]["large_gift_yuan"], 10)
+
+    async def test_ai_test_reads_live_count_layout_and_toggle_without_resetting_model(self):
+        self.app.cfg["ai"]["backend"] = "openai"
+        self.app.cfg["rice_counter"]["enabled"] = True
+        self.app.brain = Brain(live_context=self.app.live_context)
+        self.app.brain.openai.ask = AsyncMock(return_value="这是直播间的大碗白饭计数。")
+        self.app.rice.award("first")
+        original_system = self.app.brain.system_prompt(self.app.cfg)
+        for expected in (1, 2):
+            if expected == 2:
+                self.app.rice.award("second")
+                self.app.cfg["rice_counter"].update(overlay_x=0.85, overlay_y=0.1)
+            response = await self.client.post('/api/ai/test', json={"prompt": "画面里的饭碗是什么？"}, headers={"X-BVB": "1"})
+            self.assertTrue((await response.json())["ok"])
+            cfg, system, prompt = self.app.brain.openai.ask.await_args.args
+            self.assertEqual(system, original_system)
+            self.assertIn(f'"当前显示碗数": {expected}', prompt)
+            self.assertIn("左下角" if expected == 1 else "右上角", prompt)
+        self.app.cfg["rice_counter"]["enabled"] = False
+        await self.app.brain.ai(self.app.cfg, "刚才那个饭碗还在吗？")
+        prompt = self.app.brain.openai.ask.await_args.args[2]
+        self.assertIn("素材已关闭", prompt)
+        self.assertNotIn("当前显示碗数", prompt)
+        self.assertEqual(self.app.rice.total, 2)
+
+    async def test_both_ai_backends_receive_rice_context_without_game(self):
+        self.app.cfg["rice_counter"]["enabled"] = True
+        self.app.brain = Brain(live_context=self.app.live_context)
+        for backend in ("openai", "qoder"):
+            self.app.cfg["ai"]["backend"] = backend
+            model = AsyncMock(return_value="左下角是大碗白饭，现在累计零碗。")
+            getattr(self.app.brain, backend).ask = model
+            text, _ = await self.app.brain.ai(self.app.cfg, "左下角那个是什么？")
+            self.assertIn("大碗白饭", text)
+            self.assertIn('"当前显示碗数": 0', model.await_args.args[2])
+            self.assertIsNone(self.app.dt)
+
+    async def test_real_danmaku_queue_and_game_decision_share_rice_facts(self):
+        from pipeline import Pipeline
+        self.app.cfg["ai"]["backend"] = "openai"
+        self.app.cfg["rice_counter"]["enabled"] = True
+        self.app.brain = Brain(live_context=self.app.live_context)
+        self.app.brain.openai.ask = AsyncMock(return_value="左下角是大碗白饭，现在累计一碗。")
+        self.app.rice.award("first")
+        self.app.songs = Mock(on_danmaku=Mock(return_value=False))
+        self.app.bili.owner_uid, self.app.bili.room_id, self.app.bili.connected = 999, 42, True
+        self.app.pipe = Pipeline(self.app, supporters=Mock())
+        self.app.on_event({"type": "danmaku", "uid": 123, "name": "小明", "text": "左下角的白饭是什么？"})
+        worker = asyncio.create_task(self.app.pipe._gen_worker())
+        try:
+            item = await asyncio.wait_for(self.app.pipe.synth_q.get(), 2)
+            self.assertIn("大碗白饭", item["text"])
+            self.assertIn('"当前显示碗数": 1', self.app.brain.openai.ask.await_args.args[2])
+            player = Player({}, Mock(), pipe=self.app.pipe)
+            self.assertIn('"当前显示碗数": 1', player._chat_context())
+            self.assertEqual((self.app.rice.total, self.app.rice.gift_progress), (1, 0))
+        finally:
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
 
 
 if __name__ == '__main__': unittest.main(verbosity=2)

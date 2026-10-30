@@ -12,6 +12,7 @@ class DailyBroadcastSchedule:
     WINDOW_TRIES = 10
     FAREWELL_TIMEOUT = 90
     FAREWELL_TAIL = 1.2
+    FAREWELL_LEAD_SECONDS = 30
     TIMER_SECONDS_PER_MINUTE = 60
     AUTO_CHECK_SECONDS = 15
 
@@ -27,6 +28,7 @@ class DailyBroadcastSchedule:
         self.closing = False
         self.last_result = None
         self.active_action = ""
+        self.daily_stop_task = None
         self.external_timer_task = None
         self.timer_deadline = None
         self.timer_room_id = 0
@@ -96,6 +98,8 @@ class DailyBroadcastSchedule:
             updated.update(window_title=window_title, audio_name=audio_name)
         if not data["enabled"] or mode == "stop_only":
             self.abort_start = True
+        if self._cancel_daily_farewell():
+            updated["last_stop"] = ""
         self.app.cfg["broadcast"].update(schedule=updated, title=title.strip(), area_id=area)
         config.save(self.app.cfg)
         self.last_minute = self.clock().strftime("%Y-%m-%d %H:%M")
@@ -124,6 +128,8 @@ class DailyBroadcastSchedule:
 
     def disable_for_account_change(self):
         self.cancel_external_timer()
+        if self._cancel_daily_farewell():
+            self.settings["last_stop"] = ""
         self.settings["enabled"] = False
         self.abort_start = True
         self.last_result = {"action": "disabled", "time": self.clock().strftime("%Y-%m-%d %H:%M"),
@@ -141,6 +147,22 @@ class DailyBroadcastSchedule:
         self.refresh_auto_timer()
         now = self.clock()
         minute = now.strftime("%Y-%m-%d %H:%M")
+        # tick 每五秒运行一次，不能只在分钟变化时检查，否则会错过提前告别。
+        if not self.closing and self.settings["enabled"]:
+            hour, stop_minute = map(int, self.settings["stop_time"].split(":"))
+            deadline = now.replace(hour=hour, minute=stop_minute, second=0, microsecond=0)
+            if deadline < now:
+                deadline += timedelta(days=1)
+            remaining = (deadline - now).total_seconds()
+            day = deadline.date().isoformat()
+            if 0 < remaining <= self.FAREWELL_LEAD_SECONDS and self.settings["last_stop"] != day:
+                self.settings["last_stop"] = day
+                config.save(self.app.cfg)
+                self.abort_start = self.stop_requested = True
+                job = asyncio.create_task(self.execute("stop", wait_seconds=remaining))
+                self.daily_stop_task = job
+                self.jobs.add(job)
+                job.add_done_callback(self.jobs.discard)
         if self.closing or minute == self.last_minute:
             return
         self.last_minute = minute
@@ -156,10 +178,12 @@ class DailyBroadcastSchedule:
             config.save(self.app.cfg)
             self.abort_start = self.stop_requested = action == "stop"
             job = asyncio.create_task(self.execute(action))
+            if action == "stop":
+                self.daily_stop_task = job
             self.jobs.add(job)
             job.add_done_callback(self.jobs.discard)
 
-    async def execute(self, action):
+    async def execute(self, action, *, wait_seconds=0):
         async with self.execution_lock:
             if self.closing or not self.settings["enabled"]:
                 return
@@ -169,8 +193,11 @@ class DailyBroadcastSchedule:
             try:
                 if action == "stop":
                     self.cancel_external_timer()
+                    self._cancel_local_timer()
                     result = await self._stop_broadcast(external=self.settings.get("mode") == "stop_only",
-                                                        room_id=self.settings.get("external_room_id", 0))
+                                                        room_id=self.settings.get("external_room_id", 0),
+                                                        farewell=self.farewell_line(), wait_seconds=wait_seconds,
+                                                        stop_on_farewell_error=True)
                 elif self.app.broadcast.running or self.app.broadcast.phase == "starting":
                     result = {"ok": True, "message": "已在直播，跳过重复开播"}
                 else:
@@ -228,20 +255,88 @@ class DailyBroadcastSchedule:
             self.app.cfg["room_id"] = result["room_id"]
             config.save(self.app.cfg)
             asyncio.create_task(self.app.connect())
+            self.arm_local_timer()
         return result
 
-    async def _stop_broadcast(self, *, external=False, room_id=0):
-        if self.app.broadcast.running or self.app.broadcast.phase in ("starting", "stopping"):
-            return await self.app.broadcast.stop()
-        if external:
-            return await self.app.broadcast.stop_external(room_id)
-        if self.app.cfg.get("bili_cookie"):
+    def farewell_line(self):
+        line = str(self.app.cfg["broadcast"].get("auto_stop_line") or "").strip()
+        return line or config.DEFAULTS["broadcast"]["auto_stop_line"]
+
+    def _cancel_daily_farewell(self):
+        task = self.daily_stop_task
+        if task and task is not asyncio.current_task() and not task.done() and self.active_action == "farewell":
+            task.cancel()
+            return True
+        return False
+
+    def _cancel_local_timer(self):
+        task = getattr(self.app, "auto_stop_task", None)
+        if task and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+
+    async def _say_farewell(self, farewell, stop_on_error):
+        self.active_action = "farewell"
+        self.app.push("notice", {"text": "正在告别，说完后自动下播"})
+        job = self.app.pipe.say_job_id(farewell, "", farewell=True)
+        error = ""
+        if job is None:
+            error = "告别语音未能加入队列，请重试手动下播"
+        else:
+            try:
+                async with asyncio.timeout(self.FAREWELL_TIMEOUT):
+                    while not self.app.pipe.spoken_done(job):
+                        await asyncio.sleep(0.1)
+            except TimeoutError:
+                error = "告别语音等待超时，直播尚未停止；可重试手动下播，或点击停止直播"
+            else:
+                await asyncio.sleep(self.FAREWELL_TAIL)
+        if error:
+            if not stop_on_error:
+                return {"ok": False, "error": error}
+            self.app.push("log", {"level": "warn", "msg": error + "；继续执行定时停播"})
+        return None
+
+    async def _stop_broadcast(self, *, external=False, room_id=0, farewell="", wait_seconds=0,
+                              stop_on_farewell_error=False):
+        deadline = asyncio.get_running_loop().time() + wait_seconds
+        local = self.app.broadcast.running or self.app.broadcast.phase in ("starting", "stopping")
+        live = self.app.broadcast.running
+        if not local and (external or self.app.cfg.get("bili_cookie")):
             info = await self.app.broadcast.account()
             if not info.get("ok") or not info.get("logged_in"):
                 return {"ok": False, "error": info.get("error") or "无法确认主播直播状态，请重新登录"}
-            if int(info.get("live_status") or 0) == 1 and info.get("room_id"):
-                return await self.app.broadcast.stop_external(int(info["room_id"]))
+            if external and int(info.get("room_id") or 0) != room_id:
+                return {"ok": False, "error": "主播账号或直播间已变化，请重新设置停播倒计时"}
+            room_id = int(info.get("room_id") or 0)
+            live = int(info.get("live_status") or 0) == 1 and bool(room_id)
+        if farewell and live:
+            error = await self._say_farewell(farewell, stop_on_farewell_error)
+            if error:
+                return error
+        # 提前告别，但保留原定停止时刻；合成较慢时优先让最后一句说完。
+        await asyncio.sleep(max(0, deadline - asyncio.get_running_loop().time()))
+        if local:
+            return await self.app.broadcast.stop()
+        if live or external:
+            return await self.app.broadcast.stop_external(room_id)
         return {"ok": True, "message": "当前未在直播，无需定时停播"}
+
+    def arm_local_timer(self):
+        self._cancel_local_timer()
+        minutes = self.app.cfg["broadcast"].get("auto_stop_minutes", 0)
+        self.app.auto_stop_task = (asyncio.create_task(self._local_stop_after(minutes * self.TIMER_SECONDS_PER_MINUTE))
+                                   if minutes > 0 else None)
+
+    async def _local_stop_after(self, seconds):
+        try:
+            lead = min(seconds, self.FAREWELL_LEAD_SECONDS * self.TIMER_SECONDS_PER_MINUTE / 60)
+            await asyncio.sleep(max(0, seconds - lead))
+            if self.app.broadcast.running:
+                await self.stop_now(farewell=self.farewell_line(), wait_seconds=lead, stop_on_farewell_error=True)
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            self.app.push("log", {"level": "warn", "msg": "自动停播失败，请检查直播状态"})
 
     def refresh_auto_timer(self):
         """保存时和后台定时检查都调用，不依赖网页、手动按钮或本工具推流。"""
@@ -258,6 +353,7 @@ class DailyBroadcastSchedule:
             self.auto_last_check = None
             self.auto_handled = None
         if not minutes:
+            self._cancel_local_timer()
             self.auto_message = "自动停播已关闭，设置分钟数即可启用"
             return
         if self.app.broadcast.running or self.app.broadcast.phase in ("starting", "stopping"):
@@ -360,9 +456,10 @@ class DailyBroadcastSchedule:
 
     async def _external_stop_after(self, seconds, room_id):
         try:
-            await asyncio.sleep(seconds)
-            line = str(self.app.cfg["broadcast"].get("auto_stop_line") or "").strip()
-            result = await self.stop_now(farewell=line, external=True, room_id=room_id, stop_on_farewell_error=True)
+            lead = min(seconds, self.FAREWELL_LEAD_SECONDS * self.TIMER_SECONDS_PER_MINUTE / 60)
+            await asyncio.sleep(max(0, seconds - lead))
+            result = await self.stop_now(farewell=self.farewell_line(), external=True, room_id=room_id,
+                                         wait_seconds=lead, stop_on_farewell_error=True)
             message = result.get("error") or result.get("message") or "B站直播间已自动结束"
             self.auto_message = message
             self.last_result = {"action": "stop", "time": self.clock().strftime("%Y-%m-%d %H:%M"),
@@ -381,8 +478,12 @@ class DailyBroadcastSchedule:
                 self.timer_room_id = 0
                 self.timer_automatic = False
 
-    async def stop_now(self, *, farewell="", external=False, room_id=0, stop_on_farewell_error=False):
+    async def stop_now(self, *, farewell="", external=False, room_id=0, stop_on_farewell_error=False,
+                       wait_seconds=0):
         self.cancel_external_timer()
+        self._cancel_local_timer()
+        if not farewell:
+            self._cancel_daily_farewell()
         self.abort_start = self.stop_requested = True
         now = self.clock()
         self.last_minute = now.strftime("%Y-%m-%d %H:%M")
@@ -391,40 +492,23 @@ class DailyBroadcastSchedule:
             config.save(self.app.cfg)
         async with self.execution_lock:
             try:
-                external_live = False
-                if external and not self.app.broadcast.running:
-                    info = await self.app.broadcast.account()
-                    if not info.get("ok") or not info.get("logged_in") or int(info.get("room_id") or 0) != room_id:
-                        return {"ok": False, "error": "主播账号或直播间已变化，请重新设置停播倒计时"}
-                    external_live = int(info.get("live_status") or 0) == 1
-                if farewell and (self.app.broadcast.running or external_live):
-                    self.active_action = "farewell"
-                    self.app.push("notice", {"text": "正在告别，说完后自动下播"})
-                    job = self.app.pipe.say_job_id(farewell, "")
-                    if job is None:
-                        if not stop_on_farewell_error:
-                            return {"ok": False, "error": "告别语音未能加入队列，请重试手动下播"}
-                        self.app.push("log", {"level": "warn", "msg": "告别语音未能入队，继续执行定时停播"})
-                    else:
-                        try:
-                            async with asyncio.timeout(self.FAREWELL_TIMEOUT):
-                                while not self.app.pipe.spoken_done(job):
-                                    await asyncio.sleep(0.1)
-                        except TimeoutError:
-                            if not stop_on_farewell_error:
-                                return {"ok": False, "error": "告别语音等待超时，直播尚未停止；可重试手动下播，或点击停止直播"}
-                            self.app.push("log", {"level": "warn", "msg": "告别语音超时，继续执行定时停播"})
-                        else:
-                            # 等声卡缓冲和直播采集收尾，避免最后几个字被截掉。
-                            await asyncio.sleep(self.FAREWELL_TAIL)
-                if external and not self.app.broadcast.running:
-                    return await self.app.broadcast.stop_external(room_id)
-                return await self.app.broadcast.stop()
+                if not farewell and not external:
+                    return await self.app.broadcast.stop()
+                return await self._stop_broadcast(farewell=farewell, external=external, room_id=room_id,
+                                                   wait_seconds=wait_seconds,
+                                                   stop_on_farewell_error=stop_on_farewell_error)
             finally:
                 self.active_action = ""
 
     async def close(self):
         self.closing = self.abort_start = self.stop_requested = True
+        if self._cancel_daily_farewell():
+            self.settings["last_stop"] = ""
+            config.save(self.app.cfg)
+        local_timer = getattr(self.app, "auto_stop_task", None)
+        if local_timer:
+            local_timer.cancel()
+            await asyncio.gather(local_timer, return_exceptions=True)
         if self.auto_check_task:
             self.auto_check_task.cancel()
             await asyncio.gather(self.auto_check_task, return_exceptions=True)

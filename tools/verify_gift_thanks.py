@@ -100,7 +100,7 @@ class GiftThanksTests(unittest.IsolatedAsyncioTestCase):
         self.brain.openai.ask.return_value = "谢谢你的支持！"
         text, source, _ = await self.reply(gift(), tiered_thanks=False, ai_prompt="感谢{name}")
         self.assertEqual((text, source), ("谢谢你的支持！", "AI"))
-        self.assertEqual(self.brain.openai.ask.await_args.args[2], "感谢小明")
+        self.assertEqual(self.brain.openai.ask.await_args.args[2].splitlines()[0], "感谢小明")
 
     def test_existing_configs_enable_feature_without_overwriting_custom_rules(self):
         cfg = merge(DEFAULTS, {"events": {"gift": {"templates": "原有文案"}}})

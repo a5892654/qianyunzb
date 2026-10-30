@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import math
 import os
 from pathlib import Path
 import threading
@@ -23,14 +24,61 @@ DEFAULT_LARGE_GIFT_YUAN = 10
 
 
 def validate_settings(settings):
-    if not isinstance(settings, dict) or set(settings) - {"enabled", "large_gift_yuan"} or ("enabled" in settings and type(settings["enabled"]) is not bool):
+    if not isinstance(settings, dict) or set(settings) - {"enabled", "large_gift_yuan", "overlay_size", "overlay_x", "overlay_y"} or ("enabled" in settings and type(settings["enabled"]) is not bool):
         raise ValueError("白饭计数开关无效")
+    for key, low, high in (("overlay_size", 0.04, 0.6), ("overlay_x", 0, 1), ("overlay_y", 0, 1)):
+        if key not in settings or (key != "overlay_size" and settings[key] is None):
+            continue
+        number = settings[key]
+        if type(number) not in (int, float) or not math.isfinite(number) or not low <= number <= high:
+            raise ValueError("白饭位置或大小超出范围，请重新调整")
     value = settings.get("large_gift_yuan", DEFAULT_LARGE_GIFT_YUAN)
     if type(value) not in (int, float):
         raise ValueError("大额礼物门槛需为至少 0.01 元的有效金额")
     amount = Decimal(str(value))
     if not amount.is_finite() or amount < Decimal("0.01"):
         raise ValueError("大额礼物门槛需为至少 0.01 元的有效金额")
+
+
+def layout_rect(settings, width, height):
+    """Return the visible rice widget rectangle in output pixels."""
+    target_h = min(max(1, round(height * settings.get("overlay_size", 0.16))),
+                   height, max(1, int(width * HEIGHT / WIDTH)))
+    target_w = min(width, max(1, round(WIDTH * target_h / HEIGHT)))
+    pad = max(0, min(round(height * 0.02), width - target_w, height - target_h))
+    cx, cy = settings.get("overlay_x"), settings.get("overlay_y")
+    x = pad if cx is None else round(width * cx - target_w / 2)
+    y = height - target_h - pad if cy is None else round(height * cy - target_h / 2)
+    return max(0, min(x, width - target_w)), max(0, min(y, height - target_h)), target_w, target_h
+
+
+def ai_context(settings, state):
+    """把直播叠加层的真实状态交给模型，避免只看游戏桥而不知道饭碗。"""
+    heading = "【当前直播画面素材，以本次状态为准】\n"
+    if not settings.get("enabled"):
+        return heading + "大碗白饭素材已关闭，当前没有展示；不要沿用历史中的位置和碗数。"
+    if state.get("error"):
+        return heading + "大碗白饭素材已开启，但画面合成异常，暂时无法确认实际显示。不要断言观众现在能看到它。"
+    x, y, width, height = layout_rect(settings, 1920, 1080)
+    cx, cy = (x + width / 2) / 1920, (y + height / 2) / 1080
+    column = 0 if cx < 0.4 else 2 if cx > 0.6 else 1
+    row = 0 if cy < 0.4 else 2 if cy > 0.6 else 1
+    position = (("左上角", "正上方", "右上角"), ("左侧中部", "画面中间", "右侧中部"),
+                ("左下角", "正下方", "右下角"))[row][column]
+    total, progress = state.get("total"), state.get("gift_progress")
+    facts = {"素材名称": "大碗白饭", "显示状态": "已开启", "画面位置": position,
+             "外观": "像素风饭碗和累计碗数，是直播间叠加素材，不是游戏里的物品或真实吃饭量",
+             "当前显示碗数": total if type(total) is int and total >= 0 else "暂未读取",
+             "普通送礼进度": f"{progress}/{GIFT_SENDS_PER_BOWL}" if type(progress) is int else "暂未读取",
+             "加碗规则": (f"普通真实送礼累计{GIFT_SENDS_PER_BOWL}次加1碗，一次送多件仍算一次；"
+                          f"单次付费送礼总额达到{settings.get('large_gift_yuan', DEFAULT_LARGE_GIFT_YUAN)}元时单独加1碗；"
+                          "免费礼物也累计普通进度；大额礼物不重复计入普通进度并保留已有进度；"
+                          "AI击败第三幕Boss也加1碗"),
+             "动画": "加碗或试播时会播放庆祝动画，试播不会增加碗数"}
+    return (heading + json.dumps(facts, ensure_ascii=False)
+            + "\n观众问到饭、碗数或‘画面角落那个是什么’时，结合上述事实自然回答，"
+            "可以直接指出饭碗的位置。其他话题不用主动介绍白饭，不要强行求礼物；"
+            "不要编造是谁送的、刚才为何加碗，也不要把素材说成游戏本体。")
 
 
 class RiceCounter:
@@ -172,8 +220,7 @@ class RiceCompositor:
             return
         state = self.counter.state(True)
         height, width = frame.shape[:2]
-        target_h = max(48, round(height * 0.16))
-        target_h = min(target_h, height, max(1, int(width * HEIGHT / WIDTH)))
+        x, y, _, target_h = layout_rect(settings, width, height)
         cache_key = state["total"], target_h
         if self._cache_key != cache_key:
             self._render_tiles(*cache_key)
@@ -182,9 +229,6 @@ class RiceCompositor:
         animated = 0 <= age < ANIMATION_SECONDS
         index = int(age * 12) % 8 if animated else 0
         layer = self._tiles[index]
-        lh, lw = layer.shape[:2]
-        pad = max(0, min(round(height * 0.02), width - lw, height - lh))
-        x, y = pad, height - lh - pad
         self._blend(frame, layer, x, y)
         if animated:
             self._blend(frame, self._plus, x, y)

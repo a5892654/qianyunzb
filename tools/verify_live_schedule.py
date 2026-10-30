@@ -44,13 +44,17 @@ def make(iso="2026-10-01 07:00", **st):
     br.stop_preview = AsyncMock(return_value={"ok": True})
     br.start, br.stop = AsyncMock(return_value={"ok": True, "room_id": 42}), AsyncMock(return_value={"ok": True})
     br.account = AsyncMock(return_value={"ok": True, "logged_in": True, "room_id": 42, "live_status": 0})
-    app = types.SimpleNamespace(broadcast=br, pushes=[], connect=AsyncMock(),
+    app = types.SimpleNamespace(broadcast=br, pipe=Mock(say_job_id=Mock(return_value=1),
+                                                      spoken_done=Mock(return_value=True)),
+                                pushes=[], connect=AsyncMock(),
                                 ensure_game_and_dt=AsyncMock(return_value={"ok": True}),
                                 cfg={"bili_cookie": "FAKE-SESSDATA", "room_id": 0, "audio": {},
                                      "broadcast": {"title": "千音", "area_id": 591, "schedule": sch}})
     app.push = lambda k, d: app.pushes.append((k, dict(d)))
     now = [dt(iso)]
-    return DailyBroadcastSchedule(app, clock=lambda: now[0]), app, now
+    schedule = DailyBroadcastSchedule(app, clock=lambda: now[0])
+    schedule.FAREWELL_TAIL = 0
+    return schedule, app, now
 
 async def drain(s):
     while s.jobs:
@@ -371,12 +375,24 @@ async def s20_auto_start_game_and_dt():
     req(a6.broadcast.sources.await_count == 1, "游戏没启动却重试等了窗口")
 
 
+async def s21_scheduled_start_arms_duration_and_farewell():
+    s, a, now = make("2026-10-01 08:00", enabled=True)
+    a.cfg["broadcast"]["auto_stop_minutes"] = 1
+    s.TIMER_SECONDS_PER_MINUTE = 0.04
+    result = await s.start_broadcast()
+    req(result["ok"] and a.auto_stop_task is not None, "定时开播没有启用时长倒计时")
+    a.broadcast.running = True
+    await asyncio.wait_for(a.auto_stop_task, 1)
+    req(a.broadcast.stop.await_count == 1 and a.pipe.say_job_id.call_count == 1,
+        "定时开播的时长倒计时必须先告别再停播")
+
+
 SUITES = [s01_disabled, s02_day_start_stop, s03_cross_midnight, s04_minute_and_rollback, s05_restart_ledger,
           s06_init_save_minute_and_missed, s07_skip_and_stop_noop, s08_sources_bad, s09_resolve_new_ids,
           s10_fail_once, s11_save_rejects, s12_save_enabled_ok, s13_disable_keeps_live,
           s14_stop_now_during_slow_preview, s15_abort_after_start_ok, s16_close_cancels_pending,
           s17_sleep_past_stop_cancels_start, s18_begin_overrun_stops_once, s19_account_change_disables_plan,
-          s20_auto_start_game_and_dt]
+          s20_auto_start_game_and_dt, s21_scheduled_start_arms_duration_and_farewell]
 
 async def amain():
     t0 = time.time()

@@ -136,6 +136,8 @@ class ExternalScheduleTests(ExternalScheduleTestCase):
         self.schedule.tick()
         await self.drain()
         self.app.broadcast.stop_external.assert_awaited_once_with(42)
+        self.app.pipe.say_job_id.assert_called_once_with(
+            config.DEFAULTS["broadcast"]["auto_stop_line"], "", farewell=True)
         self.app.broadcast.stop.assert_not_awaited()
         self.assertTrue(self.schedule.last_result["ok"])
         self.schedule.tick()
@@ -166,6 +168,50 @@ class ExternalScheduleTests(ExternalScheduleTestCase):
         self.app.pipe.say_job_id.assert_called_once()
         self.assertFalse(self.schedule.status()["external_timer"]["enabled"])
         self.assertTrue(self.schedule.last_result["ok"])
+
+    async def test_daily_stop_begins_farewell_early_without_stopping_early_or_repeating(self):
+        await self.enable_stop_only()
+        self.schedule.FAREWELL_LEAD_SECONDS = 0.3
+        self.now[0] = datetime(2026, 10, 30, 22, 59, 59, 800000)
+        self.schedule.tick()
+        async with asyncio.timeout(2):
+            while not self.app.pipe.say_job_id.called:
+                await asyncio.sleep(0.005)
+        self.app.broadcast.stop_external.assert_not_awaited()
+        self.schedule.tick()
+        await self.drain()
+        self.now[0] = datetime(2026, 10, 30, 23, 0)
+        self.schedule.tick()
+        await self.drain()
+        self.app.pipe.say_job_id.assert_called_once()
+        self.app.broadcast.stop_external.assert_awaited_once_with(42)
+
+    async def test_external_countdown_begins_farewell_before_stop_deadline(self):
+        self.schedule.TIMER_SECONDS_PER_MINUTE = 0.3
+        await self.schedule.arm_external_timer(1)
+        timer = self.schedule.external_timer_task
+        async with asyncio.timeout(2):
+            while not self.app.pipe.say_job_id.called:
+                await asyncio.sleep(0.005)
+        self.app.broadcast.stop_external.assert_not_awaited()
+        await asyncio.wait_for(timer, 2)
+        self.app.broadcast.stop_external.assert_awaited_once_with(42)
+
+    async def test_disabling_daily_plan_during_early_farewell_cancels_stop(self):
+        await self.enable_stop_only()
+        self.schedule.FAREWELL_LEAD_SECONDS = 0.3
+        self.now[0] = datetime(2026, 10, 30, 22, 59, 59, 800000)
+        self.schedule.tick()
+        timer = self.schedule.daily_stop_task
+        async with asyncio.timeout(2):
+            while not self.app.pipe.say_job_id.called:
+                await asyncio.sleep(0.005)
+        await self.schedule.save({"enabled": False, "mode": "stop_only", "stop_time": "23:00"})
+        await asyncio.gather(timer, return_exceptions=True)
+        self.assertTrue(timer.cancelled())
+        self.app.broadcast.stop_external.assert_not_awaited()
+        self.assertEqual(self.schedule.settings["last_stop"], "")
+        self.assertEqual(self.schedule.active_action, "")
 
     async def test_cancel_and_account_change_cancel_timer_without_stopping(self):
         for cancel in (self.schedule.cancel_external_timer, self.schedule.disable_for_account_change):
