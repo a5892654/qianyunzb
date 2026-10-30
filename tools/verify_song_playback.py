@@ -164,7 +164,8 @@ class SelectionRouteTests(unittest.IsolatedAsyncioTestCase):
         self.app.player.stop_music.assert_called_once()
 
     async def test_failures_never_enqueue_or_report_success(self):
-        for body in ({"ids": []}, {"ids": [True]}, {"ids": [-1]}, {"ids": [1] * 101}, {"ids": [1], "mode": "invalid"}):
+        for body in ({"ids": []}, {"ids": [True]}, {"ids": [-1]}, {"ids": [1] * 101},
+                     {"ids": [1], "mode": "invalid"}, {"ids": [1], "source": "invalid"}):
             self.assertFalse((await self.post("add", body))["ok"])
         self.assertFalse((await self.post("add", {"ids": [2]}))["ok"])
         self.assertFalse(self.app.songs.queue)
@@ -185,6 +186,24 @@ class SelectionRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((await self.post("playlist", {"id": "456", "offset": 200}))["ok"])
         self.ne.playlist.assert_awaited_with("456", 200)
         self.assertFalse((await self.post("playlist", {"id": "456", "offset": "bad"}))["ok"])
+
+    async def test_batch_autoplay_keeps_viewer_requests_first_and_never_announces(self):
+        self.app.songs.add(song(9), "观众", "viewer")
+        self.app.pipe.say.reset_mock()
+        result = await self.post("add", {"ids": [3, 2, 1], "mode": "play", "source": "autoplay"})
+        self.assertTrue(result["ok"])
+        self.assertEqual((result["added"], result["skipped"]), (2, 1))
+        self.assertEqual([s["id"] for s in self.app.songs.queue], [9, 3, 1])
+        self.assertEqual([s["source"] for s in self.app.songs.queue], ["request", "autoplay", "autoplay"])
+        self.app.pipe.say.assert_not_called()
+        self.app.player.stop_music.assert_not_called()
+
+    async def test_single_manual_song_is_inserted_before_autoplay(self):
+        self.app.songs.enqueue_selected([song(9), song(10)], source="autoplay")
+        result = await self.post("add", {"ids": [1]})
+        self.assertTrue(result["ok"])
+        self.assertEqual([s["id"] for s in self.app.songs.queue], [1, 9, 10])
+        self.assertEqual(self.app.songs.queue[0]["source"], "request")
 
 
 class PlaybackSwitchTests(unittest.IsolatedAsyncioTestCase):
@@ -249,6 +268,85 @@ class PlaybackSwitchTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self.manager.state()["current"])
         self.assertIn("不能完整播放", self.manager.state()["error"])
         self.app.player.play_music.assert_not_called()
+
+    async def test_autoplay_tracks_remain_silent_across_automatic_song_changes(self):
+        self.manager.enqueue_selected([song(1), song(3)], source="autoplay", play_now=True)
+        await self.wait_until(lambda: self.app.player.play_music.call_count == 1)
+        self.app.pipe.say.assert_not_called()
+        self.app.player.play_music.call_args.args[-1]()
+        await self.wait_until(lambda: self.app.player.play_music.call_count == 2)
+        self.assertEqual(self.manager.current["id"], 3)
+        self.app.pipe.say.assert_not_called()
+
+    async def test_viewer_requests_interrupt_background_in_fifo_then_return_to_silent_playlist(self):
+        self.manager.enqueue_selected([song(1), song(3)], source="autoplay", play_now=True)
+        await self.wait_until(lambda: self.app.player.play_music.call_count == 1)
+        self.manager.ne.find = AsyncMock(return_value=song(9))
+        self.manager.on_danmaku({"uid": 123, "name": "观众甲", "text": "点歌+歌曲9"})
+        await self.wait_until(lambda: self.manager.current and self.manager.current["id"] == 9 and not self.manager.current["loading"])
+        self.assertEqual([s["id"] for s in self.manager.queue], [1, 3])
+        self.manager.ne.find.return_value = song(11)
+        self.manager.on_danmaku({"uid": 456, "name": "观众乙", "text": "点歌+歌曲11"})
+        await self.wait_until(lambda: not self.manager.pending_requests)
+        self.assertEqual([s["id"] for s in self.manager.queue], [11, 1, 3])
+        self.assertEqual(self.manager.current["id"], 9)
+        self.app.player.play_music.call_args.args[-1]()
+        await self.wait_until(lambda: self.manager.current and self.manager.current["id"] == 11 and not self.manager.current["loading"])
+        self.app.player.play_music.call_args.args[-1]()
+        await self.wait_until(lambda: self.manager.current and self.manager.current["id"] == 1 and not self.manager.current["loading"])
+        speeches = [call.args[0] for call in self.app.pipe.say.call_args_list]
+        self.assertEqual(len(speeches), 4, speeches)
+        self.assertTrue(all("歌曲9" in text or "歌曲11" in text for text in speeches))
+        self.assertEqual([s["id"] for s in self.manager.queue], [3])
+
+    async def test_background_selection_does_not_interrupt_current_requested_song(self):
+        self.manager.enqueue_selected([song(9)], play_now=True)
+        await self.wait_until(lambda: self.app.player.play_music.call_count == 1)
+        self.app.player.stop_music.reset_mock()
+        self.app.pipe.say.reset_mock()
+        self.manager.enqueue_selected([song(1), song(3)], source="autoplay", play_now=True)
+        self.assertEqual(self.manager.current["id"], 9)
+        self.app.player.stop_music.assert_not_called()
+        self.app.pipe.say.assert_not_called()
+        self.app.player.play_music.call_args.args[-1]()
+        await self.wait_until(lambda: self.app.player.play_music.call_count == 2)
+        self.assertEqual(self.manager.current["id"], 1)
+        self.app.pipe.say.assert_not_called()
+
+    async def test_request_during_background_loading_cancels_download_and_preserves_song(self):
+        started, cancelled = asyncio.Event(), asyncio.Event()
+
+        async def download(url):
+            if url == "url-1":
+                started.set()
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cancelled.set()
+            return url.encode()
+
+        self.manager.ne.download.side_effect = download
+        self.manager.enqueue_selected([song(1), song(3)], source="autoplay")
+        await asyncio.wait_for(started.wait(), 3)
+        self.manager.add(song(9), "观众甲", "123")
+        self.manager.add(song(11), "观众乙", "456")
+        await self.wait_until(lambda: self.app.player.play_music.call_count == 1)
+        self.assertTrue(cancelled.is_set())
+        self.assertEqual(self.manager.current["id"], 9)
+        self.assertEqual([s["id"] for s in self.manager.queue], [11, 1, 3])
+
+    async def test_request_does_not_resume_manually_paused_background(self):
+        self.manager.enqueue_selected([song(1), song(3)], source="autoplay")
+        await self.wait_until(lambda: self.app.player.play_music.call_count == 1)
+        self.manager.control("pause")
+        self.manager.add(song(9), "观众甲", "123")
+        await self.wait_until(lambda: self.manager.current is None)
+        self.assertTrue(self.manager.paused)
+        self.assertEqual([s["id"] for s in self.manager.queue], [9, 1, 3])
+        self.assertEqual(self.app.player.play_music.call_count, 1)
+        self.manager.control("resume")
+        await self.wait_until(lambda: self.app.player.play_music.call_count == 2)
+        self.assertEqual(self.manager.current["id"], 9)
 
 
 if __name__ == "__main__":

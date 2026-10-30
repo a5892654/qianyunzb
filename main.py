@@ -1012,11 +1012,14 @@ def build_web(app: App):
             mode = d.get("mode", "queue")
             if mode not in ("queue", "play"):
                 raise ValueError("无效的播放方式")
+            source = d.get("source", "request")
+            if source not in ("request", "autoplay"):
+                raise ValueError("无效的歌曲来源")
             ids = list(dict.fromkeys(int(i) for i in ids))
             songs = {s["id"]: s for s in await app.songs.ne.details(ids)}
             urls = await app.songs.ne.urls(ids)
             selected = [songs[i] for i in ids if i in songs and urls.get(i)]
-            app.songs.enqueue_selected(selected, d.get("by") or "主播", play_now=mode == "play")
+            app.songs.enqueue_selected(selected, d.get("by") or "主播", play_now=mode == "play", source=source)
             return ok(added=len(selected), skipped=len(ids) - len(selected), paused=app.songs.paused)
         except Exception as e:
             return web.json_response({"ok": False, "error": str(e) or "加入歌曲失败，请重试"})

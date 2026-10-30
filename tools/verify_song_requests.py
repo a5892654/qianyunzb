@@ -100,6 +100,39 @@ class SongRequestTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(kind == "event" and data.get("tname") == "点歌" for kind, data in self.app.pushes))
         self.assertTrue(all(job["type"] == "manual" for job in self.app.pipe.jobs))
 
+    async def test_autoplay_does_not_fill_request_limit_and_requests_stay_before_it(self):
+        self.app.cfg["songs"].update(max_queue=2, max_per_user=1)
+        self.songs.enqueue_selected([dict(self.song, id=i) for i in range(100, 150)], source="autoplay")
+        for uid in (123, 123, 456, 789):
+            self.request("点歌+晴天", uid)
+        await self.settle()
+        self.assertEqual(self.songs.ne.find.await_count, 2)
+        self.assertEqual([s["key"] for s in self.songs.queue[:2]], ["123", "456"])
+        self.assertTrue(all(s["source"] == "autoplay" for s in self.songs.queue[2:]))
+        self.assertEqual(len(self.songs.queue), 52)
+        self.assertEqual(self.songs.credits["123"]["song"], 0)
+
+    async def test_request_fifo_pin_credits_and_positions_ignore_background(self):
+        self.songs.enqueue_selected([dict(self.song, id=100)], source="autoplay")
+        self.songs._rec("456", "观众乙")["pin"] = 1
+        self.request("点歌+晴天", 123)
+        await self.settle()
+        self.assertIn("排在第1首", self.app.pipe.say.call_args.args[0])
+        self.request("点歌+晴天", 456)
+        await self.settle()
+        self.request("点歌+晴天", 789)
+        await self.settle()
+        self.assertEqual([s["key"] for s in self.songs.queue], ["456", "123", "789", "__autoplay__"])
+        self.assertTrue(self.songs.queue[0]["pinned"])
+        self.assertEqual(self.songs.credits["456"]["pin"], 0)
+        self.assertIn("排在第3首", self.app.pipe.say.call_args.args[0])
+        background = self.songs.queue[-1]
+        for action in ("pin", "unpin", "up"):
+            self.songs.control(action, background["qid"])
+        self.songs.control("down", self.songs.queue[-2]["qid"])
+        self.assertEqual(self.songs.queue[-1]["key"], "__autoplay__")
+        self.assertFalse(background["pinned"])
+
     def test_disabled_and_ordinary_chat_do_not_search(self):
         self.assertFalse(self.request("你好主播"))
         self.app.cfg["songs"]["enabled"] = False
