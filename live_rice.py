@@ -8,6 +8,7 @@ from pathlib import Path
 import threading
 import time
 import uuid
+from decimal import Decimal, InvalidOperation
 
 import cv2
 import numpy as np
@@ -17,6 +18,19 @@ import config
 
 ANIMATION_SECONDS = 2.4
 WIDTH, HEIGHT = 360, 168
+GIFT_SENDS_PER_BOWL = 10
+DEFAULT_LARGE_GIFT_YUAN = 10
+
+
+def validate_settings(settings):
+    if not isinstance(settings, dict) or set(settings) - {"enabled", "large_gift_yuan"} or ("enabled" in settings and type(settings["enabled"]) is not bool):
+        raise ValueError("白饭计数开关无效")
+    value = settings.get("large_gift_yuan", DEFAULT_LARGE_GIFT_YUAN)
+    if type(value) not in (int, float):
+        raise ValueError("大额礼物门槛需为至少 0.01 元的有效金额")
+    amount = Decimal(str(value))
+    if not amount.is_finite() or amount < Decimal("0.01"):
+        raise ValueError("大额礼物门槛需为至少 0.01 元的有效金额")
 
 
 class RiceCounter:
@@ -24,6 +38,7 @@ class RiceCounter:
         self.path = Path(path or os.path.join(config.BASE_DIR, "rice_counter.json"))
         self.lock = threading.RLock()
         self.total = 0
+        self.gift_progress = 0
         self.seen = set()
         self.session = uuid.uuid4().hex
         self.event_id = ""
@@ -31,13 +46,16 @@ class RiceCounter:
         if self.path.exists():
             data = json.loads(self.path.read_text(encoding="utf-8"))
             self.total = max(0, int(data.get("total", 0)))
+            self.gift_progress = max(0, int(data.get("gift_progress", 0))) % GIFT_SENDS_PER_BOWL
             self.seen = set(data.get("seen", []))
             self.session = str(data.get("session") or self.session)
 
-    def _save(self, total, seen, session):
+    def _save(self, total, seen, session, gift_progress=None):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps({"total": total, "seen": sorted(seen), "session": session}, ensure_ascii=False), encoding="utf-8")
+        progress = self.gift_progress if gift_progress is None else gift_progress
+        tmp.write_text(json.dumps({"total": total, "seen": sorted(seen), "session": session,
+                                   "gift_progress": progress}, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, self.path)
 
     def begin_run(self):
@@ -57,8 +75,8 @@ class RiceCounter:
             self.preview()
             return True
 
-    def record_gift(self, event, room_id=None):
-        """每条真实送礼消息记一碗，不依赖礼物数量、金额或感谢开关。"""
+    def record_gift(self, event, room_id=None, large_gift_yuan=DEFAULT_LARGE_GIFT_YUAN):
+        """普通送礼十次加一碗，大额单独加一碗并保留普通进度。"""
         if event.get("type") != "gift" or event.get("test"):
             return False
         quantity = event.get("num")
@@ -76,7 +94,25 @@ class RiceCounter:
             identity = ("event", event.setdefault("_rice_gift_id", uuid.uuid4().hex))
         payload = [str(event.get("room_id") or room_id or ""), str(event.get("uid") or ""), *identity]
         key = hashlib.sha256(("gift:" + json.dumps(payload, ensure_ascii=False)).encode()).hexdigest()
-        return self.award(key)
+        validate_settings({"large_gift_yuan": large_gift_yuan})
+        try:
+            amount = Decimal(str(event.get("value", 0)))
+        except InvalidOperation:
+            amount = Decimal(0)
+        large = event.get("paid") is True and amount.is_finite() and amount >= Decimal(str(large_gift_yuan))
+        with self.lock:
+            if key in self.seen:
+                return False
+            progress = self.gift_progress if large else (self.gift_progress + 1) % GIFT_SENDS_PER_BOWL
+            gained = large or progress == 0
+            seen = self.seen | {key}
+            self._save(self.total + int(gained), seen, self.session, progress)
+            self.total += int(gained)
+            self.gift_progress = progress
+            self.seen = seen
+            if gained:
+                self.preview()
+            return gained
 
     def preview(self):
         """试播动画不计入真实战绩，也不写入累计文件。"""
@@ -87,7 +123,7 @@ class RiceCounter:
     def state(self, enabled=False):
         with self.lock:
             return {"enabled": bool(enabled), "total": self.total, "event_id": self.event_id,
-                    "celebrated_at": self.celebrated_at}
+                    "celebrated_at": self.celebrated_at, "gift_progress": self.gift_progress}
 
 
 class RiceCompositor:

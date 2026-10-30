@@ -1,6 +1,7 @@
 """离线验证直播白饭计数、AI胜利识别与采集合成；不运行或修改游戏。"""
 import asyncio
 import copy
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -129,26 +130,29 @@ class RiceTests(unittest.TestCase):
         self.assertNotIn("once", self.counter.seen)
 
     def test_real_gifts_count_per_send_and_dedupe_after_restart(self):
-        self.assertTrue(self.counter.record_gift(gift(num=10)))
         self.assertFalse(self.counter.record_gift(gift(num=10)))
-        self.assertTrue(self.counter.record_gift(gift(paid=False, gift_tid="free1")))
-        self.assertEqual(self.counter.total, 2)
+        self.assertFalse(self.counter.record_gift(gift(num=10)))
+        self.assertFalse(self.counter.record_gift(gift(paid=False, gift_tid="free1")))
+        self.assertEqual((self.counter.total, self.counter.gift_progress), (0, 2))
         restarted = RiceCounter(self.path)
         self.assertFalse(restarted.record_gift(gift(num=10)))
-        self.assertEqual(restarted.total, 2)
+        self.assertEqual((restarted.total, restarted.gift_progress), (0, 2))
+        for i in range(8):
+            self.assertEqual(restarted.record_gift(gift(gift_tid=f"small{i}")), i == 7)
+        self.assertEqual((restarted.total, restarted.gift_progress), (1, 0))
 
     def test_gift_random_id_and_room_identity_are_respected(self):
-        self.assertTrue(self.counter.record_gift(gift(gift_tid="", gift_rnd="random1")))
         self.assertFalse(self.counter.record_gift(gift(gift_tid="", gift_rnd="random1")))
-        self.assertTrue(self.counter.record_gift(gift(gift_tid="", gift_rnd="random1", room_id=84)))
-        self.assertEqual(self.counter.total, 2)
+        self.assertFalse(self.counter.record_gift(gift(gift_tid="", gift_rnd="random1")))
+        self.assertFalse(self.counter.record_gift(gift(gift_tid="", gift_rnd="random1", room_id=84)))
+        self.assertEqual((self.counter.total, self.counter.gift_progress), (0, 2))
 
     def test_gifts_without_transaction_id_do_not_swallow_distinct_sends(self):
         first = gift(gift_tid="")
-        self.assertTrue(self.counter.record_gift(first))
         self.assertFalse(self.counter.record_gift(first))
-        self.assertTrue(self.counter.record_gift(gift(gift_tid="")))
-        self.assertEqual(self.counter.total, 2)
+        self.assertFalse(self.counter.record_gift(first))
+        self.assertFalse(self.counter.record_gift(gift(gift_tid="")))
+        self.assertEqual((self.counter.total, self.counter.gift_progress), (0, 2))
 
     def test_simulated_empty_and_non_gift_events_do_not_count(self):
         for event in [gift(test=True), gift(type="danmaku"), *(gift(num=n) for n in (0, -1, None, "bad", True))]:
@@ -156,13 +160,57 @@ class RiceTests(unittest.TestCase):
         self.assertEqual(self.counter.total, 0)
 
     def test_gifts_and_bosses_share_total_and_celebration(self):
-        self.counter.record_gift(gift())
+        self.counter.record_gift(gift(value=10))
         event_id = self.counter.event_id
         self.arm()
         self.tracker.observe(self.won())
         self.assertEqual(self.counter.total, 2)
         self.assertNotEqual(self.counter.event_id, event_id)
         self.assertEqual(RiceCounter(self.path).total, 2)
+
+    def test_ten_gift_events_award_once_and_keep_remainder(self):
+        for i in range(23):
+            gained = self.counter.record_gift(gift(num=100, gift_tid=f"gift{i}"))
+            self.assertEqual(gained, (i + 1) % 10 == 0)
+        self.assertEqual((self.counter.total, self.counter.gift_progress), (2, 3))
+        restarted = RiceCounter(self.path)
+        self.assertEqual((restarted.total, restarted.gift_progress), (2, 3))
+
+    def test_large_gifts_award_once_and_preserve_ordinary_progress(self):
+        self.assertFalse(self.counter.record_gift(gift(value=9.99, gift_tid="under")))
+        self.assertTrue(self.counter.record_gift(gift(value=10, gift_tid="at")))
+        self.assertEqual((self.counter.total, self.counter.gift_progress), (1, 1))
+        self.assertTrue(self.counter.record_gift(gift(value=100, gift_tid="over")))
+        self.assertFalse(self.counter.record_gift(gift(value=100, gift_tid="over")))
+        self.assertFalse(self.counter.record_gift(gift(value=999, paid=False, gift_tid="free")))
+        self.assertEqual((self.counter.total, self.counter.gift_progress), (2, 2))
+
+    def test_large_gift_at_nine_does_not_double_award_or_reset_progress(self):
+        for i in range(9): self.counter.record_gift(gift(gift_tid=f"small{i}"))
+        self.assertEqual(self.counter.event_id, "")
+        self.assertTrue(self.counter.record_gift(gift(value=10, gift_tid="large")))
+        self.assertEqual((self.counter.total, self.counter.gift_progress), (1, 9))
+        self.assertTrue(self.counter.record_gift(gift(gift_tid="tenth")))
+        self.assertEqual((self.counter.total, self.counter.gift_progress), (2, 0))
+
+    def test_progress_save_failure_is_atomic_and_can_retry(self):
+        for i in range(9): self.counter.record_gift(gift(gift_tid=f"small{i}"))
+        with patch("live_rice.os.replace", side_effect=OSError("fixture")):
+            with self.assertRaises(OSError): self.counter.record_gift(gift(gift_tid="tenth"))
+        self.assertEqual((self.counter.total, self.counter.gift_progress), (0, 9))
+        self.assertTrue(self.counter.record_gift(gift(gift_tid="tenth")))
+        self.assertEqual((self.counter.total, self.counter.gift_progress), (1, 0))
+
+    def test_legacy_count_migrates_and_bosses_and_runs_preserve_gift_progress(self):
+        self.path.write_text(json.dumps({"total": 12, "seen": ["old"], "session": "legacy"}), encoding="utf-8")
+        self.counter = RiceCounter(self.path)
+        self.assertEqual((self.counter.total, self.counter.gift_progress), (12, 0))
+        self.counter.record_gift(gift())
+        self.counter.award("boss")
+        self.counter.begin_run()
+        restarted = RiceCounter(self.path)
+        self.assertEqual((restarted.total, restarted.gift_progress), (13, 1))
+        self.assertIn("old", restarted.seen)
 
     def test_native_overlay_is_bottom_left_and_independent_of_live2d(self):
         self.counter.preview()
@@ -258,6 +306,12 @@ class RiceRouteTests(unittest.IsolatedAsyncioTestCase):
         handler._on_gift(client, paid)
         handler._on_gift(client, GiftMessage(uid=123, uname="小明", gift_name="小心心", num=1,
                                             coin_type="silver", tid="free1"))
+        self.assertEqual((self.app.rice.total, self.app.rice.gift_progress), (0, 2))
+        for i in range(8):
+            handler._on_gift(client, GiftMessage(uid=123, uname="小明", gift_name="小心心", num=1,
+                                                coin_type="silver", tid=f"free_more{i}"))
+        handler._on_gift(client, GiftMessage(uid=123, uname="小明", gift_name="大礼物", num=1,
+                                            coin_type="gold", total_coin=10000, tid="large1"))
         self.assertEqual(self.app.rice.total, 2)
         self.assertFalse(self.app.pipe.jobs)
         self.assertIsNone(self.app.dt)
@@ -273,7 +327,25 @@ class RiceRouteTests(unittest.IsolatedAsyncioTestCase):
         with patch('live_rice.os.replace', side_effect=OSError("fixture")):
             self.app.on_event(gift())
         self.assertEqual(self.app.pipe.on_event.call_count, 3)
-        self.assertEqual(self.app.rice.total, 0)
+        self.assertEqual((self.app.rice.total, self.app.rice.gift_progress), (0, 0))
+
+    async def test_large_gift_threshold_can_be_configured(self):
+        self.app.pipe = Mock()
+        with patch('config.save'):
+            response = await self.client.post('/api/config', json={"rice_counter": {"enabled": True, "large_gift_yuan": 30}}, headers={"X-BVB": "1"})
+        self.assertTrue((await response.json())["ok"])
+        self.app.on_event(gift(value=10, gift_tid="small"))
+        self.assertEqual((self.app.rice.total, self.app.rice.gift_progress), (0, 1))
+        self.app.on_event(gift(value=30, gift_tid="large"))
+        self.assertEqual((self.app.rice.total, self.app.rice.gift_progress), (1, 1))
+        state = await (await self.client.get('/api/rice/state')).json()
+        self.assertEqual(state["gift_progress"], 1)
+
+    async def test_invalid_large_gift_threshold_is_rejected(self):
+        for amount in (True, "10", 0, -1, float("nan"), float("inf")):
+            response = await self.client.post('/api/config', json={"rice_counter": {"large_gift_yuan": amount}}, headers={"X-BVB": "1"})
+            self.assertEqual(response.status, 400)
+        self.assertEqual(self.app.cfg["rice_counter"]["large_gift_yuan"], 10)
 
 
 if __name__ == '__main__': unittest.main(verbosity=2)

@@ -240,8 +240,9 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
   <div class="card">
     <h3>大碗白饭 · 干饭计数</h3>
     <div class="row"><label class="c"><input type="checkbox" data-k="rice_counter.enabled">把白饭计数叠加到直播画面左下角</label><span style="flex:1"></span><b id="riceTotal">0 碗</b></div>
+    <div class="row"><label class="f" style="max-width:240px">大额礼物门槛（单次总额 / 元）<input type="number" min="0.01" step="0.01" data-k="rice_counter.large_gift_yuan"></label><span class="hint" id="riceGiftProgress">普通礼物进度 0/10</span></div>
     <div class="row"><button class="btn" id="ricePreview">试播开饭动画</button><a class="btn" href="/rice" target="_blank" rel="noopener">打开透明浏览器源</a><span class="hint" id="riceStatus" role="status"></span></div>
-    <p class="hint">每次收到真实礼物或 AI 击败第三幕 Boss，白饭 +1 并播放像素庆祝动画。免费礼物也计入，一次送多件记作一次；测试礼物和重复消息不计入。累计碗数重启后保留；关闭后停止计数，已有白饭保留。试播不会增加碗数。预览、千音源画面和直播同步生效，无需开启皮套。</p>
+    <p class="hint">普通礼物累计 10 次，或单次付费送礼总额达到大额门槛，白饭 +1 并播放像素庆祝动画。大额门槛默认 10 元，大额礼物不重复计入普通进度，已有进度保留。免费礼物也计入普通进度，一次送多件记作一次；测试礼物和重复消息不计入。AI 击败第三幕 Boss 仍加 1 碗。累计碗数和普通进度重启后保留；关闭后停止计数，试播不会增加碗数。</p>
     <p class="hint">OBS 单独采集游戏时，添加浏览器源 <code id="riceUrl"></code>，宽 1920、高 1080。已采集千音源画面时无需重复添加。</p>
   </div>
   <div class="card">
@@ -1857,6 +1858,7 @@ for (const id of ['broadcastPreviewImage', 'layoutPreviewImage']) $('#' + id).on
 };
 function renderRice(state) {
   $('#riceTotal').textContent = `${state.total ?? 0} 碗`;
+  $('#riceGiftProgress').textContent = `普通礼物进度 ${state.gift_progress ?? 0}/10`;
   $('#riceStatus').textContent = state.error || (state.enabled ? '白饭已上镜 · 左下角' : '白饭叠加已关闭');
   $('#ricePreview').disabled = !state.enabled;
 }
