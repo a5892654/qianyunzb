@@ -170,6 +170,11 @@ DEFAULTS = {
         "schedule": {"enabled": False, "mode": "managed", "start_time": "20:00", "stop_time": "23:00",
                      "window_title": "", "audio_name": "", "last_start": "", "last_stop": ""},
     },
+    "stream_theme": {
+        "preset": "classic", "title": "深蓝放映室", "subtitle": "和你一起，潜入今天的冒险",
+        "ticker": "欢迎来到深蓝放映室  ·  发条弹幕，一起聊聊天吧  ·  愿今天的快乐像海浪一样绵长",
+        "show_chat": True, "avatar_x": 0.125, "avatar_y": 0.745, "avatar_size": 0.54, "avatar_zoom": 2.0,
+    },
     "dtgame": {
         "enabled": True,
         "bridge_host": "127.0.0.1",

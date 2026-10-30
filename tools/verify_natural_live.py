@@ -62,7 +62,7 @@ class ConversationTests(unittest.TestCase):
 class GameMomentTests(unittest.TestCase):
     def setUp(self):
         self.now = [100.0]
-        self.chat = GameCommentary(clock=lambda: self.now[0], jitter=lambda a, b: a)
+        self.chat = GameCommentary(clock=lambda: self.now[0])
 
     def test_damage_low_health_and_healing_use_actual_delta_and_do_not_repeat(self):
         self.chat.observe(state())
@@ -125,11 +125,11 @@ class GameMomentTests(unittest.TestCase):
         self.chat.observe(fresh)
         self.assertIsNone(self.chat.moment())
 
-    def test_normal_cards_are_throttled_but_real_moment_can_react(self):
+    def test_normal_cards_have_no_artificial_silence_and_real_moment_can_react(self):
         calm = state()
         self.assertTrue(self.chat.can_speak(calm, "这张可以接上。"))
         self.chat.spoken(calm, "这张可以接上。")
-        self.assertFalse(self.chat.can_speak(calm, "下一张也接上。"))
+        self.assertTrue(self.chat.can_speak(calm, "下一张也接上。"))
         self.assertTrue(self.chat.can_speak(state(10), "哎哟！", important=True))
         self.now[0] += 10
         self.assertTrue(self.chat.can_speak(calm, "下一张也接上。"))
@@ -185,7 +185,7 @@ class NaturalPipelineTests(InteractionTestCase):
         interaction.spoken(text, ev)
         self.assertEqual(interaction.conversation.plan(), "new")
 
-    async def test_tense_scene_defers_proactive_but_viewer_reply_is_short_and_immediate(self):
+    async def test_tense_scene_keeps_interaction_and_viewer_reply_is_short_and_immediate(self):
         app, now = make_app(follow=True)
         enter(app)
         settle(app)
@@ -193,7 +193,8 @@ class NaturalPipelineTests(InteractionTestCase):
                                  commentary_context=lambda: "实际生命10/60", remember_interaction=Mock())
         now[0] += 181
         app.pipe.interaction.tick()
-        self.assertFalse(app.pipe.jobs)
+        self.assertTrue(app.pipe.jobs[0]["ev"]["follow_reminder"])
+        settle(app)
         app.pipe.on_event({"type": "danmaku", "uid": 123, "name": "小明", "text": "先回血"})
         await self.workers(app, app.pipe._gen_worker)
         item = await asyncio.wait_for(app.pipe.synth_q.get(), 1)
@@ -204,10 +205,9 @@ class NaturalPipelineTests(InteractionTestCase):
         self.assertIn("本句约18字", prompt)
         self.assertEqual(system, app.brain.system_prompt(app.cfg))
 
-    async def test_jitter_has_one_deadline_and_never_shortens_configured_interval(self):
+    async def test_configured_interval_has_no_extra_random_wait(self):
         app, now = make_app()
         interaction = app.pipe.interaction
-        interaction.jitter = Mock(side_effect=lambda a, b: b)
         enter(app)
         settle(app)
         now[0] += 21
@@ -215,17 +215,15 @@ class NaturalPipelineTests(InteractionTestCase):
         ev = app.pipe.jobs[0]["ev"]
         interaction.spoken("一起慢慢玩。", ev)
         settle(app)
-        calls = interaction.jitter.call_count
-        now[0] += 60
+        now[0] += 59
         for _ in range(8):
             interaction.tick()
         self.assertFalse(app.pipe.jobs)
-        self.assertEqual(interaction.jitter.call_count, calls)
-        now[0] += 16
+        now[0] += 1
         interaction.tick()
         self.assertEqual(len(app.pipe.jobs), 1)
 
-    async def test_follow_reminder_waits_for_rest_and_does_not_interrupt_continuation(self):
+    async def test_battle_does_not_indefinitely_block_follow_reminder(self):
         app, now = make_app(follow=True)
         enter(app)
         settle(app)
@@ -233,35 +231,33 @@ class NaturalPipelineTests(InteractionTestCase):
         app.dt = SimpleNamespace(running=True, speech_state=lambda: scene(current[0]))
         now[0] += 181
         app.pipe.interaction.tick()
-        self.assertFalse(app.pipe.jobs[0]["ev"]["follow_reminder"])
+        self.assertTrue(app.pipe.jobs[0]["ev"]["follow_reminder"])
         settle(app)
         now[0] += 61
         current[0] = {"screen": "reward"}
         app.pipe.interaction.tick()
         self.assertTrue(app.pipe.jobs[0]["ev"]["follow_reminder"])
 
-    async def test_follow_jitter_and_continuation_take_precedence_over_reminder(self):
+    async def test_follow_reminder_respects_interval_without_additional_delay(self):
         app, now = make_app(follow=True)
         interaction = app.pipe.interaction
-        interaction.jitter = lambda a, b: b
         enter(app)
         settle(app)
-        now[0] += 181
+        now[0] += 179
         # 禁用普通找话题，单独验证提醒期限不会提前。
         app.cfg["interaction"]["enabled"] = False
         interaction.tick()
         self.assertFalse(app.pipe.jobs)
-        now[0] += 27
+        now[0] += 2
         interaction.tick()
         self.assertTrue(app.pipe.jobs[0]["ev"]["follow_reminder"])
         settle(app)
         app.cfg["interaction"]["enabled"] = True
         ev = {"type": "danmaku", "uid": 123, "name": "小明", "text": "喜欢叠甲"}
         interaction.conversation.replied(ev, "叠起来很有安全感。")
-        now[0] += 76
+        now[0] += 61
         interaction.tick()
-        self.assertFalse(app.pipe.jobs[0]["ev"]["follow_reminder"])
-        self.assertEqual(app.pipe.jobs[0]["ev"]["conversation_plan"], "continue")
+        self.assertTrue(app.pipe.jobs[0]["ev"]["follow_reminder"])
 
     async def test_expired_reaction_after_synthesis_is_dropped_before_audio(self):
         app, _ = make_app()
@@ -274,23 +270,22 @@ class NaturalPipelineTests(InteractionTestCase):
         await wait_until(lambda: app.pipe.spoken_done(job))
         app.player.play_blocking.assert_not_called()
 
-    async def test_game_reaction_uses_real_changes_and_ordinary_cards_leave_silence(self):
+    async def test_game_reaction_uses_real_changes_and_normal_cards_keep_talking(self):
         app, now = make_app()
         bridge = Mock()
         bridge.screen.return_value = {"screen": "battle"}
         bridge.end_turn.return_value = {"ok": True}
         player = Player({}, bridge, pipe=app.pipe, speak=app.pipe.narrate)
         player.commentary.clock = lambda: now[0]
-        player.commentary.jitter = lambda a, b: a
         player._ask = AsyncMock(side_effect=[{"action": "end", "say": "先稳稳接上。"},
                                             {"action": "end", "say": "这一张继续。"},
                                             {"action": "end", "say": "哎哟，这下有点疼。"}])
         await player.step(state())
         second = await player.step(state(turn=2))
-        self.assertEqual(second["say"], "")
+        self.assertEqual(second["say"], "这一张继续。")
         third = await player.step(state(10, turn=3))
         self.assertIn("疼", third["say"])
-        self.assertEqual([j["type"] for j in app.pipe.jobs], ["narration", "reaction"])
+        self.assertEqual([j["type"] for j in app.pipe.jobs], ["narration", "narration", "reaction"])
         self.assertIn("当前生命", player._ask.await_args.args[0])
         bridge.state.assert_not_called()
         self.assertEqual(bridge.end_turn.call_count, 3)

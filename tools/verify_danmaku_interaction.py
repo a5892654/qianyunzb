@@ -219,21 +219,21 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("当前直播游戏上下文", app.brain.openai.ask.call_args.args[2])
         self.assertIn("加油", player._chat_context())
 
-    async def test_ai_welcome_rewrites_same_sentence_even_when_viewer_name_changes(self):
+    async def test_repeated_welcome_uses_template_without_a_second_model_call(self):
         app = make_app()
         settings = {**app.cfg["events"]["enter"], "mode": "ai"}
         app.brain.openai.ask.side_effect = [
             "欢迎小明来到直播间，找个舒服的位置坐下吧！",
-            "欢迎小红来到直播间，找个舒服的位置坐下呀！",
-            "小红来得正好，一起看看今天能玩出什么花样！"]
+            "欢迎小红来到直播间，找个舒服的位置坐下呀！"]
         first = await app.brain.reply(app.cfg, settings, {"type": "enter", "name": "小明"})
         second = await app.brain.reply(app.cfg, settings, {"type": "enter", "name": "小红"})
         self.assertIn("找个舒服", first[0])
-        self.assertIn("来得正好", second[0])
-        self.assertEqual(app.brain.openai.ask.await_count, 3)
+        self.assertEqual(second[1], "模板")
+        self.assertIn("小红", second[0])
+        self.assertEqual(app.brain.openai.ask.await_count, 2)
         self.assertIn("不要只替换观众名字", app.brain.openai.ask.await_args.args[2])
 
-    async def test_repeated_ai_chat_uses_varied_fallback_after_one_rewrite(self):
+    async def test_repeated_viewer_reply_stays_relevant_with_one_call_per_message(self):
         app = make_app()
         settings = {**app.cfg["events"]["danmaku"], "templates": "先歇一下再出发吧。\n补充点精神，咱们接着聊！"}
         app.brain.openai.ask.return_value = "今天也要开开心心地一起玩游戏呀！"
@@ -242,9 +242,9 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         second = await app.brain.reply(app.cfg, settings, ev)
         third = await app.brain.reply(app.cfg, settings, ev)
         self.assertEqual(first[1], "AI")
-        self.assertEqual(second[1], "模板")
-        self.assertNotEqual(second[0], third[0])
-        self.assertEqual(app.brain.openai.ask.await_count, 5)
+        self.assertEqual(second[1], "AI")
+        self.assertEqual(third[1], "AI")
+        self.assertEqual(app.brain.openai.ask.await_count, 3)
 
     async def test_cancelled_qoder_request_closes_busy_session(self):
         session = Brain().qoder

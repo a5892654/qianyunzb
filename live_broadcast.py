@@ -9,6 +9,7 @@ from live_capture import (CaptureError, OUT_H, OUT_W, WindowStreamCapture,
                           close_window, fit_borderless_client, sources)
 from live_overlay import Live2DOverlay, OverlayCompositor, OverlayError, find_edge
 from live_rice import RiceCompositor
+from live_theme import StreamTheme, ThemeAvatar, DEFAULTS as THEME_DEFAULTS
 from live_platform import (BiliBroadcastPlatform, FaceAuthRequiredError,
                            PlatformError)
 
@@ -30,10 +31,35 @@ def source_python() -> str:
     return venv if os.path.isfile(venv) else sys.executable
 
 
+def song_snapshot(app):
+    """点歌状态快照，供直播画面底部的深海电台条显示。"""
+    songs = getattr(app, "songs", None)
+    if songs is None:
+        return None
+    song = getattr(songs, "current", None)
+    data = None
+    if song:
+        try:
+            pos, dur = app.player.music_progress()
+        except Exception:
+            pos, dur = 0.0, 0.0
+        try:
+            levels = app.player.music_levels()
+        except Exception:
+            levels = None
+        data = {"qid": song.get("qid"), "name": song.get("name", ""), "artist": song.get("artist", ""),
+                "by": song.get("by", ""), "source": song.get("source", "request"),
+                "loading": bool(song.get("loading")), "paused": bool(getattr(songs, "paused", False)),
+                "pos": pos, "dur": dur or float(song.get("dur") or 0), "levels": levels}
+    return {"enabled": bool(songs.cfg.get("enabled", True)), "song": data}
+
+
 class Broadcast:
     def __init__(self, app):
         self.app = app
         self.capture = WindowStreamCapture()
+        self.theme = StreamTheme(lambda: app.cfg.get("stream_theme", {}), lambda: song_snapshot(app))
+        self.capture.theme_compositor = self.theme
         if getattr(app, "rice", None) is not None:
             self.capture.rice_compositor = RiceCompositor(app.rice, lambda: app.cfg.get("rice_counter", {}))
         self.platform = None
@@ -61,6 +87,12 @@ class Broadcast:
         l2d = self.app.cfg.get("live2d", {})
         if not l2d.get("enabled") or not l2d.get("overlay_in_broadcast", True):
             return None
+
+        if self.theme.active:
+            theme = self.app.cfg.get("stream_theme", {})
+            return ("bl", theme.get("avatar_size", THEME_DEFAULTS["avatar_size"]), 0,
+                    theme.get("avatar_x", THEME_DEFAULTS["avatar_x"]),
+                    theme.get("avatar_y", THEME_DEFAULTS["avatar_y"]))
 
         def number(key, default, low, high):
             value = float(l2d.get(key, default))
@@ -115,7 +147,7 @@ class Broadcast:
         self.overlay_error = ""
         self.capture.compositor_error = ""
         if getattr(self.capture, "compositor", None) is None:
-            self.capture.compositor = OverlayCompositor(overlay, self.overlay_settings)
+            self.capture.compositor = OverlayCompositor(ThemeAvatar(overlay, self.theme), self.overlay_settings)
             self.app.push("log", {"level": "info", "msg": "皮套已叠加到直播画面"})
 
     async def refresh_overlay(self) -> None:
@@ -454,7 +486,7 @@ class Broadcast:
                          getattr(self.capture, "compositor_error", "")) if enabled else ""
         ready = bool(enabled and not overlay_error and getattr(self.capture, "compositor", None) and
                      overlay and overlay.frame() is not None)
-        return {**state, "phase": self.phase, "error": self.error or state.get("error", ""),
+        return {**state, "phase": self.phase, "error": self.error or state.get("error", "") or state.get("theme_error", ""),
                 "running": self.running, "overlay": ready, "source": self.source_open,
                 "source_title": SOURCE_TITLE if self.source_open else "",
                 "overlay_error": overlay_error,

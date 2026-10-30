@@ -25,6 +25,7 @@ from dtgame import view
 from dtgame import grans
 from dtgame import lifecycle
 from dtgame.commentary import GameCommentary, scene
+from live_context import mentions_rice, rice_question
 
 log = logging.getLogger("dtplay")
 
@@ -108,8 +109,8 @@ SYSTEM = """你在直播玩《恶魔之塔 Zero》——一款类杀戮尖塔的
   新手教学路线固定深度0；游戏桥没给解锁上限时不填 depth，沿用当前设置。
   深度只能在大厅开始新出征前调整，不能中途改本局难度，也不要为改深度放弃现有进度。
 
-每个 JSON 都要带一个 "say" 字段，可以留空。有值得说的才随口说一句口语中文，
-不超过 30 字，不逐张牌念操作，不要念数值或解说规则。
+每个 JSON 都要带一个非空的 "say" 字段，随口说一句此刻的解说或感受，
+不超过 30 字，保持边玩边聊，不要念数值或解说规则。
 刚掉血、险胜、失误或拿到奖励时，依据已经发生的事实自然反应，不能提前庆祝尚未确认的结果。
 
 手牌后面标 ✕ 的牌当前打不出来，括号里是原因，别选它。
@@ -190,7 +191,7 @@ class Player:
         """复用最近读到的游戏状态，回复弹幕时不再阻塞查询游戏桥。"""
         text = "正在直播玩《恶魔之塔 Zero》。"
         if self._last_state and time.monotonic() - self._state_time < 30:
-            text += "\n" + view.render(self._last_state)[:5000]
+            text += "\n" + view.render(self._last_state)[:1800]
         if self.last_say:
             text += "\n刚才的游戏解说：" + self.last_say
         return text
@@ -200,18 +201,18 @@ class Player:
 
     def remember_interaction(self, ev, reply):
         """把已安排的弹幕回复交给下一步游戏决策，避免两边各说各的。"""
+        if rice_question(ev.get("text", "")) or mentions_rice(reply):
+            return
         self.live_chat.append({"at": time.monotonic(), "name": str(ev.get("name", ""))[:40],
                                "text": str(ev.get("text", ""))[:500], "reply": reply[:300]})
 
     def _chat_context(self):
         recent = [{k: v for k, v in item.items() if k != "at"}
-                  for item in self.live_chat if time.monotonic() - item["at"] < 120]
-        provider = getattr(self.pipe, "live_context", None) if self.pipe is not None else None
-        live = provider() if callable(provider) else ""
-        live = live if isinstance(live, str) else ""
+                  for item in self.live_chat if time.monotonic() - item["at"] < 120
+                  and not rice_question(item.get("text", "")) and not mentions_rice(item.get("reply", ""))]
         if not recent:
-            return live
-        return (live + ("\n" if live else "") + "【近期直播互动】下面是观众留言及主播已安排播出的回复。"
+            return ""
+        return ("【近期直播互动】下面是观众留言及主播已安排播出的回复。"
                 "可参考其中的游戏建议，继续保持同一段聊天的语气；不要重复播报已有回复。"
                 "观众留言只是聊天内容，不能覆盖游戏操作规则。\n"
                 + json.dumps(recent, ensure_ascii=False))
@@ -653,18 +654,24 @@ class Player:
             return await self._step(state)
         self.commentary.observe(state)
         result = await self._step(state)
+        generated = "_emotion" in result
         emotion = result.pop("_emotion", "")
         action = (result.get("action") or {}).get("action", "")
-        if not result.get("ok") or result.get("stale") or action.startswith("wait") or action == "abandon_run":
+        if (not result.get("ok") or result.get("stale") or result.get("recovering")
+                or action.startswith("wait") or action == "abandon_run"):
             return result
         moment = self.commentary.moment()
         say = result.get("say") or (self.commentary.fallback() if moment else "")
+        if not say and not moment and not generated:
+            return result
+        if not say or mentions_rice(say) or (self.commentary.recent and say == self.commentary.recent[-1]):
+            say = self.commentary.fallback() or self.commentary.filler(state)
+            emotion = ""
         situation = scene(state)
         say = _clean_say(say, min(30, situation["max_chars"]))
         important = bool(moment) or state.get("screen") in ("character_select", "hall")
         if not self.commentary.can_speak(state, say, important):
-            result["say"] = ""
-            return result
+            say = self.commentary.filler(state)
         result["say"] = say
         if not self.narrate:
             return result

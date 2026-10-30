@@ -398,6 +398,7 @@ class Player:
         self.duck = 0.3
         self.mgain = 1.0
         self.on_music_end = None
+        self._music_levels = None
 
     @staticmethod
     def devices():
@@ -613,6 +614,36 @@ class Player:
             if self.music is None:
                 return 0, 0
             return self.mpos / self.sr, len(self.music) / self.sr
+
+    def music_levels(self, count=7, window=4096):
+        """最近一段音乐的分频能量，给直播画面的声形条用；没在放歌时返回 None。"""
+        with self.lock:
+            if self.music is None or self.music_paused or self.mpos <= 0:
+                self._music_levels = None
+                return None
+            end = min(len(self.music), self.mpos + window)
+            chunk = np.asarray(self.music[max(0, end - window):end], dtype=np.float32)
+            sr = self.sr
+        mono = chunk.mean(axis=1) / 32768.0 if chunk.ndim > 1 else chunk / 32768.0
+        if mono.size < 512:
+            return None
+        spectrum = np.abs(np.fft.rfft(mono * np.hanning(mono.size)))
+        freqs = np.fft.rfftfreq(mono.size, 1 / sr)
+        edges = np.geomspace(60.0, min(12000.0, sr / 2 * 0.9), count + 1)
+        raw = []
+        for lo, hi in zip(edges[:-1], edges[1:]):
+            band = spectrum[(freqs >= lo) & (freqs < hi)]
+            raw.append(float(band.mean()) if band.size else 0.0)
+        raw = np.array(raw)
+        peak = raw.max()
+        shape = raw / peak if peak > 1e-9 else raw
+        loud = min(1.0, float(np.sqrt((mono ** 2).mean())) * 4.0)
+        levels = np.clip((0.25 + 0.75 * shape) * (0.3 + 0.7 * loud), 0.05, 1.0)
+        previous = self._music_levels
+        if previous is not None and len(previous) == count:
+            levels = np.maximum(levels, np.asarray(previous) * 0.75)
+        self._music_levels = [round(float(v), 3) for v in levels]
+        return self._music_levels
 
     def close(self):
         if self.stream is not None:

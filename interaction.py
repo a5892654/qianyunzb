@@ -4,12 +4,12 @@ import collections
 import json
 import logging
 import math
-import random
 import time
 
 from config import FOLLOW_REMINDER_PROMPT, FOLLOW_REMINDER_TEMPLATES
 from brain import similar_reply, varied_line
 from conversation import Conversation
+from live_context import mentions_rice, rice_question
 
 log = logging.getLogger("interaction")
 
@@ -54,10 +54,7 @@ class AudienceInteraction:
         self.pipe = pipe
         self.app = pipe.app
         self.clock = clock
-        self.jitter = random.uniform
         self.conversation = Conversation(clock=lambda: self.clock())
-        self.cadence_signature = None
-        self.prompt_delay = self.follow_delay = 0
         self.room = None
         self.room_started = None
         self.epoch = 0
@@ -97,7 +94,6 @@ class AudienceInteraction:
             self.recent_lines.clear()
             self.recent_speech.clear()
             self.conversation.reset()
-            self.cadence_signature = None
             self.last_activity = self.last_response = self.last_prompt = self.pending = None
             self.last_follow = None
             self.follow_topic = 0
@@ -118,6 +114,8 @@ class AudienceInteraction:
     def remember_reply(self, ev, text):
         if ev.get("test") or ev.get("_interaction_epoch") != self.epoch or ev["type"] not in ("danmaku", "superchat"):
             return
+        if rice_question(ev.get("text", "")) or mentions_rice(text):
+            return
         self.dialogue.append({"at": self.clock(), "name": ev.get("name", ""),
                               "text": str(ev.get("text", ""))[:300], "reply": text[:200]})
 
@@ -128,13 +126,11 @@ class AudienceInteraction:
         schedule = getattr(self.app, "schedule", None)
         broadcast = getattr(self.app, "broadcast", None)
         enabled = self.settings.get("follow_enabled" if follow else "enabled", True)
-        mode = self.speech_state()["mode"]
         # 本机正在直播时，即使观众安静也照常定时提醒；普通找话题仍要求近期真实活动。
         audience = bool(self.viewers) or (follow and getattr(broadcast, "phase", "") == "live")
         activity = self.last_activity if self.last_activity is not None else self.room_started
         return (enabled and self.room is not None and audience
                 and not self.pipe.paused and not self.pipe.pending_replies and not self.pipe.merging
-                and self.pipe.current is None and mode != "tense" and not (follow and mode == "battle")
                 and getattr(schedule, "active_action", "") != "farewell"
                 and getattr(broadcast, "phase", "") != "stopping"
                 and activity is not None
@@ -162,33 +158,24 @@ class AudienceInteraction:
 
     def remember_spoken_reply(self, ev, text):
         self.sync_room()
-        if ev.get("_interaction_epoch") == self.epoch:
+        if (ev.get("_interaction_epoch") == self.epoch
+                and not rice_question(ev.get("text", "")) and not mentions_rice(text)):
             self.conversation.replied(ev, text)
-
-    def sync_cadence(self):
-        signature = (self.seconds("interval_seconds", 60, 30), self.seconds("follow_interval_seconds", 180, 60))
-        if signature != self.cadence_signature:
-            self.cadence_signature = signature
-            self.prompt_delay = self.jitter(0, signature[0] * 0.25)
-            self.follow_delay = self.jitter(0, signature[1] * 0.15)
 
     def tick(self):
         follow_ready = self.ready(follow=True)
-        self.sync_cadence()
         now = self.clock()
         last_follow = self.last_follow if self.last_follow is not None else self.room_started
         follow = (follow_ready and last_follow is not None
-                  and now - last_follow >= self.seconds("follow_interval_seconds", 180, 60) + self.follow_delay)
+                  and now - last_follow >= self.seconds("follow_interval_seconds", 180, 60))
         chat_ready = self.ready()
         plan = self.conversation.plan() if chat_ready else "new"
-        if follow and chat_ready and plan != "new":
-            follow = False  # 先接完这段聊天或自然收尾，再等合适的空档提醒。
         if not follow and not chat_ready:
             return
         if self.pending is not None and not self.pipe.spoken_done(self.pending):
             return
-        interval = self.seconds("interval_seconds", 60, 30) * (1.5 if self.speech_state()["mode"] == "battle" else 1)
-        if self.last_prompt is not None and now - self.last_prompt < interval + self.prompt_delay:
+        interval = self.seconds("interval_seconds", 60, 30)
+        if self.last_prompt is not None and now - self.last_prompt < interval:
             return
         if follow:
             templates = self.settings.get("follow_templates") or FOLLOW_REMINDER_TEMPLATES
@@ -214,9 +201,10 @@ class AudienceInteraction:
             return "", "主动互动", ""
         now = self.clock()
         recent = [{k: v for k, v in item.items() if k != "at"}
-                  for item in self.dialogue if now - item["at"] < self.PRESENCE_SECONDS]
+                  for item in self.dialogue if now - item["at"] < self.PRESENCE_SECONDS
+                  and not rice_question(item.get("text", "")) and not mentions_rice(item.get("reply", ""))]
         # 普通解说另记，避免频繁的游戏台词挤掉先前主动问过的话题。
-        spoken = list(dict.fromkeys([*self.recent_lines, *self.recent_speech]))
+        spoken = [line for line in dict.fromkeys([*self.recent_lines, *self.recent_speech]) if not mentions_rice(line)]
         follow = bool(ev.get("follow_reminder"))
         plan = ev.get("conversation_plan", "new")
         if follow:
@@ -243,19 +231,12 @@ class AudienceInteraction:
             prompt += "\n当前游戏局势：" + dt.commentary_context()
             prompt += "\n局势仅在与本次话题有关时参考，不要每次都回到同一个打法问题。"
         cfg = self.reply_config()
-        cfg = {**cfg, "ai": {**cfg["ai"], "timeout": min(8, float(cfg["ai"].get("timeout", 30)))}}
+        cfg = {**cfg, "ai": {**cfg["ai"], "timeout": min(4, float(cfg["ai"].get("timeout", 30)))}}
         text, emotion = "", ""
         try:
-            # 改写共享同一个等待预算，不能让主动聊天长期挡住新弹幕。
+            # 一次生成，重复时直接轮换本地话题，不再等第二轮模型改写。
             async with asyncio.timeout(cfg["ai"]["timeout"]):
-                for _ in range(2):
-                    text, emotion = await self.app.brain.ai(cfg, prompt)
-                    if text and not similar_reply(text, spoken):
-                        break
-                    if not text or not self.can_speak(ev):
-                        break
-                    prompt += ("\n刚才这句重复了：" + json.dumps(text, ensure_ascii=False)
-                               + "。请换一个开头和内容角度，围绕本次话题重写一句，不要只改语气词。")
+                text, emotion = await self.app.brain.ai(cfg, prompt)
         except Exception as e:
             log.warning("主动互动生成失败，改用话题模板：%s", e)
             text, emotion = "", ""
@@ -276,13 +257,11 @@ class AudienceInteraction:
         self.recent_lines.append(text)
         self.remember_spoken(text)
         self.last_prompt = self.clock()
-        self.prompt_delay = self.jitter(0, self.seconds("interval_seconds", 60, 30) * 0.25)
         if ev and ev.get("follow_reminder"):
             self.last_follow = self.last_prompt
-            self.follow_delay = self.jitter(0, self.seconds("follow_interval_seconds", 180, 60) * 0.15)
         else:
             self.conversation.spoken(text, (ev or {}).get("conversation_plan", "new"))
 
     def remember_spoken(self, text):
-        if text:
+        if text and not mentions_rice(text):
             self.recent_speech.append(text)

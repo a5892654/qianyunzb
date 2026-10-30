@@ -420,7 +420,7 @@ class RiceRouteTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(f'"当前显示碗数": {expected}', prompt)
             self.assertIn("左下角" if expected == 1 else "右上角", prompt)
         self.app.cfg["rice_counter"]["enabled"] = False
-        await self.app.brain.ai(self.app.cfg, "刚才那个饭碗还在吗？")
+        await self.app.brain.ai(self.app.cfg, "刚才那个饭碗还在吗？", question="刚才那个饭碗还在吗？")
         prompt = self.app.brain.openai.ask.await_args.args[2]
         self.assertIn("素材已关闭", prompt)
         self.assertNotIn("当前显示碗数", prompt)
@@ -432,13 +432,14 @@ class RiceRouteTests(unittest.IsolatedAsyncioTestCase):
         for backend in ("openai", "qoder"):
             self.app.cfg["ai"]["backend"] = backend
             model = AsyncMock(return_value="左下角是大碗白饭，现在累计零碗。")
-            getattr(self.app.brain, backend).ask = model
-            text, _ = await self.app.brain.ai(self.app.cfg, "左下角那个是什么？")
+            target = self.app.brain.rice_qoder if backend == "qoder" else self.app.brain.openai
+            target.ask = model
+            text, _ = await self.app.brain.ai(self.app.cfg, "左下角那个是什么？", question="左下角那个是什么？")
             self.assertIn("大碗白饭", text)
             self.assertIn('"当前显示碗数": 0', model.await_args.args[2])
             self.assertIsNone(self.app.dt)
 
-    async def test_real_danmaku_queue_and_game_decision_share_rice_facts(self):
+    async def test_rice_facts_reach_viewer_answer_but_not_ordinary_game_narration(self):
         from pipeline import Pipeline
         self.app.cfg["ai"]["backend"] = "openai"
         self.app.cfg["rice_counter"]["enabled"] = True
@@ -455,7 +456,7 @@ class RiceRouteTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("大碗白饭", item["text"])
             self.assertIn('"当前显示碗数": 1', self.app.brain.openai.ask.await_args.args[2])
             player = Player({}, Mock(), pipe=self.app.pipe)
-            self.assertIn('"当前显示碗数": 1', player._chat_context())
+            self.assertEqual(player._chat_context(), "")
             self.assertEqual((self.app.rice.total, self.app.rice.gift_progress), (1, 0))
         finally:
             worker.cancel()

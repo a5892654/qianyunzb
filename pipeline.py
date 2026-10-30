@@ -8,6 +8,7 @@ import time
 import numpy as np
 
 from brain import fill
+from live_context import rice_question
 from interaction import AudienceInteraction
 from supporters import GiftSupporters
 from tts import ENV_FPS, envelope
@@ -59,6 +60,7 @@ class Pipeline:
         self.current = None
         self._spoken_ids = set()
         self.pending_replies = set()
+        self._interaction_task = None
         self.interaction = AudienceInteraction(self)
         self.tasks = []
 
@@ -233,6 +235,9 @@ class Pipeline:
         self.jobs.append(job)
         if ev["type"] not in ("narration", "reaction", "interaction"):
             self.pending_replies.add(job["id"])
+            if (self._interaction_task is not None and not self._interaction_task.done()
+                    and not self._interaction_task.cancelling()):
+                self._interaction_task.cancel()
         limit = max(1, int(self.cfg["filter"].get("max_queue", 6)))
         while len(self.jobs) > limit:
             victim = max(self.jobs, key=lambda j: (j["prio"], -j["ts"]))
@@ -253,13 +258,7 @@ class Pipeline:
 
     def narrate(self, text, emotion=""):
         """普通游戏解说排在观众互动后面，保留手动播报的原有优先级。"""
-        return self._enqueue({"type": "narration", "name": "", "text": text, "emotion": emotion,
-                              "expires_at": time.monotonic() + 20}, text=text)
-
-    def live_context(self):
-        provider = getattr(self.app, "live_context", None)
-        value = provider() if callable(provider) else ""
-        return value if isinstance(value, str) else ""
+        return self.say(text, emotion, kind="narration")
 
     def react(self, text, emotion=""):
         """真实变化的短反应优先于闲聊，排队太久就作废，不播过时的惊呼。"""
@@ -343,7 +342,16 @@ class Pipeline:
                     lines = [l.strip() for l in rule["reply"].splitlines() if l.strip()]
                     text, src, emotion = fill(random.choice(lines), job["ev"]), "固定回复", rule.get("emotion", "")
                 elif job["type"] == "interaction":
-                    text, src, emotion = await self.interaction.reply(job["ev"])
+                    self._interaction_task = asyncio.create_task(self.interaction.reply(job["ev"]))
+                    try:
+                        text, src, emotion = await self._interaction_task
+                    except asyncio.CancelledError:
+                        if asyncio.current_task().cancelling():
+                            raise
+                        self._mark_done(job["id"])
+                        continue
+                    finally:
+                        self._interaction_task = None
                 else:
                     t0 = time.time()
                     context = dt.commentary_context() if dt and job["type"] in ("danmaku", "superchat") else ""
@@ -477,7 +485,8 @@ class Pipeline:
                     continue
                 self.interaction.spoken(item["text"], item["interaction_event"])
             else:
-                self.interaction.remember_spoken(item["text"])
+                if not rice_question(item.get("conversation_event", {}).get("text", "")):
+                    self.interaction.remember_spoken(item["text"])
             if item.get("conversation_event"):
                 self.interaction.remember_spoken_reply(item["conversation_event"], item["text"])
             self.current = item

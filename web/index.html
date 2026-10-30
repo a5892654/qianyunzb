@@ -85,11 +85,28 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
 .layout-box{position:absolute;border:2px dashed var(--pink);cursor:move;touch-action:none;user-select:none}
 .layout-box:focus-visible{outline:2px solid var(--blue);outline-offset:3px}
 .layout-box iframe{width:100%;height:100%;border:0;pointer-events:none}
+.layout-avatar-crop{position:absolute;inset:0;overflow:hidden}
 .layout-box>span{position:absolute;left:0;top:0;background:var(--pink);color:white;font-size:11px;padding:1px 6px;pointer-events:none}
 .layout-handle{position:absolute;right:-7px;bottom:-7px;width:18px;height:18px;padding:0;border:2px solid white;background:var(--pink);border-radius:4px;cursor:nwse-resize;touch-action:none}
 .layout-box[hidden],.layout-stage [hidden]{display:none}
 .layout-box.rice{border-color:var(--yellow)}
 .layout-box.rice>span,.layout-box.rice .layout-handle{background:var(--yellow);color:#171a23}
+.theme-intro{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:20px}
+.theme-intro h2{font-size:27px;margin:5px 0 7px;letter-spacing:1px}.theme-eyebrow{font-size:11px;letter-spacing:3px;color:#77cce9}
+.theme-pill{border:1px solid #2b586e;border-radius:30px;padding:7px 14px;color:#9ddff3;white-space:nowrap;font-size:12px}
+.theme-options{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:20px}
+.theme-option{position:relative;display:flex;text-align:left;gap:14px;align-items:center;padding:12px;border-radius:12px;background:var(--panel);border:1px solid var(--line);color:var(--text);cursor:pointer;font:inherit;min-width:0}
+.theme-option[aria-pressed=true]{border-color:#75d9f3;box-shadow:0 0 0 1px #75d9f344;background:#132b3a}
+.theme-option:focus-visible{outline:2px solid #75d9f3;outline-offset:4px}.theme-option:disabled{opacity:.6;cursor:wait}
+.theme-thumb{flex-shrink:0;width:110px;aspect-ratio:16/9;border-radius:7px;background:linear-gradient(135deg,#202939,#0e1520);border:1px solid #ffffff30;position:relative;overflow:hidden}
+.theme-thumb.ocean{background:url('/static/assets/ocean-background.png') center/cover}.theme-thumb:after{content:'';position:absolute;inset:13% 5% 16% 26%;background:#10283bcf;border:1px solid #c9f4ff99}
+.theme-thumb.classic:after{inset:6%;border-color:#54677a}.theme-option strong{display:block;font-size:15px;margin-bottom:3px}.theme-option small{color:var(--dim);font-size:12px}.theme-option .theme-check{margin-left:auto;color:#9ce5f8;font-size:18px;opacity:0}.theme-option[aria-pressed=true] .theme-check{opacity:1}
+.theme-stage{position:relative;aspect-ratio:16/9;width:100%;overflow:hidden;border-radius:12px;border:1px solid #38637b;background:#10273a}
+.theme-stage>img{width:100%;height:100%;display:block}.theme-avatar-preview{position:absolute;overflow:hidden;pointer-events:none}.theme-avatar-preview iframe{position:absolute;width:100%;height:100%;border:0}
+.theme-stage [hidden],#themes [hidden]{display:none}.theme-caption{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:11px;font-size:12px;color:var(--dim)}
+.theme-settings{margin-top:18px}.theme-settings input:focus,.theme-settings textarea:focus{border-color:#75d9f3}.theme-settings input[type=checkbox]{accent-color:#75d9f3}
+.theme-settings .hint{margin:6px 0 0}.theme-card-head{display:flex;gap:10px;align-items:center;margin-bottom:12px}.theme-card-head h3{margin:0;flex:1}
+@media(max-width:850px){.theme-options{grid-template-columns:1fr}.theme-intro{align-items:flex-start;flex-direction:column}.theme-thumb{width:90px}.theme-caption{align-items:flex-start;flex-direction:column}}
 </style>
 </head>
 <body>
@@ -100,6 +117,7 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
   <button data-tab="room">直播间 / 登录</button>
   <button data-tab="broadcast" class="on">一键开播</button>
   <button data-tab="layout">画面调整</button>
+  <button data-tab="themes">直播主题</button>
   <button data-tab="rules">回复规则</button>
   <button data-tab="fixed">固定回复</button>
   <button data-tab="songs">点歌</button>
@@ -240,7 +258,7 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
       <span style="flex:1"></span>
       <span class="hint" id="overlayState"></span>
     </div>
-    <div class="row"><button class="btn" id="openLayout">调整皮套位置和大小</button><button class="btn" id="openLive2D">选择 Live2D 模型</button></div>
+    <div class="row"><button class="btn" id="openLayout">调整皮套位置和大小</button><button class="btn" id="openLive2D">选择 Live2D 模型</button><button class="btn b" id="openThemes">直播主题 · 蓝色海洋</button></div>
     <p class="hint">预览画面就是观众看到的画面，包含已启用的 Live2D 皮套。位置和大小可在「画面调整」中实时修改，自动保存。</p>
   </div>
   <div class="card">
@@ -309,6 +327,33 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
   </div>
 </section>
 
+<!-- ========== 直播主题 ========== -->
+<section id="themes">
+  <div class="theme-intro">
+    <div><div class="theme-eyebrow">LIVE ROOM / APPEARANCE</div><h2>把直播间，搬进海里。</h2><div class="hint">一键换上完整直播布景，让每一次冒险都有海浪相伴。</div></div>
+    <span class="theme-pill" id="themeCurrent">当前 · 原始画面</span>
+  </div>
+  <div class="theme-options" role="group" aria-label="选择直播主题">
+    <button class="theme-option" data-stream-preset="classic" aria-pressed="true"><span class="theme-thumb classic" aria-hidden="true"></span><span><strong>原始画面</strong><small>全幅游戏 · 自由摆放皮套</small></span><span class="theme-check" aria-hidden="true">✓</span></button>
+    <button class="theme-option" data-stream-preset="ocean" aria-pressed="false"><span class="theme-thumb ocean" aria-hidden="true"></span><span><strong>蓝色海洋</strong><small>海底光影 · 弹幕来信 · 左下皮套</small></span><span class="theme-check" aria-hidden="true">✓</span></button>
+  </div>
+  <div class="card">
+    <div class="theme-card-head"><h3>直播布景预览</h3><span class="hint" id="themePreviewLabel">主题效果示意</span><button class="btn sm" id="themeOpenLayout">调整皮套</button></div>
+    <div class="theme-stage" id="themeStage"><img id="themePreviewImage" alt="直播主题布局预览"><img id="themeLiveImage" alt="当前主题的实际游戏与皮套合成画面" hidden><div class="theme-avatar-preview" id="themeAvatarViewport"><iframe id="themeAvatarPreview" title="当前 Live2D 角色在主题中的位置" tabindex="-1" hidden></iframe></div></div>
+    <div class="theme-caption"><span id="themePreviewHint">左下角为当前皮套，弹幕从背后浮现，右侧是完整游戏画面；底部电台条会跟随点歌切换（图中为示意曲目）。</span><button class="btn sm" id="themeOpenBroadcast">查看游戏实际预览 ↗</button></div>
+    <p class="hint" id="themeModelHint" hidden>还未启用皮套。<button class="btn sm" id="themeChooseModel">选择并启用 Live2D 模型</button></p>
+  </div>
+  <div class="card theme-settings" id="themeOceanSettings" hidden>
+    <h3>你的深海电台</h3>
+    <div class="row"><label class="f">直播间名称<input data-k="stream_theme.title" maxlength="24" placeholder="深蓝放映室"></label><label class="f">一句欢迎语<input data-k="stream_theme.subtitle" maxlength="60" placeholder="和你一起，潜入今天的冒险"></label></div>
+    <div class="row"><label class="f">底部滚动公告（没有播放音乐时显示）<textarea data-k="stream_theme.ticker" maxlength="300" placeholder="写一段想告诉观众的话，留空隐藏文字"></textarea></label></div>
+    <div class="row"><label class="f">角色取景（1 = 全身，2 = 半身）<input type="range" data-k="stream_theme.avatar_zoom" min="1" max="3" step="0.05"></label><b data-show="stream_theme.avatar_zoom"></b></div>
+    <label class="c"><input type="checkbox" data-k="stream_theme.show_chat">显示真实弹幕与礼物消息</label>
+    <p class="hint">设置自动保存，预览、千音源画面和直播同步生效。底部电台条会自动显示正在播放的点歌、点播观众、切换提示和随音乐跳动的声形条。海洋主题的皮套位置独立保存，切回原始画面即可恢复原布局。</p>
+  </div>
+  <div class="hint" id="themeSaveState" role="status" aria-live="polite"></div>
+</section>
+
 <!-- ========== 直播画面调整 ========== -->
 <section id="layout">
   <h2>直播画面调整</h2>
@@ -317,10 +362,11 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
     <div class="row"><label class="c"><input type="checkbox" data-k="live2d.overlay_in_broadcast">把 Live2D 皮套叠加到直播画面</label><label class="c"><input type="checkbox" data-k="rice_counter.enabled" id="layoutRiceOn">显示大碗白饭（金色框）</label></div>
     <p class="hint">粉色框是皮套，金色框是大碗白饭。拖动框移动，拖动右下角调整大小；下方滑块可精细调整。预览和直播中即时生效，自动保存。</p>
     <div class="layout-stage" id="layoutStage">
+      <img id="layoutThemeBackground" alt="海洋主题布景" hidden>
       <img id="layoutPreviewImage" alt="观众画面预览" hidden>
       <div class="layout-placeholder" id="layoutPlaceholder">尚未启动游戏预览。可先调整皮套和白饭，再返回「一键开播」点击「预览画面和声音」查看完整画面。</div>
       <div class="layout-box" id="layoutBox" tabindex="0" role="group" aria-label="Live2D 位置，方向键移动，按住 Shift 加快" hidden>
-        <iframe id="layoutModelPreview" title="Live2D 皮套取景" tabindex="-1"></iframe>
+        <div class="layout-avatar-crop"><iframe id="layoutModelPreview" title="Live2D 皮套取景" tabindex="-1"></iframe></div>
         <span>Live2D · 拖动移动</span><button class="layout-handle" id="layoutResize" aria-label="调整 Live2D 大小，方向键放大或缩小"></button>
       </div>
       <div class="layout-box rice" id="layoutRiceBox" tabindex="0" role="group" aria-label="大碗白饭位置，方向键移动，按住 Shift 加快" hidden>
@@ -367,7 +413,7 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
       <label class="f">冷场多久主动聊（秒）<input type="number" min="10" data-k="interaction.idle_seconds"></label>
       <label class="f">主动聊天最短间隔（秒）<input type="number" min="30" data-k="interaction.interval_seconds"></label>
     </div>
-    <p class="hint">最近 5 分钟有观众活动时，会结合游戏和聊天记录找话题。观众接话后可顺着聊几轮，没人回应时自然收尾。间隔会小幅浮动，普通战斗少聊，紧张时先专心操作；弹幕仍优先简短回应。会避开相似台词，暂停自动回复或告别下播时停止主动聊天。</p>
+    <p class="hint">最近 5 分钟有观众活动时，会结合游戏和聊天记录找话题。观众接话后可顺着聊几轮，没人回应时自然收尾。按设定间隔触发，不额外增加随机或战斗等待；新弹幕优先打断后台闲聊。暂停自动回复或告别下播时停止主动聊天。</p>
     <div class="row">
       <label class="c"><input type="checkbox" data-k="interaction.follow_enabled">定时提醒关注 / 点赞</label>
       <label class="f">关注点赞提醒间隔（秒）<input type="number" min="60" data-k="interaction.follow_interval_seconds"></label>
@@ -376,7 +422,7 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
       <label class="f">关注点赞备用文案（每行一条，轮换使用）<textarea data-k="interaction.follow_templates"></textarea></label>
       <label class="f">关注点赞 AI 提示<textarea data-k="interaction.follow_ai_prompt"></textarea></label>
     </div>
-    <p class="hint">默认至少间隔 3 分钟，在聊天或游戏休息的空档自然提醒关注或点赞，AI 不可用时轮换备用文案。正在战斗、有人接话或语音还在播放时顺延。与找话题分别开关；本机推流时即使观众安静也会提醒，其他推流方式需近期有观众活动。暂停、断线或告别下播时停止。</p>
+    <p class="hint">默认间隔 3 分钟自然提醒关注或点赞，AI 不可用时轮换备用文案，不因战斗额外延后。观众消息优先，提醒排队播放。与找话题分别开关；本机推流时即使观众安静也会提醒，其他推流方式需近期有观众活动。暂停、断线或告别下播时停止。</p>
   </div>
   <div class="card">
     <h3>过滤与队列</h3>
@@ -785,6 +831,7 @@ $$('nav button[data-tab]').forEach(b => b.onclick = () => {
   syncPreviewStream(!!broadcastInfo.previewing);
   syncL2dTestPreview();
   renderLayout();
+  renderTheme();
 });
 
 // ---------- 回复规则卡片 ----------
@@ -828,6 +875,7 @@ function fillForm() {
   $('#qoderExe').placeholder = CFG._qoder_default;
   renderWishFields();
   renderLayout();
+  renderTheme();
 }
 let saveTimer = null, pending = {}, saveQueue = Promise.resolve();
 function deepMerge(a, b) { for (const k in b) { if (b[k] && typeof b[k] === 'object' && !Array.isArray(b[k])) { a[k] = a[k] || {}; deepMerge(a[k], b[k]); } else a[k] = b[k]; } return a; }
@@ -842,6 +890,7 @@ function queueConfig(p, delay = 500) {
   $$('[data-show]').forEach(el => el.textContent = getPath(CFG, el.dataset.show));
   if (p.live2d) { renderLayout(); syncL2dTestPreview(); $('#layoutSaveState').textContent = '正在保存调整…'; }
   if (p.rice_counter) { renderLayout(); $('#layoutSaveState').textContent = '正在保存调整…'; }
+  if (p.stream_theme) { renderLayout(); renderTheme(); $('#themeSaveState').textContent = '正在保存主题…'; }
   if (!saveTimer) saveTimer = setTimeout(() => flushConfig().catch(() => {}), delay);
 }
 async function flushConfig() {
@@ -851,12 +900,14 @@ async function flushConfig() {
     saveQueue = saveQueue.catch(() => {}).then(async () => {
       const r = await api('/api/config', p);
       if (!r.ok) throw new Error(r.error || '设置保存失败');
-      if (p.live2d || p.rice_counter) $('#layoutSaveState').textContent = '调整已保存，预览和直播同步生效';
+      if (p.stream_theme) { $('#themeSaveState').textContent = '主题已保存，预览、源画面和直播同步生效'; renderTheme(true); }
+      if (p.live2d || p.rice_counter || p.stream_theme) $('#layoutSaveState').textContent = '调整已保存，预览和直播同步生效';
       else toast('设置已保存');
     }).catch(error => {
       // 保留失败的修改，下一次保存或预览时重试。
       pending = deepMerge(p, pending);
       $('#layoutSaveState').textContent = '保存失败：' + error.message;
+      if (p.stream_theme) $('#themeSaveState').textContent = '主题保存失败：' + error.message;
       toast('设置保存失败：' + error.message);
       throw error;
     });
@@ -869,6 +920,8 @@ function onField(el) {
   else if (el.type === 'radio') { if (!el.checked) return; v = el.value; }
   else if (el.type === 'number' || el.type === 'range' || el.dataset.k === 'tts.sample_steps' || el.dataset.k === 'broadcast.area_id') v = el.value === '' ? 0 : Number(el.value);
   else v = el.value;
+  if (oceanTheme() && el.dataset.k === 'live2d.overlay_size') { moveLayout({overlay_size: v}); return; }
+  if (oceanTheme() && ['live2d.overlay_corner', 'live2d.overlay_margin'].includes(el.dataset.k)) return;
   const p = setPatch(el.dataset.k, v);
   if (el.dataset.k === 'live2d.overlay_in_broadcast' && v) p.live2d.enabled = true;
   if (['live2d.overlay_corner', 'live2d.overlay_margin'].includes(el.dataset.k)) Object.assign(p.live2d, {overlay_x: null, overlay_y: null});
@@ -1603,8 +1656,63 @@ $('#sgUrl').value = `${location.origin}/songs`;
 let broadcastLoginRequested = false, broadcastBusy = false, broadcastAccount = null, broadcastInfo = {};
 // 布局坐标与后台合成器一致：中心相对直播画面的位置，大小相对画面高度。
 const clamp = (v, low, high) => Math.max(low, Math.min(high, v));
+const oceanTheme = () => CFG.stream_theme?.preset === 'ocean';
+function styleThemeAvatar(frame) {
+  const zoom = oceanTheme() ? Number(CFG.stream_theme.avatar_zoom ?? 2) : 1;
+  const top = Math.min(1 - 1 / zoom, 0.065);
+  Object.assign(frame.style, {position: 'absolute', width: zoom * 100 + '%', height: zoom * 100 + '%', left: -(zoom - 1) * 50 + '%', top: -top * zoom * 100 + '%'});
+}
+function renderTheme(refresh = false) {
+  const visible = $('#themes').classList.contains('on'), ocean = oceanTheme(), c = CFG.stream_theme || {};
+  const live = visible && !!broadcastInfo.previewing;
+  $$('[data-stream-preset]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.streamPreset === (ocean ? 'ocean' : 'classic'))));
+  $('#themeCurrent').textContent = '当前 · ' + (ocean ? '蓝色海洋' : '原始画面');
+  $('#themeOceanSettings').hidden = !ocean;
+  $('#themePreviewLabel').textContent = live ? '实际合成画面 · 实时' : '主题效果示意 · 未采集游戏';
+  $('#themePreviewHint').textContent = ocean ? '左下角为当前皮套，弹幕从背后浮现，右侧是完整游戏画面；底部电台条跟随点歌切换，示意曲目仅供参考。' : '游戏全幅显示，皮套使用原始画面的位置与大小。';
+  $('#themeLiveImage').hidden = !live;
+  $('#themePreviewImage').hidden = live;
+  const hasModel = !!(CFG.live2d?.enabled && CFG.live2d?.overlay_in_broadcast && CFG.live2d?.model_file);
+  $('#themeModelHint').hidden = hasModel;
+  const avatar = $('#themeAvatarPreview');
+  avatar.hidden = live || !hasModel;
+  if (visible && !live && hasModel) {
+    const r = layoutRect();
+    Object.assign($('#themeAvatarViewport').style, {left: (r.x - r.w / 2) * 100 + '%', top: (r.y - r.h / 2) * 100 + '%', width: r.w * 100 + '%', height: r.h * 100 + '%'});
+    styleThemeAvatar(avatar);
+    if (!avatar.getAttribute('src')) avatar.src = '/live2d?overlay=1';
+  } else avatar.removeAttribute('src');
+  const signature = JSON.stringify([c.preset, c.title, c.subtitle, c.ticker, c.show_chat]);
+  const image = $('#themePreviewImage'), background = $('#layoutThemeBackground');
+  const needSample = (visible && !live) || ($('#layout').classList.contains('on') && ocean && !broadcastInfo.previewing);
+  if (needSample && (!image.getAttribute('src') || refresh && image.dataset.skin !== signature)) {
+    image.src = '/api/theme/preview.jpg?t=' + Date.now();
+    image.dataset.skin = signature;
+  }
+  if (ocean && needSample && background.getAttribute('src') !== image.getAttribute('src')) background.src = image.getAttribute('src');
+}
+$$('[data-stream-preset]').forEach(button => button.onclick = async () => {
+  if (button.getAttribute('aria-pressed') === 'true') return;
+  $$('[data-stream-preset]').forEach(b => b.disabled = true);
+  try {
+    await flushConfig();
+    queueConfig({stream_theme: {preset: button.dataset.streamPreset}}, 0);
+    await flushConfig();
+    syncPreviewStream(!!broadcastInfo.previewing);
+    toast(button.dataset.streamPreset === 'ocean' ? '已换上蓝色海洋主题' : '已恢复原始画面');
+  } catch (error) { $('#themeSaveState').textContent = '主题切换未保存：' + error.message; }
+  finally { $$('[data-stream-preset]').forEach(b => b.disabled = false); }
+});
+$('#openThemes').onclick = () => document.querySelector('nav [data-tab="themes"]').click();
+$('#themeOpenLayout').onclick = () => document.querySelector('nav [data-tab="layout"]').click();
+$('#themeOpenBroadcast').onclick = () => document.querySelector('nav [data-tab="broadcast"]').click();
+$('#themeChooseModel').onclick = () => document.querySelector('nav [data-tab="l2d"]').click();
 let layoutDrag = null;
 function layoutRect() {
+  if (oceanTheme()) {
+    const c = CFG.stream_theme, h = Number(c.avatar_size ?? 0.54);
+    return {x: Number(c.avatar_x ?? 0.125), y: Number(c.avatar_y ?? 0.745), w: h * 9 / 16, h};
+  }
   const c = CFG.live2d || {}, size = Number(c.overlay_size ?? 0.5), margin = Number(c.overlay_margin ?? 0.02);
   const h = size, w = h * 9 / 16, corner = c.overlay_corner || 'br';
   const x = c.overlay_x ?? (corner.includes('l') ? margin * 9 / 16 + w / 2 : 1 - margin * 9 / 16 - w / 2);
@@ -1640,11 +1748,16 @@ function renderLayout() {
   $('#layoutXValue').textContent = (r.x * 100).toFixed(1) + '%';
   $('#layoutYValue').textContent = (r.y * 100).toFixed(1) + '%';
   $('#layoutSizeValue').textContent = (r.h * 100).toFixed(0) + '%';
+  $('#layoutSize').value = r.h;
+  $('#overlayCorner').disabled = oceanTheme();
+  $('[data-k="live2d.overlay_margin"]').disabled = oceanTheme();
   const show = !!broadcastInfo.previewing;
   renderRiceLayout(show);
   $('#layoutPreviewImage').hidden = !show;
-  $('#layoutPlaceholder').hidden = show;
+  $('#layoutPlaceholder').hidden = show || oceanTheme();
+  $('#layoutThemeBackground').hidden = show || !oceanTheme();
   const frame = $('#layoutModelPreview');
+  styleThemeAvatar(frame);
   frame.hidden = show;
   if (!show && enabled && $('#layout').classList.contains('on')) {
     if (!frame.getAttribute('src')) frame.src = '/live2d?overlay=1';
@@ -1653,10 +1766,16 @@ function renderLayout() {
   $('#layoutState').textContent = state;
   $('#layoutState').style.color = broadcastInfo.overlay_error ? 'var(--red)' : '';
 }
-function moveLayout(patch) { queueConfig({live2d: patch}, 120); }
+function moveLayout(patch) {
+  if (oceanTheme()) {
+    const theme = {};
+    for (const [key, value] of Object.entries(patch)) if (['overlay_x', 'overlay_y', 'overlay_size'].includes(key)) theme[key.replace('overlay_', 'avatar_')] = value;
+    queueConfig({stream_theme: theme}, 120);
+  } else queueConfig({live2d: patch}, 120);
+}
 $('#layoutX').oninput = () => moveLayout({overlay_x: Number($('#layoutX').value) / 100});
 $('#layoutY').oninput = () => moveLayout({overlay_y: Number($('#layoutY').value) / 100});
-$('#layoutReset').onclick = () => moveLayout({overlay_x: null, overlay_y: null, overlay_corner: 'br', overlay_size: 0.5, overlay_margin: 0.02});
+$('#layoutReset').onclick = () => moveLayout(oceanTheme() ? {overlay_x: 0.125, overlay_y: 0.745, overlay_size: 0.54} : {overlay_x: null, overlay_y: null, overlay_corner: 'br', overlay_size: 0.5, overlay_margin: 0.02});
 $('#openLayout').onclick = () => document.querySelector('nav button[data-tab="layout"]').click();
 $('#layoutBack').onclick = () => document.querySelector('nav button[data-tab="broadcast"]').click();
 $('#openLive2D').onclick = $('#layoutModel').onclick = () => document.querySelector('nav button[data-tab="l2d"]').click();
@@ -1912,6 +2031,7 @@ async function pollBroadcast() {
     $('#srcStop').disabled = broadcastBusy || !broadcastInfo.source;
     syncPreviewStream(show);
     renderLayout();
+    renderTheme();
     updateBroadcastButtons();
   } catch (e) { $('#broadcastError').textContent = '直播服务连接失败，请检查软件是否仍在运行。'; }
 }
@@ -1988,13 +2108,13 @@ async function cancelExternalTimer() {
 $('#externalTimerCancel').onclick = cancelExternalTimer;
 setInterval(pollSchedule, 5000); pollSchedule();
 function syncPreviewStream(show) {
-  for (const [id, section] of [['broadcastPreviewImage', 'broadcast'], ['layoutPreviewImage', 'layout']]) {
+  for (const [id, section] of [['broadcastPreviewImage', 'broadcast'], ['layoutPreviewImage', 'layout'], ['themeLiveImage', 'themes']]) {
     const img = $('#' + id), want = show && $('#' + section).classList.contains('on');
     if (want && !img.getAttribute('src')) img.src = `/api/broadcast/stream.mjpg?t=${Date.now()}`;
     else if (!want) img.removeAttribute('src');
   }
 }
-for (const id of ['broadcastPreviewImage', 'layoutPreviewImage']) $('#' + id).onerror = () => {
+for (const id of ['broadcastPreviewImage', 'layoutPreviewImage', 'themeLiveImage']) $('#' + id).onerror = () => {
   const img = $('#' + id);
   if (!img.getAttribute('src')) return;
   img.removeAttribute('src');
