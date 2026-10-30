@@ -137,7 +137,7 @@ class Player:
 
     def __init__(self, cfg_ai: dict, bridge: GameBridge, speak=None, log_push=None,
                  narrate: bool = True, pipe=None, emotions=None, chars=(), on_chars=None,
-                 auto_depth: bool = True, depth: int = 0):
+                 auto_depth: bool = True, depth: int = 0, observer=None):
         self.cfg = cfg_ai
         self.bridge = bridge
         self.speak = speak or (lambda text, emotion="": None)
@@ -174,6 +174,14 @@ class Player:
         self._expedition_depth = None
         self._expedition_recovery = False
         self._last_expedition = None
+        self.observer = observer
+
+    def _observe(self, method, *args):
+        if self.observer is not None:
+            try:
+                getattr(self.observer, method)(*args)
+            except Exception as error:
+                self.log_push("warn", f"直播白饭计数暂不可用：{error}")
 
     def commentary_context(self) -> str:
         """复用最近读到的游戏状态，回复弹幕时不再阻塞查询游戏桥。"""
@@ -582,6 +590,7 @@ class Player:
         latest = await asyncio.to_thread(self.bridge.state)
         self._last_state = latest
         self._state_time = time.monotonic()
+        self._observe("observe", latest)
         if not lifecycle.needs_recovery(latest):
             self._reset_death_wait()
             return {"screen": "battle", "ok": False, "stale": True, "say": ""}
@@ -631,6 +640,7 @@ class Player:
             state = await asyncio.to_thread(self.bridge.state)
         self._last_state = state
         self._state_time = time.monotonic()
+        self._observe("observe", state)
         self._remember_character(state)
         screen = state.get("screen")
         if screen not in (None, "", "character_select", "menu", "hall", "other") and not state.get("busy"):
@@ -751,6 +761,7 @@ class Player:
             result = await self._verify_character_pick(state, act, result)
         if result.get("stale"):
             return {"screen": screen, "action": act, "ok": False, "stale": True, "say": ""}
+        self._observe("action", state, act, result)
         if result.get("ok") and screen == "character_select" and result.get("character_name"):
             # 游戏已确认选角成功就记下，避免下一帧尚未读到就重启而丢失这局记录。
             self._remember_character({"run": {"character": result["character_name"]}})
@@ -797,7 +808,8 @@ class Player:
             if screen == "battle" and self.fails >= 2:
                 # 牌没了/能量不够时反复撞同一张打不出的牌没有意义，把主动权交回去。
                 self.fails = 0
-                await asyncio.to_thread(self.bridge.end_turn)
+                fallback_result = await asyncio.to_thread(self.bridge.end_turn)
+                self._observe("action", state, {"action": "end"}, fallback_result)
             elif self.fails >= 3:
                 # 非战斗界面没有「回合」可以交还，只能停下来让人看一眼，
                 # 否则会以极高频率重复同一个无效动作。
@@ -866,3 +878,4 @@ class Player:
 
     def stop(self):
         self.running = False
+        self._observe("pause")

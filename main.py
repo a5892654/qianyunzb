@@ -20,6 +20,8 @@ from brain import Brain, default_qoder_exe, list_qoder_models
 from dtgame.bridge import BridgeError, GameBridge
 from dtgame.launcher import GameProcess, find_godot
 from dtgame.player import Player as DTPlayer
+from dtgame.rice import RiceTracker
+from live_rice import RiceCounter
 from live_broadcast import Broadcast
 from live_schedule import DailyBroadcastSchedule
 from pipeline import Pipeline
@@ -79,6 +81,7 @@ class App:
         self.dt_resume_lock = asyncio.Lock()
         self.engine_ready = asyncio.Event()
         self.game = GameProcess(self.cfg.get("dtgame", {}))
+        self.rice = RiceCounter()
         self.broadcast = Broadcast(self)
         self.status = {}
         logging.getLogger().addHandler(UiLogHandler(self))
@@ -224,12 +227,21 @@ class App:
             on_chars=lambda names: self._remember_chars(names),
             auto_depth=bool(c.get("auto_depth", True)),
             depth=c.get("depth", 0),
+            observer=RiceTracker(self.rice, lambda: bool(self.cfg.get("rice_counter", {}).get("enabled")), self.rice_awarded),
         )
         p.running = True
         self.dt = p
         self.dt_task = asyncio.create_task(self._dt_supervise(p))
         self.dt_task.add_done_callback(self._task_died)
         return {"ok": True}
+
+    def rice_state(self):
+        return {**self.rice.state(self.cfg.get("rice_counter", {}).get("enabled", False)),
+                "error": getattr(self.broadcast.capture, "rice_error", "")}
+
+    def rice_awarded(self):
+        self.push("rice", self.rice_state())
+        self.push("log", {"level": "info", "msg": f"AI 击败第三幕 Boss，白饭 +1，累计 {self.rice.total} 碗！"})
 
     @staticmethod
     def _task_died(task: asyncio.Task):
@@ -444,6 +456,21 @@ def build_web(app: App):
     async def overlay(_):
         return page("overlay.html")
 
+    @routes.get("/rice")
+    async def rice_page(_):
+        return page("rice.html")
+
+    @routes.get("/api/rice/state")
+    async def rice_state(_):
+        return web.json_response(app.rice_state())
+
+    @routes.post("/api/rice/preview")
+    async def rice_preview(_):
+        app.rice.preview()
+        state = app.rice_state()
+        app.push("rice", state)
+        return ok(**state)
+
     @routes.get("/source")
     async def source_page(_):
         return page("source.html")
@@ -554,6 +581,10 @@ def build_web(app: App):
         if isinstance(patch.get("songs"), dict):
             patch["songs"].pop("netease_cookie", None)
             patch["songs"].pop("_ne_logged_in", None)
+        if "rice_counter" in patch:
+            rice_patch = patch["rice_counter"]
+            if not isinstance(rice_patch, dict) or set(rice_patch) - {"enabled"} or ("enabled" in rice_patch and type(rice_patch["enabled"]) is not bool):
+                return web.json_response({"ok": False, "error": "白饭计数开关无效"}, status=400)
         if "wishlist" in patch:
             try:
                 if not isinstance(patch["wishlist"], dict):
@@ -570,6 +601,10 @@ def build_web(app: App):
         if "live2d" in patch:
             app.push("l2d_config", {})
             await app.broadcast.refresh_overlay()
+        if "rice_counter" in patch:
+            if not app.cfg["rice_counter"].get("enabled") and app.dt:
+                app.dt._observe("pause")
+            app.push("rice", app.rice_state())
         if "songs" in patch:
             app.songs._apply_volume()
         if "wishlist" in patch:

@@ -8,6 +8,7 @@ import time
 from live_capture import (CaptureError, OUT_H, OUT_W, WindowStreamCapture,
                           close_window, fit_borderless_client, sources)
 from live_overlay import Live2DOverlay, OverlayCompositor, OverlayError, find_edge
+from live_rice import RiceCompositor
 from live_platform import (BiliBroadcastPlatform, FaceAuthRequiredError,
                            PlatformError)
 
@@ -33,6 +34,8 @@ class Broadcast:
     def __init__(self, app):
         self.app = app
         self.capture = WindowStreamCapture()
+        if getattr(app, "rice", None) is not None:
+            self.capture.rice_compositor = RiceCompositor(app.rice, lambda: app.cfg.get("rice_counter", {}))
         self.platform = None
         self.lock = asyncio.Lock()
         self.phase = "idle"

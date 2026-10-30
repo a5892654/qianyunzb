@@ -1,0 +1,202 @@
+"""离线验证直播白饭计数、AI胜利识别与采集合成；不运行或修改游戏。"""
+import asyncio
+import copy
+from pathlib import Path
+import sys
+import tempfile
+from types import SimpleNamespace
+import unittest
+from unittest.mock import AsyncMock, Mock, patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import numpy as np
+from aiohttp.test_utils import TestClient, TestServer
+
+import config
+from dtgame.player import Player
+from dtgame.rice import RiceTracker
+from live_rice import RiceCounter, RiceCompositor
+from live_capture import WindowStreamCapture
+
+
+def battle(act=3, run_id="run1", hp=30):
+    return {"screen": "battle", "run": {"run_id": run_id, "act": act, "hp": hp},
+            "battle": {"type": "boss", "hp": hp, "turn": 3,
+                       "enemies": [{"id": "fallen_knight_boss", "name": "灰烬骑士", "hp": 90}]}}
+
+
+class RiceTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "rice.json"
+        self.counter = RiceCounter(self.path)
+        self.enabled = True
+        self.award = Mock()
+        self.tracker = RiceTracker(self.counter, lambda: self.enabled, self.award)
+
+    def arm(self, state=None):
+        state = state or battle()
+        self.tracker.action(state, {"action": "play"}, {"ok": True})
+
+    def won(self, state=None):
+        state = copy.deepcopy(state or battle())
+        state["battle"].update(battle_over=True, awaiting_confirm=True)
+        return state
+
+    def test_ai_victory_once_and_restart_keeps_count_and_claim(self):
+        self.arm()
+        self.tracker.observe(self.won())
+        self.assertEqual(self.counter.total, 1)
+        self.assertEqual(self.award.call_count, 1)
+        self.counter = RiceCounter(self.path)
+        self.tracker = RiceTracker(self.counter, lambda: True)
+        self.arm()
+        self.tracker.observe(self.won())
+        self.assertEqual(self.counter.total, 1)
+        self.arm(battle(run_id="run2"))
+        self.tracker.observe(self.won(battle(run_id="run2")))
+        self.assertEqual(self.counter.total, 2)
+
+    def test_manual_failed_ai_action_other_acts_and_loss_do_not_count(self):
+        self.tracker.observe(self.won())
+        self.tracker.action(battle(), {"action": "play"}, {"ok": False})
+        self.tracker.observe(self.won())
+        for act in (1, 2, 4):
+            self.arm(battle(act=act))
+            self.tracker.observe(self.won(battle(act=act)))
+        self.arm()
+        self.tracker.observe(self.won(battle(hp=0)))
+        self.assertEqual(self.counter.total, 0)
+
+    def test_off_and_stopping_ai_preserve_total_without_new_awards(self):
+        self.arm()
+        self.tracker.pause()
+        self.tracker.observe(self.won())
+        self.enabled = False
+        self.arm()
+        self.tracker.observe(self.won())
+        self.assertEqual(self.counter.total, 0)
+        self.enabled = True
+        self.arm()
+        self.tracker.observe(self.won())
+        self.assertEqual(self.counter.total, 1)
+        self.enabled = False
+        self.assertEqual(self.counter.total, 1)
+
+    def test_map_node_boss_context_handles_legacy_enemy_without_type(self):
+        selected = {"screen": "map", "run": {"act": 3}, "map": {"choices": [{"col": 13, "row": 0, "type": "boss"}]}}
+        self.tracker.action(selected, {"action": "node", "col": 13, "row": 0}, {"ok": True})
+        current = {"screen": "battle", "run": {"act": 3, "hp": 20}, "battle": {"hp": 20, "enemies": [{"name": "新版Boss", "hp": 10}]}}
+        self.arm(current)
+        self.tracker.observe({"screen": "dialog", "run": current["run"], "dialog": {"title": "Boss魂 · 力量觉醒"}})
+        self.assertEqual(self.counter.total, 1)
+
+    def test_new_expedition_rotates_legacy_identity_and_preview_is_not_an_award(self):
+        original = self.counter.session
+        self.tracker.action({"screen": "hall"}, {"action": "expedition"}, {"ok": True})
+        self.assertNotEqual(self.counter.session, original)
+        self.counter.preview()
+        self.assertEqual(self.counter.total, 0)
+        self.assertTrue(self.counter.event_id)
+        self.assertEqual(RiceCounter(self.path).total, 0)
+
+    def test_ai_choosing_node_or_claiming_manual_boss_loot_is_not_combat(self):
+        selected = {"screen": "map", "run": battle()["run"], "map": {"choices": [{"col": 13, "row": 0, "type": "boss"}]}}
+        self.tracker.action(selected, {"action": "node", "col": 13, "row": 0}, {"ok": True})
+        soul = {"screen": "dialog", "run": battle()["run"], "dialog": {"texts": ["Boss魂 · 力量觉醒"]}}
+        self.tracker.observe(soul)
+        self.tracker.action(soul, {"action": "overlay"}, {"ok": True})
+        self.tracker.observe({"screen": "reward", "run": battle()["run"]})
+        self.assertEqual(self.counter.total, 0)
+
+    def test_loot_proves_victory_but_generic_map_does_not(self):
+        self.arm()
+        self.tracker.observe({"screen": "map", "run": battle()["run"], "map": {}})
+        self.assertEqual(self.counter.total, 0)
+        self.tracker.observe({"screen": "loot", "run": battle()["run"], "loot": {}})
+        self.assertEqual(self.counter.total, 1)
+
+    def test_save_failure_does_not_commit_count_or_dedupe(self):
+        with patch("live_rice.os.replace", side_effect=OSError("fixture")):
+            with self.assertRaises(OSError): self.counter.award("once")
+        self.assertEqual(self.counter.total, 0)
+        self.assertNotIn("once", self.counter.seen)
+
+    def test_native_overlay_is_bottom_left_and_independent_of_live2d(self):
+        self.counter.preview()
+        settings = {"enabled": True}
+        compositor = RiceCompositor(self.counter, lambda: settings)
+        source = np.full((1080, 1920, 4), 80, np.uint8)
+        capture = WindowStreamCapture()
+        capture.rice_compositor = compositor
+        self.assertIsNone(capture.compositor)
+        capture._compose_frame(source)
+        result = np.frombuffer(capture._frame, np.uint8).reshape(source.shape)
+        self.assertTrue(np.any(result[900:1058, 22:395, :3] != 80))
+        np.testing.assert_array_equal(result[:850], source[:850])
+        np.testing.assert_array_equal(source, np.full_like(source, 80))
+        with patch("live_rice.time.time", return_value=self.counter.celebrated_at + 0.3):
+            a = source.copy(); compositor.apply(a)
+        with patch("live_rice.time.time", return_value=self.counter.celebrated_at + 0.5):
+            b = source.copy(); compositor.apply(b)
+        self.assertTrue(np.any(a != b), "帧动画需要实际切换像素")
+        settings["enabled"] = False
+        capture._compose_frame(source)
+        np.testing.assert_array_equal(np.frombuffer(capture._frame, np.uint8).reshape(source.shape), source)
+
+
+class PlayerObserverTests(unittest.IsolatedAsyncioTestCase):
+    async def test_player_reports_successful_ai_action_then_winning_state(self):
+        bridge = Mock()
+        bridge.screen.return_value = {"screen": "battle"}
+        bridge.play_card.return_value = {"ok": True}
+        bridge.call.return_value = {"ok": True}
+        observer = Mock()
+        player = Player({}, bridge, narrate=False, observer=observer)
+        player._ask = AsyncMock(return_value={"action": "play", "slot": 0})
+        await player.step(battle())
+        self.assertEqual(observer.action.call_args.args[1], {"action": "play", "slot": 0})
+        settled = battle(); settled["battle"]["awaiting_confirm"] = True
+        await player.step(settled)
+        self.assertEqual(observer.observe.call_count, 2)
+        player.stop()
+        observer.pause.assert_called_once()
+
+
+class RiceRouteTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        import main
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        self.app = object.__new__(main.App)
+        self.app.cfg = copy.deepcopy(config.DEFAULTS)
+        self.app.dt = None
+        self.app.push = Mock()
+        self.app.rice = RiceCounter(Path(self.tmp.name) / "rice.json")
+        self.app.broadcast = SimpleNamespace(capture=SimpleNamespace())
+        self.app.bili = SimpleNamespace(client=None)
+        self.client = TestClient(TestServer(main.build_web(self.app)))
+        await self.client.start_server(); self.addAsyncCleanup(self.client.close)
+
+    async def test_toggle_preview_and_transparent_browser_page(self):
+        response = await self.client.post('/api/rice/preview', json={})
+        self.assertEqual(response.status, 403)
+        with patch('config.save'):
+            response = await self.client.post('/api/config', json={"rice_counter": {"enabled": True}}, headers={"X-BVB": "1"})
+        self.assertTrue((await response.json())["ok"])
+        response = await self.client.post('/api/rice/preview', json={}, headers={"X-BVB": "1"})
+        state = await response.json()
+        self.assertTrue(state["enabled"])
+        self.assertEqual(state["total"], 0)
+        self.assertTrue(state["event_id"])
+        self.assertEqual((await self.client.get('/rice')).status, 200)
+        self.assertEqual((await self.client.get('/static/assets/rice_bowl_celebrate.png')).status, 200)
+        self.assertEqual(self.app.rice.total, 0)
+
+    async def test_config_cannot_inject_real_count(self):
+        response = await self.client.post('/api/config', json={"rice_counter": {"total": 999}}, headers={"X-BVB": "1"})
+        self.assertEqual(response.status, 400)
+        self.assertEqual(self.app.rice.total, 0)
+
+
+if __name__ == '__main__': unittest.main(verbosity=2)

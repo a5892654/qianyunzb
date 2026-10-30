@@ -233,6 +233,13 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
     <p class="hint">预览画面就是观众看到的画面，包含已启用的 Live2D 皮套。位置和大小可在「画面调整」中实时修改，自动保存。</p>
   </div>
   <div class="card">
+    <h3>大碗白饭 · AI 干饭战绩</h3>
+    <div class="row"><label class="c"><input type="checkbox" data-k="rice_counter.enabled">把白饭计数叠加到直播画面左下角</label><span style="flex:1"></span><b id="riceTotal">0 碗</b></div>
+    <div class="row"><button class="btn" id="ricePreview">试播开饭动画</button><a class="btn" href="/rice" target="_blank" rel="noopener">打开透明浏览器源</a><span class="hint" id="riceStatus" role="status"></span></div>
+    <p class="hint">AI 每次击败第三幕 Boss，白饭 +1 并播放像素庆祝动画。累计碗数重启后保留；关闭后停止计数，已有白饭保留。试播不会增加碗数。预览、千音源画面和直播同步生效，无需开启皮套。</p>
+    <p class="hint">OBS 单独采集游戏时，添加浏览器源 <code id="riceUrl"></code>，宽 1920、高 1080。已采集千音源画面时无需重复添加。</p>
+  </div>
+  <div class="card">
     <h3>用直播姬开播（千音出画面）</h3>
     <div class="row"><span class="hint" id="externalTimerStatus" role="status">设置停播分钟数后自动监测开播</span><button class="btn" id="externalTimerCancel" disabled>关闭自动停播</button></div>
     <p class="hint">登录同一个主播账号，设置上方“播多久自动停播”，直播姬开播后会自动计时、到点自动结束B站直播间。能读取本场开播时间时，重启后继续按原时间计时；否则从首次检测到开播算起。每天固定时间下播可选下方“直播姬 / OBS：仅定时停播”。请保持本工具运行。</p>
@@ -849,6 +856,7 @@ function handle(m) {
     case 'speak_end': $('#nowSpeaking').innerHTML = '<span class="dim">当前没有在说话</span>'; replyEls[m.id]?.classList.remove('speaking'); break;
     case 'songs': renderSongs(m); break;
     case 'wishlist': renderWishlist(m); break;
+    case 'rice': renderRice(m); break;
   }
 }
 function setStatus(s) {
@@ -1743,6 +1751,18 @@ for (const id of ['broadcastPreviewImage', 'layoutPreviewImage']) $('#' + id).on
   img.removeAttribute('src');
   setTimeout(() => syncPreviewStream(!!broadcastInfo.previewing), 800);
 };
+function renderRice(state) {
+  $('#riceTotal').textContent = `${state.total ?? 0} 碗`;
+  $('#riceStatus').textContent = state.error || (state.enabled ? '白饭已上镜 · 左下角' : '白饭叠加已关闭');
+  $('#ricePreview').disabled = !state.enabled;
+}
+$('#riceUrl').textContent = location.origin + '/rice';
+$('#ricePreview').onclick = async () => {
+  try { await flushConfig(); const result = await api('/api/rice/preview', {}); if (!result.ok) throw new Error(result.error); renderRice(result); toast('开饭动画试播中，累计碗数不变'); }
+  catch (error) { toast(error.message || String(error)); }
+};
+setInterval(() => api('/api/rice/state').then(renderRice).catch(() => {}), 2000);
+api('/api/rice/state').then(renderRice).catch(() => {});
 setInterval(pollBroadcast, 1000);
 loadConfig().then(() => { loadWeights(); loadDevices(); loadL2d(); api('/api/songs/state').then(renderSongs); refreshBroadcastAccount(); refreshBroadcastSources().catch(e => $('#broadcastError').textContent = e.message); loadBroadcastAreas().catch(e => $('#broadcastError').textContent = e.message); pollBroadcast(); });
 connectWs();

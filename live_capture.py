@@ -332,6 +332,7 @@ class WindowStreamCapture:
         self._conn: socket.socket | None = None
         self._threads: list[threading.Thread] = []
         self.compositor = None  # 直播时叠加皮套（live_overlay.OverlayCompositor）
+        self.rice_compositor = None  # 独立直播彩蛋，不依赖皮套开关
         self.compositor_error = ""
 
     # ---------------- 预览 ----------------
@@ -492,6 +493,13 @@ class WindowStreamCapture:
             except Exception as exc:
                 self.compositor_error = f"Live2D 画面合成失败：{exc}"
                 self.compositor = None
+        rice = getattr(self, "rice_compositor", None)
+        if rice is not None:
+            try:
+                rice.apply(canvas)
+                self.rice_error = ""
+            except Exception as exc:
+                self.rice_error = f"白饭画面合成失败：{exc}"
         data = canvas.tobytes()
         with self._frame_cv:
             self._frame = data
