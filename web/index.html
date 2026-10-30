@@ -548,6 +548,7 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
     </div>
     <div class="now" id="sgNow"><span class="dim">现在没有在放歌</span></div>
     <div id="sgError" role="status" hidden></div>
+    <div class="hint" id="sgLoopHint" role="status" hidden></div>
     <div id="sgQueue" style="margin-top:10px"></div>
   </div>
   <div class="grid g2">
@@ -580,8 +581,8 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
     <div class="row"><input id="sgPlaylistInput" placeholder="粘贴网易云歌单链接，或填写歌单 ID"><button class="btn p" id="sgLoadPlaylist">读取歌单</button></div>
     <p class="hint" id="sgLibraryHint" role="status">可选择账号内的歌单，也可直接粘贴公开歌单链接。</p>
     <div id="sgPlaylistTools" hidden>
-      <div class="row"><b id="sgPlaylistTitle" style="flex:1"></b><button class="btn b" id="sgPlayPlaylist">播放本页</button><button class="btn" id="sgAddPlaylist">本页加入队列</button></div>
-      <p class="hint">本页作为背景歌单自动播放，不播报歌名，也不占点歌名额。观众点歌优先切入，点播结束后继续歌单；每页最多 100 首。</p>
+      <div class="row"><b id="sgPlaylistTitle" style="flex:1"></b><button class="btn b" id="sgPlayPlaylist">播放全部</button><button class="btn" id="sgAddPlaylist">本页加入队列</button></div>
+      <p class="hint">播放全部默认循环当前整份歌单，自动跳过无法播放的歌曲。静默播放，观众点歌优先；清空歌单可停止循环。歌曲列表每页显示 100 首。</p>
     </div>
     <div id="sgPlaylistSongs" class="queue" style="max-height:360px;color:var(--text)"></div>
     <div class="row" id="sgPlaylistPages" style="margin-top:10px" hidden><button class="btn sm" id="sgPlaylistPrev">上一页</button><span class="hint" id="sgPlaylistPage"></span><button class="btn sm" id="sgPlaylistNext">下一页</button></div>
@@ -1237,6 +1238,8 @@ function renderSongs(st) {
   $('#sgPause').dataset.paused = (st.paused || c?.paused) ? '1' : '';
   $('#sgError').textContent = st.error || '';
   $('#sgError').hidden = !st.error;
+  $('#sgLoopHint').textContent = st.playlist ? `正在循环歌单：${st.playlist.name}（共 ${st.playlist.total} 首，观众点歌优先）` : '';
+  $('#sgLoopHint').hidden = !st.playlist;
   $('#sgQueue').innerHTML = st.queue.length ? st.queue.map((s, i) => `<div class="row" style="margin-bottom:4px">
       <b style="width:22px;color:var(--pink)">${i + 1}</b>
       <span style="flex:1">${s.pinned ? '<span class="tag guard">插队</span> ' : ''}${esc(s.name)} - ${esc(s.artist)} <span class="hint">· ${s.source === 'autoplay' ? '歌单自动播放' : esc(s.by)}${s.similar ? ' · 相似匹配（点的是“' + esc(s.query) + '”）' : ''}</span></span>
@@ -1322,7 +1325,8 @@ async function loadSongPlaylist(id = $('#sgPlaylistInput').value.trim(), offset 
     $('#sgPlaylistTitle').textContent = `${r.name} · ${r.total} 首`;
     $('#sgPlaylistSongs').innerHTML = songRows(r.songs) || '歌单为空';
     $('#sgPlaylistTools').hidden = false;
-    $('#sgPlayPlaylist').disabled = $('#sgAddPlaylist').disabled = !r.songs.some(s => s.playable);
+    $('#sgPlayPlaylist').disabled = !r.total;
+    $('#sgAddPlaylist').disabled = !r.songs.some(s => s.playable);
     $('#sgPlaylistPages').hidden = r.total <= 100;
     $('#sgPlaylistPrev').disabled = !r.offset; $('#sgPlaylistNext').disabled = !r.more;
     $('#sgPlaylistPage').textContent = r.total ? `第 ${r.offset + 1}–${r.offset + r.songs.length} 首 / 共 ${r.total} 首` : '';
@@ -1336,13 +1340,21 @@ $('#sgLoadPlaylist').onclick = () => loadSongPlaylist();
 $('#sgPlaylistInput').onkeydown = e => { if (e.key === 'Enter') loadSongPlaylist(); };
 $('#sgPlaylistPrev').onclick = () => { if (sgPlaylist) loadSongPlaylist(sgPlaylist.id, Math.max(0, sgPlaylist.offset - 100)); };
 $('#sgPlaylistNext').onclick = () => { if (sgPlaylist) loadSongPlaylist(sgPlaylist.id, sgPlaylist.offset + 100); };
-for (const [id, mode] of [['sgPlayPlaylist', 'play'], ['sgAddPlaylist', 'queue']]) {
-  $('#' + id).onclick = async e => {
-    if (!sgPlaylist) return;
-    try { await addSelectedSongs(sgPlaylist.songs.map(s => String(s.id)), mode, e.currentTarget, 'autoplay'); }
-    catch (error) { toast(error.message); }
-  };
-}
+$('#sgPlayPlaylist').onclick = async e => {
+  if (!sgPlaylist) return;
+  const button = e.currentTarget;
+  button.disabled = true;
+  try {
+    const r = await neApi('/api/songs/playlist/play', {id: sgPlaylist.id});
+    toast(`已开启循环播放《${r.playlist.name}》（共 ${r.playlist.total} 首，静默播放，观众点歌优先）`);
+  } catch (error) { toast(error.message); }
+  finally { button.disabled = !sgPlaylist?.total; }
+};
+$('#sgAddPlaylist').onclick = async e => {
+  if (!sgPlaylist) return;
+  try { await addSelectedSongs(sgPlaylist.songs.map(s => String(s.id)), 'queue', e.currentTarget, 'autoplay'); }
+  catch (error) { toast(error.message); }
+};
 let neTimer = null, neAttempt = 0, neCaptcha = null, neCaptchaTimer = null, neChallengeVersion = 0, neVerifyAction = null;
 const neScripts = new Map();
 function clearNeCaptcha() {

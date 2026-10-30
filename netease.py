@@ -147,7 +147,7 @@ class NetEase:
                   "creator": (p.get("creator") or {}).get("nickname", "")} for p in data.get("playlist") or []]
         return {"playlists": items, "more": bool(data.get("more")), "offset": offset + len(items)}
 
-    async def playlist(self, reference, offset=0):
+    async def playlist_info(self, reference):
         ref = music_reference(reference, "playlist")
         if not ref or ref[0] != "playlist":
             raise ValueError("请填写网易云歌单链接或歌单 ID")
@@ -157,13 +157,22 @@ class NetEase:
             raise RuntimeError("无法读取此歌单，请检查歌单是否存在及账号访问权限")
         tracks = playlist.get("tracks") or []
         ids = [int(t["id"]) for t in playlist.get("trackIds") or tracks]
-        page_ids = ids[offset:offset + 100]
-        details = {s["id"]: s for s in await self.details(page_ids)} if page_ids else {}
-        songs = [details.get(i, {"id": i, "name": "已下架或无法读取的歌曲", "artist": "", "dur": 0}) for i in page_ids]
-        await self._status(songs)
-        return {"id": ref[1], "name": playlist.get("name", "歌单"), "songs": songs,
-                "total": len(ids), "offset": offset, "more": offset + len(page_ids) < len(ids),
+        return {"id": ref[1], "name": playlist.get("name", "歌单"), "ids": ids,
                 "incomplete": int(playlist.get("trackCount") or 0) > len(ids)}
+
+    async def songs_by_ids(self, ids):
+        details = {s["id"]: s for s in await self.details(ids)} if ids else {}
+        songs = [details.get(i, {"id": i, "name": "已下架或无法读取的歌曲", "artist": "", "dur": 0}) for i in ids]
+        await self._status(songs)
+        return songs
+
+    async def playlist(self, reference, offset=0):
+        info = await self.playlist_info(reference)
+        ids = info["ids"]
+        page_ids = ids[offset:offset + 100]
+        return {"id": info["id"], "name": info["name"], "songs": await self.songs_by_ids(page_ids),
+                "total": len(ids), "offset": offset, "more": offset + len(page_ids) < len(ids),
+                "incomplete": info["incomplete"]}
 
     async def urls(self, ids, br=320000):
         out = {}

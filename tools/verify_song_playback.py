@@ -114,6 +114,13 @@ class NetEaseLibraryTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(last["more"])
         self.assertEqual(last["total"], 205)
 
+    async def test_loop_metadata_contains_all_ids_without_loading_every_page(self):
+        info = await self.ne.playlist_info("456")
+        self.assertEqual(info["ids"], list(range(1, 206)))
+        self.assertFalse(info["incomplete"])
+        self.assertEqual(len(self.requests), 1)
+        self.assertTrue(self.requests[0][0].endswith("playlist/detail"))
+
     async def test_exact_song_id_never_searches_or_replaces_unavailable_song(self):
         self.ne.search = AsyncMock(side_effect=AssertionError("指定 ID 不应该搜索"))
         self.assertIsNone(await self.ne.find("2"))
@@ -142,6 +149,7 @@ class SelectionRouteTests(unittest.IsolatedAsyncioTestCase):
         self.ne.urls = AsyncMock(return_value={1: "url-1", 2: None, 3: "url-3"})
         self.ne.playlists = AsyncMock(return_value={"playlists": [], "more": False, "offset": 0})
         self.ne.playlist = AsyncMock(return_value={"songs": [], "name": "测试歌单"})
+        self.ne.playlist_info = AsyncMock(return_value={"id": 456, "name": "循环歌单", "ids": list(range(1, 206))})
         self.client = TestClient(TestServer(main.build_web(self.app)))
         await self.client.start_server()
 
@@ -205,6 +213,27 @@ class SelectionRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([s["id"] for s in self.app.songs.queue], [1, 9, 10])
         self.assertEqual(self.app.songs.queue[0]["source"], "request")
 
+    async def test_play_all_defaults_to_whole_playlist_loop_and_clear_stops_it(self):
+        self.app.songs.add(song(9), "观众", "viewer")
+        self.app.songs.enqueue_selected([song(77)], source="autoplay")
+        result = await self.post("playlist/play", {"id": "456"})
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["playlist"], {"id": 456, "name": "循环歌单", "total": 205, "loop": True})
+        self.ne.playlist_info.assert_awaited_with("456")
+        self.assertEqual([s["id"] for s in self.app.songs.queue], [9])
+        self.assertEqual(self.app.songs.state()["playlist"]["total"], 205)
+        self.assertTrue((await self.post("control", {"action": "clear"}))["ok"])
+        self.assertIsNone(self.app.songs.state()["playlist"])
+
+    async def test_empty_partial_or_disabled_playlist_never_starts_loop(self):
+        for info in ({"id": 456, "name": "空", "ids": []},
+                     {"id": 456, "name": "部分", "ids": [1], "incomplete": True}):
+            self.ne.playlist_info.return_value = info
+            self.assertFalse((await self.post("playlist/play", {"id": "456"}))["ok"])
+            self.assertIsNone(self.app.songs.loop_playlist)
+        self.app.cfg["songs"]["enabled"] = False
+        self.assertFalse((await self.post("playlist/play", {"id": "456"}))["ok"])
+
 
 class PlaybackSwitchTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -213,6 +242,8 @@ class PlaybackSwitchTests(unittest.IsolatedAsyncioTestCase):
         self.manager.refresh_account = AsyncMock()
         self.manager.ne.url = AsyncMock(side_effect=lambda i: f"url-{i}")
         self.manager.ne.download = AsyncMock(side_effect=lambda url: url.encode())
+        self.manager.ne.playlist_info = AsyncMock(return_value={"id": 456, "name": "循环歌单", "ids": [1, 3]})
+        self.manager.ne.songs_by_ids = AsyncMock(side_effect=lambda ids: [dict(song(i), playable=True) for i in ids])
         self.task = asyncio.create_task(self.manager.run())
 
     async def asyncTearDown(self):
@@ -347,6 +378,114 @@ class PlaybackSwitchTests(unittest.IsolatedAsyncioTestCase):
         self.manager.control("resume")
         await self.wait_until(lambda: self.app.player.play_music.call_count == 2)
         self.assertEqual(self.manager.current["id"], 9)
+
+    async def test_play_all_repeats_last_to_first_without_speaking(self):
+        await self.manager.play_playlist("456")
+        for count, expected in enumerate([1, 3, 1, 3, 1], 1):
+            await self.wait_until(lambda: self.app.player.play_music.call_count == count)
+            self.assertEqual(self.manager.current["id"], expected)
+            if count < 5:
+                self.app.player.play_music.call_args.args[-1]()
+        self.assertTrue(self.manager.state()["playlist"]["loop"])
+        self.app.pipe.say.assert_not_called()
+
+    async def test_whole_playlist_passes_page_boundary_and_skips_unavailable_first_page(self):
+        self.manager.ne.playlist_info.return_value["ids"] = list(range(1, 206))
+        self.manager.ne.songs_by_ids.side_effect = lambda ids: [dict(song(i), playable=i in (101, 205)) for i in ids]
+        await self.manager.play_playlist("456")
+        for count, expected in enumerate([101, 205, 101], 1):
+            await self.wait_until(lambda: self.app.player.play_music.call_count == count)
+            self.assertEqual(self.manager.current["id"], expected)
+            if count < 3:
+                self.app.player.play_music.call_args.args[-1]()
+        batches = [call.args[0] for call in self.manager.ne.songs_by_ids.await_args_list]
+        self.assertEqual(batches[:3], [list(range(1, 101)), list(range(101, 201)), list(range(201, 206))])
+        self.assertEqual(self.manager.state()["playlist"]["total"], 205)
+
+    async def test_single_song_playlist_also_repeats(self):
+        self.manager.ne.playlist_info.return_value["ids"] = [1]
+        await self.manager.play_playlist("456")
+        await self.wait_until(lambda: self.app.player.play_music.call_count == 1)
+        first_qid = self.manager.current["qid"]
+        self.app.player.play_music.call_args.args[-1]()
+        await self.wait_until(lambda: self.app.player.play_music.call_count == 2)
+        self.assertEqual(self.manager.current["id"], 1)
+        self.assertNotEqual(self.manager.current["qid"], first_qid)
+
+    async def test_viewer_request_runs_once_then_background_loop_continues(self):
+        await self.manager.play_playlist("456")
+        await self.wait_until(lambda: self.app.player.play_music.call_count == 1)
+        self.manager.add(song(9), "观众", "viewer")
+        await self.wait_until(lambda: self.app.player.play_music.call_count == 2)
+        self.assertEqual(self.manager.current["id"], 9)
+        for count, expected in enumerate([1, 3, 1], 3):
+            self.app.player.play_music.call_args.args[-1]()
+            await self.wait_until(lambda: self.app.player.play_music.call_count == count)
+            self.assertEqual(self.manager.current["id"], expected)
+        self.assertEqual(self.app.pipe.say.call_count, 2)
+        self.assertTrue(self.manager.state()["playlist"]["loop"])
+
+    async def test_request_can_interrupt_pending_playlist_metadata_loading(self):
+        started, cancelled = asyncio.Event(), asyncio.Event()
+
+        async def delayed_songs(ids):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        self.manager.ne.songs_by_ids.side_effect = delayed_songs
+        await self.manager.play_playlist("456")
+        await asyncio.wait_for(started.wait(), 3)
+        self.manager.add(song(9), "观众", "viewer")
+        await self.wait_until(lambda: self.app.player.play_music.call_count == 1)
+        self.assertTrue(cancelled.is_set())
+        self.assertEqual(self.manager.current["id"], 9)
+        self.assertEqual(self.manager.loop_playlist["cursor"], 0)
+
+    async def test_new_playlist_replaces_previous_loop_and_keeps_requested_track(self):
+        self.manager.enqueue_selected([song(9)], play_now=True)
+        await self.wait_until(lambda: self.app.player.play_music.call_count == 1)
+        await self.manager.play_playlist("456")
+        self.manager.ne.playlist_info.return_value = {"id": 789, "name": "新歌单", "ids": [7, 8]}
+        await self.manager.play_playlist("789")
+        self.assertEqual(self.manager.current["id"], 9)
+        self.app.player.play_music.call_args.args[-1]()
+        for count, expected in enumerate([7, 8, 7], 2):
+            await self.wait_until(lambda: self.app.player.play_music.call_count == count)
+            self.assertEqual(self.manager.current["id"], expected)
+            if count < 4:
+                self.app.player.play_music.call_args.args[-1]()
+        self.assertEqual(self.manager.state()["playlist"]["id"], 789)
+
+    async def test_clear_stops_refill_and_does_not_resurrect_interrupted_background(self):
+        await self.manager.play_playlist("456")
+        await self.wait_until(lambda: self.app.player.play_music.call_count == 1)
+        self.manager.control("clear")
+        self.manager.add(song(9), "观众", "viewer")
+        await self.wait_until(lambda: self.app.player.play_music.call_count == 2)
+        self.assertEqual(self.manager.current["id"], 9)
+        self.assertFalse(self.manager.queue)
+        self.app.player.play_music.call_args.args[-1]()
+        await self.wait_until(lambda: self.manager.current is None)
+        self.assertIsNone(self.manager.loop_playlist)
+        self.assertEqual(self.manager.ne.songs_by_ids.await_count, 1)
+
+    async def test_no_playable_or_broken_audio_stops_loop_instead_of_retrying_forever(self):
+        self.manager.ne.songs_by_ids.side_effect = lambda ids: [dict(song(i), playable=False) for i in ids]
+        await self.manager.play_playlist("456")
+        await self.wait_until(lambda: self.manager.loop_playlist is None)
+        self.assertIn("暂无可完整播放", self.manager.last_error)
+        self.app.player.play_music.assert_not_called()
+        self.manager.ne.playlist_info.return_value["ids"] = [1]
+        self.manager.ne.songs_by_ids.side_effect = lambda ids: [dict(song(i), playable=True) for i in ids]
+        self.manager.ne.url.side_effect = None
+        self.manager.ne.url.return_value = None
+        await self.manager.play_playlist("456")
+        await self.wait_until(lambda: self.manager.loop_playlist is None)
+        self.assertEqual(self.manager.ne.url.await_count, 1)
+        self.assertIn("暂无可完整播放", self.manager.last_error)
 
 
 if __name__ == "__main__":
