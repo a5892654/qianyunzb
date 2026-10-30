@@ -614,9 +614,11 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
   </div>
   <div class="card">
     <h3>点歌规则</h3>
-    <p class="hint">默认直接发弹幕 <code>点歌+歌名</code> 就能免费点歌，例如 <code>点歌+晴天</code>；也支持 <code>点歌＋晴天</code>、<code>点歌:歌名</code> 和 <code>点歌 歌名 歌手</code>。打开下方“点歌需要先送礼物”后，需先获得点歌券。送“插队礼物”拿到插队券：已经在排队的歌会立刻置顶，还没点歌的话下一首点的歌直接置顶。礼物名填 <code>*</code> 表示任意礼物都算。</p>
+    <p class="hint">默认直接发弹幕 <code>点歌+歌名</code> 就能免费点歌，例如 <code>点歌+晴天</code>；也支持 <code>点歌＋晴天</code>、<code>点歌:歌名</code> 和 <code>点歌 歌名 歌手</code>。开启“关注主播即可点歌”后，只需关注当前主播，无需送礼或消耗点歌券；未关注会提示先关注。关闭关注点歌时，按下方礼物开关决定是否需要点歌券。送“插队礼物”仍可获得插队券，礼物名填 <code>*</code> 表示任意礼物都算。</p>
+    <div class="row"><label class="c"><input type="checkbox" data-k="songs.require_follow">关注主播即可点歌（无需送礼）</label></div>
+    <p class="hint">请连接主播直播间，并登录该主播的 B站账号，以识别已经关注的老观众。新关注后直接发送点歌弹幕即可，仍受歌单和每人排队上限限制。</p>
     <div class="row">
-      <label class="c" style="margin-top:18px"><input type="checkbox" data-k="songs.require_gift">点歌需要先送礼物（关掉=免费点歌）</label>
+      <label class="c" style="margin-top:18px"><input type="checkbox" data-k="songs.require_gift">点歌需要先送礼物（关注点歌关闭时生效）</label>
       <label class="f">点歌礼物（逗号分隔）<input data-k="songs.song_gifts"></label>
       <label class="f" style="max-width:150px">送几个换 1 张点歌券<input type="number" data-k="songs.song_gift_count"></label>
     </div>
@@ -1227,7 +1229,7 @@ $('#wishTest').onclick = async () => {
 setInterval(() => { if ($('#songs').classList.contains('on')) pollWishlist(); }, 3000);
 
 // ---------- 点歌 ----------
-const SG_TPL = [['add', '点歌成功'], ['similar', '找到相似版本'], ['pin', '插队成功'], ['play', '开始播放'], ['fail', '没找到歌'], ['need', '没有点歌券'], ['full', '歌单排满'], ['usage', '点歌格式提示']];
+const SG_TPL = [['add', '点歌成功'], ['similar', '找到相似版本'], ['pin', '插队成功'], ['play', '开始播放'], ['fail', '没找到歌'], ['need', '没有点歌券'], ['need_follow', '尚未关注'], ['follow_error', '关注校验失败'], ['full', '歌单排满'], ['usage', '点歌格式提示']];
 $('#sgTpl').innerHTML = SG_TPL.map(([k, l]) => `<div class="row"><label class="c" style="width:130px"><input type="checkbox" data-k="songs.announce_${k}">${l}</label><input data-k="songs.tpl_${k}" style="flex:1"></div>`).join('');
 const fmtT = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 let sgAccountKey = null, sgSearchVersion = 0, sgLibraryVersion = 0, sgLibraryOffset = 0, sgPlaylistVersion = 0, sgPlaylist = null;
