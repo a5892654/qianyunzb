@@ -144,7 +144,15 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
     <div class="hint">在「一键开播」选择游戏窗口和分区，千音直接采集画面与声音，无需另开直播姬或 OBS。</div>
   </div>
   <div class="card">
-    <h3>恶魔之塔 Zero · 自动托管</h3>
+    <div class="row" style="margin-bottom:6px">
+      <h3 style="margin:0;flex:1" id="dtTitle">恶魔之塔 Zero · 自动托管</h3>
+      <label class="f" style="max-width:200px;margin:0">直播游戏
+        <select id="dtGameSelect" data-k="game.active">
+          <option value="demontower">恶魔之塔 Zero</option>
+          <option value="stardew">星露谷物语</option>
+        </select>
+      </label>
+    </div>
     <div class="row" style="margin-bottom:10px">
       <button class="btn b" id="dtStart">启动 / 继续代打</button>
       <button class="btn" id="dtStop">暂停代打</button>
@@ -241,6 +249,12 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
     <div class="hint" id="broadcastAccountHint">登录后自动识别自己的直播间；需要 B站实名和开播资格，遇到验证按 B站提示处理。</div>
   </div>
   <div class="card">
+    <div class="row">
+      <label class="f" style="max-width:260px">要直播并托管的游戏<select id="broadcastGameSelect" data-k="game.active"><option value="demontower">恶魔之塔 Zero</option><option value="stardew">星露谷物语</option></select></label>
+      <button class="btn b" id="broadcastDtStart" style="margin-top:18px">启动代打</button>
+      <button class="btn" id="broadcastDtStop" style="margin-top:18px">暂停代打</button>
+      <span class="hint" id="broadcastDtState" style="margin-top:18px">代打未启动</span>
+    </div>
     <div class="row"><label class="f">直播标题<input id="broadcastTitle" maxlength="60" data-k="broadcast.title"></label><label class="f">直播分区<select id="broadcastArea" data-k="broadcast.area_id"><option value="0">请选择直播分区</option></select></label></div>
     <div class="row"><label class="f">要直播的游戏窗口<select id="broadcastWindow"><option value="">请先启动游戏，再刷新窗口</option></select></label><button class="btn" id="broadcastLaunchGame" style="margin-top:18px">启动游戏</button><button class="btn" id="broadcastRefreshSources" style="margin-top:18px">刷新窗口</button></div>
     <div class="row"><label class="f">声音输出设备<select id="broadcastAudio"><option value="">系统默认输出</option></select></label><button class="btn b" id="broadcastPreview" style="margin-top:18px">预览画面和声音</button><button class="btn" id="broadcastPreviewStop" style="margin-top:18px">停止预览</button></div>
@@ -250,6 +264,7 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
     </div>
     <div class="hint">保存分钟数即启用自动停播。本工具开播自动计时；直播姬 / OBS 开播由后台自动检测。倒计时和每日定时停播都会提前约 30 秒说结束词，等语音播完后在设定时刻停播；结束词留空时使用默认告别语。语音失败或超时仍会继续停播。设为 0 关闭时长计时。</div>
     <div class="hint">只采集选中的窗口，不采集整个桌面。声音采集所选输出设备的游戏和千音配音，也会包含该设备的其他声音；直播前请关闭通知。画质：1080p / 30帧。</div>
+    <div class="hint">星露谷请用「窗口 / 无边框窗口」运行：独占全屏没有独立窗口，窗口采集抓不到。如果切到别的窗口游戏会暂停，可在游戏 Options 里关掉 Pause When Out of Focus。</div>
   </div>
   <div class="card">
     <h3>皮套上镜</h3>
@@ -484,33 +499,69 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
     </div>
   </div>
   <div class="card">
-    <h3>游戏代打（恶魔之塔 Zero）</h3>
-    <div class="row">
-      <label class="f">接口地址（留空沿用上面的 AI 设置）<input data-k="dtgame.openai_base"></label>
-      <label class="f">模型名（留空沿用）<input data-k="dtgame.openai_model"></label>
-      <label class="f">API Key（留空沿用）<input type="password" data-k="dtgame.openai_key"></label>
+    <h3>游戏代打</h3>
+    <div class="row" style="margin-bottom:8px">
+      <label class="f" style="max-width:280px">要直播并托管哪个游戏
+        <select data-k="game.active" id="gameActive">
+          <option value="demontower">恶魔之塔 Zero</option>
+          <option value="stardew">星露谷物语</option>
+        </select>
+      </label>
     </div>
-    <div class="row" style="margin-top:8px">
-      <label class="f">游戏桥端口<input type="number" data-k="dtgame.bridge_port"></label>
-      <label class="f">每步间隔秒数<input type="number" step="0.1" data-k="dtgame.step_interval"></label>
-      <label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" data-k="dtgame.enabled" style="width:auto">启动时自动代打</label>
+    <div data-game="demontower">
+      <div class="row">
+        <label class="f">接口地址（留空沿用上面的 AI 设置）<input data-k="dtgame.openai_base"></label>
+        <label class="f">模型名（留空沿用）<input data-k="dtgame.openai_model"></label>
+        <label class="f">API Key（留空沿用）<input type="password" data-k="dtgame.openai_key"></label>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label class="f">游戏桥端口<input type="number" data-k="dtgame.bridge_port"></label>
+        <label class="f">每步间隔秒数<input type="number" step="0.1" data-k="dtgame.step_interval"></label>
+        <label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" data-k="dtgame.enabled" style="width:auto">启动时自动代打</label>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label class="f">Game 项目目录<input data-k="dtgame.project_dir"></label>
+        <span class="btn" data-pick="dtgame.project_dir" data-kind="dir" style="margin-top:18px">浏览…</span>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label class="f">Godot 可执行文件（留空自动查找）<input data-k="dtgame.godot_exe"></label>
+        <span class="btn" data-pick="dtgame.godot_exe" data-kind="exe" style="margin-top:18px">浏览…</span>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" data-k="dtgame.auto_launch" style="width:auto">代打时自动启动游戏</label>
+      </div>
+      <p class="hint">代打和聊天用同一个模型也可以，但分开配能让打牌更稳。台词会走语音合成并在皮套上开口型。</p>
     </div>
-    <div class="row" style="margin-top:8px">
-      <label class="f">Game 项目目录<input data-k="dtgame.project_dir"></label>
-      <span class="btn" data-pick="dtgame.project_dir" data-kind="dir" style="margin-top:18px">浏览…</span>
+    <div data-game="stardew" style="display:none">
+      <div class="row" style="margin-top:8px">
+        <label class="f">游戏目录<input data-k="stardew.game_dir"></label>
+        <span class="btn" data-pick="stardew.game_dir" data-kind="dir" style="margin-top:18px">浏览…</span>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label class="f">StardewModdingAPI.exe（留空用游戏目录下的）<input data-k="stardew.smapi_exe"></label>
+        <span class="btn" data-pick="stardew.smapi_exe" data-kind="exe" style="margin-top:18px">浏览…</span>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label class="f">MCP 端口<input type="number" data-k="stardew.mcp_port"></label>
+        <label class="f">每步间隔秒数<input type="number" step="0.1" data-k="stardew.step_interval"></label>
+        <label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" data-k="stardew.enabled" style="width:auto">启动时自动托管</label>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label class="f">接口地址（留空沿用上面的 AI 设置）<input data-k="stardew.openai_base"></label>
+        <label class="f">模型名（留空沿用）<input data-k="stardew.openai_model"></label>
+        <label class="f">API Key（留空沿用）<input type="password" data-k="stardew.openai_key"></label>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" data-k="stardew.auto_launch" style="width:auto">托管时自动启动游戏</label>
+        <label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" data-k="stardew.narrate" style="width:auto">播报游戏解说</label>
+      </div>
+      <p class="hint">需要游戏目录里已装 SMAPI 4.0+ 和 Stardew MCP，并把 mod 的 P1 设为 Brain:none（本工具会自动用 8770 的 MCP 接管）。三项 AI 字段都填才会切到 OpenAI 兼容接口；留空则沿用上面的 AI 设置。</p>
     </div>
-    <div class="row" style="margin-top:8px">
-      <label class="f">Godot 可执行文件（留空自动查找）<input data-k="dtgame.godot_exe"></label>
-      <span class="btn" data-pick="dtgame.godot_exe" data-kind="exe" style="margin-top:18px">浏览…</span>
-    </div>
-    <div class="row" style="margin-top:8px">
-      <label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" data-k="dtgame.auto_launch" style="width:auto">代打时自动启动游戏</label>
-    </div>
-    <p class="hint">代打和聊天用同一个模型也可以，但分开配能让打牌更稳。台词会走语音合成并在皮套上开口型。</p>
   </div>
   <div class="card">
     <h3>人设与说话风格</h3>
-    <textarea data-k="ai.persona" style="min-height:120px"></textarea>
+    <textarea data-k="ai.persona" style="min-height:220px"></textarea>
+    <p class="hint">弹幕聊天、主动互动和游戏解说共用这份人设，保存后下次生成生效。默认嘴硬心软、傲娇可爱，偶尔顺着现场说个抽象梗；认真回应时也会自然收住。</p>
     <div class="row" style="margin-top:10px">
       <label class="f">每次回复最多字数<input type="number" data-k="ai.max_chars"></label>
       <label class="f">超时秒数<input type="number" data-k="ai.timeout"></label>
@@ -898,6 +949,34 @@ function fillForm() {
   renderWishFields();
   renderLayout();
   renderTheme();
+  renderGameSettings();
+  syncGameTitle((CFG.game && CFG.game.active) || 'demontower');
+}
+
+const GAME_TITLES = {demontower: '恶魔之塔 ZERO｜AI 游戏直播', stardew: '星露谷物语｜AI 游戏直播'};
+function syncGameTitle(game) {
+  const field = document.querySelector('[data-k="broadcast.title"]');
+  if (!field || document.activeElement === field) return;
+  const current = (field.value || '').trim();
+  const defaults = Object.values(GAME_TITLES);
+  if (current && !defaults.includes(current)) return;
+  const next = GAME_TITLES[game];
+  if (!next || current === next) return;
+  field.value = next;
+  queueConfig(setPatch('broadcast.title', next), 500);
+}
+
+function renderGameSettings() {
+  const game = (CFG.game && CFG.game.active) || 'demontower';
+  $$('[data-game]').forEach(el => { el.style.display = el.dataset.game === game ? '' : 'none'; });
+  const title = $('#dtTitle');
+  if (title) title.textContent = game === 'stardew' ? '星露谷物语 · 自动托管' : '恶魔之塔 Zero · 自动托管';
+  const dashboard = $('#dtGameSelect');
+  if (dashboard && document.activeElement !== dashboard) dashboard.value = game;
+  const settings = $('#gameActive');
+  if (settings && document.activeElement !== settings) settings.value = game;
+  const broadcast = $('#broadcastGameSelect');
+  if (broadcast && document.activeElement !== broadcast) broadcast.value = game;
 }
 let saveTimer = null, pending = {}, saveQueue = Promise.resolve();
 function deepMerge(a, b) { for (const k in b) { if (b[k] && typeof b[k] === 'object' && !Array.isArray(b[k])) { a[k] = a[k] || {}; deepMerge(a[k], b[k]); } else a[k] = b[k]; } return a; }
@@ -910,6 +989,7 @@ function queueConfig(p, delay = 500) {
     else if (el.type !== 'radio') el.value = v ?? '';
   });
   $$('[data-show]').forEach(el => el.textContent = getPath(CFG, el.dataset.show));
+  if (p.game) renderGameSettings();
   if (p.live2d) { renderLayout(); syncL2dTestPreview(); $('#layoutSaveState').textContent = '正在保存调整…'; }
   if (p.rice_counter) { renderLayout(); $('#layoutSaveState').textContent = '正在保存调整…'; }
   if (p.stream_theme) { renderLayout(); renderTheme(); $('#themeSaveState').textContent = '正在保存主题…'; }
@@ -948,6 +1028,7 @@ function onField(el) {
   if (el.dataset.k === 'live2d.overlay_in_broadcast' && v) p.live2d.enabled = true;
   if (['live2d.overlay_corner', 'live2d.overlay_margin'].includes(el.dataset.k)) Object.assign(p.live2d, {overlay_x: null, overlay_y: null});
   queueConfig(p, /^(live2d|rice_counter)\.overlay_/.test(el.dataset.k) ? 120 : 500);
+  if (el.dataset.k === 'game.active') { renderGameSettings(); syncGameTitle(v); setTimeout(pollDt, 800); }
   if (el.dataset.k === 'ai.backend') fillForm();
   if (el.dataset.k === 'wishlist.action') renderWishFields();
 }
@@ -1066,6 +1147,7 @@ $('#wRefresh').onclick = loadWeights; $('#devRefresh').onclick = loadDevices;
 
 // ---- 恶魔之塔自动托管 ----
 let dtBusy = false, dtError = '';
+let broadcastDtBusy = false;
 async function dtAction(fn) {
   if (dtBusy) return;
   dtBusy = true;
@@ -1107,12 +1189,17 @@ $('#dtStopGame').onclick = () => dtAction(async () => {
 async function pollDt() {
   try {
     const r = await api('/api/dtgame/status');
+    const isStardew = r.game_kind === 'stardew';
+    if (r.game_kind && CFG.game) CFG.game.active = r.game_kind;
+    renderGameSettings();
     const scr = r.game && r.game.screen ? r.game.screen : '';
     const names = {battle:'战斗', map:'地图', reward:'选卡', campfire:'篝火', shop:'商店',
                    event:'事件', death:'阵亡', death_analysis:'死亡分析', run_end:'本局结算', soul_forge:'灵魂锻造',
                    loot:'战利品', menu:'主菜单', hall:'大厅',
                    character_select:'选角', other:'其他'};
-    $('#dtScreen').textContent = scr ? (names[scr] || scr) : (r.game_running ? '启动中' : '未启动');
+    $('#dtScreen').textContent = isStardew
+      ? (r.game_text || (r.game_running ? '已启动' : '未启动'))
+      : (scr ? (names[scr] || scr) : (r.game_running ? '启动中' : '未启动'));
     $('#dtTurns').textContent = r.turns || 0;
 
     $('#dtStart').disabled = dtBusy || (r.running && r.ready);
@@ -1123,14 +1210,26 @@ async function pollDt() {
     if (dtError) {
       $('#dtHint').textContent = dtError;
     } else if (r.running && r.ready) {
-      $('#dtHint').textContent = '正在代打，台词自动配音；暂停会保留游戏和语音。';
+      $('#dtHint').textContent = isStardew
+        ? '正在托管星露谷，台词自动配音；暂停会保留游戏和语音。'
+        : '正在代打，台词自动配音；暂停会保留游戏和语音。';
     } else if (r.running) {
       $('#dtHint').textContent = '游戏连接中断，可点「启动 / 继续代打」恢复。';
     } else if (r.game_running) {
-      $('#dtHint').textContent = '游戏已启动，点「启动 / 继续代打」接管当前进度。';
+      $('#dtHint').textContent = isStardew
+        ? '星露谷已启动，点「启动 / 继续代打」通过 MCP 接管。'
+        : '游戏已启动，点「启动 / 继续代打」接管当前进度。';
     } else {
-      $('#dtHint').textContent = '点「启动 / 继续代打」自动打开游戏并继续存档；关闭全部请用左下方按钮。';
+      $('#dtHint').textContent = isStardew
+        ? '点「启动 / 继续代打」自动打开星露谷并读档；关闭全部请用左下方按钮。'
+        : '点「启动 / 继续代打」自动打开游戏并继续存档；关闭全部请用左下方按钮。';
     }
+    const bStart = $('#broadcastDtStart'), bStop = $('#broadcastDtStop'), bState = $('#broadcastDtState');
+    if (bStart) bStart.disabled = broadcastDtBusy || (r.running && r.ready);
+    if (bStop) bStop.disabled = broadcastDtBusy || !r.running;
+    if (bState) bState.textContent = r.running
+      ? (isStardew ? `代打运行中 · ${r.game_text || ''}` : '代打运行中')
+      : (r.ready ? '代打未启动，游戏已就绪' : (r.game_running ? '游戏已启动，等待连接' : '游戏未启动'));
   } catch (e) {}
 }
 setInterval(pollDt, 2000); pollDt();
@@ -1986,7 +2085,41 @@ $('#roomNoticeSave').onclick = () => broadcastAction(async () => {
   toast('直播间公告已保存');
 });
 $('#broadcastRefreshSources').onclick = () => broadcastAction(refreshBroadcastSources);
-$('#broadcastLaunchGame').onclick = () => broadcastAction(async () => { const r = await api('/api/dtgame/launch', {}); await refreshBroadcastSources(); if (!r.ok) throw new Error(r.error || '游戏启动失败'); });
+$('#broadcastLaunchGame').onclick = () => broadcastAction(async () => {
+  $('#broadcastWindow').value = '';
+  const r = await api('/api/dtgame/launch', {});
+  await refreshBroadcastSources();
+  if (!r.ok) throw new Error(r.error || '游戏启动失败');
+});
+$('#broadcastGameSelect').addEventListener('change', () => {
+  $('#broadcastWindow').value = '';
+  setTimeout(() => refreshBroadcastSources().catch(() => {}), 900);
+});
+async function broadcastDtAction(fn) {
+  if (broadcastDtBusy) return;
+  broadcastDtBusy = true;
+  await pollDt();
+  try {
+    await flushConfig();
+    await fn();
+  } catch (e) {
+    toast('失败：' + (e.message || e));
+  } finally {
+    broadcastDtBusy = false;
+    await pollDt();
+  }
+}
+$('#broadcastDtStart').onclick = () => broadcastDtAction(async () => {
+  const r = await api('/api/dtgame/resume', {new_run: false});
+  if (!r.ok) throw new Error(r.error || '启动代打失败');
+  toast(r.already ? '代打已经在运行' : '已启动代打');
+  await refreshBroadcastSources().catch(() => {});
+});
+$('#broadcastDtStop').onclick = () => broadcastDtAction(async () => {
+  const r = await api('/api/dtgame/stop', {});
+  if (!r.ok) throw new Error(r.error || '暂停失败');
+  toast('已暂停代打，游戏与语音保留');
+});
 $('#broadcastPreview').onclick = () => broadcastAction(async () => {
   await flushConfig();
   let selection = broadcastSelection();

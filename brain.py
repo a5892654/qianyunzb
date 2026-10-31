@@ -11,7 +11,7 @@ import aiohttp
 
 import procutil
 from live_context import mentions_rice, rice_question
-from config import BASE_DIR, SUPPORTER_WELCOME_PROMPT, SUPPORTER_WELCOME_TEMPLATES
+from config import BASE_DIR, DEFAULT_PERSONA, SUPPORTER_WELCOME_PROMPT, SUPPORTER_WELCOME_TEMPLATES
 
 log = logging.getLogger("ai")
 
@@ -264,7 +264,7 @@ class Brain:
 
     def system_prompt(self, cfg):
         cfg_ai = cfg["ai"]
-        sp = cfg_ai.get("persona", "") + RULES.format(max_chars=cfg_ai.get("max_chars", 40))
+        sp = cfg_ai.get("persona", DEFAULT_PERSONA) + RULES.format(max_chars=cfg_ai.get("max_chars", 40))
         names = self.emotion_names(cfg)
         if names:
             sp += ("\n【表情】在回复的最开头用【】标出你说这句话时的表情，只能从这些里选一个："

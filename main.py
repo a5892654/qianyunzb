@@ -19,9 +19,11 @@ import tts_models
 from bili import BiliLive, QrLogin, SmsLogin
 from brain import Brain, default_qoder_exe, list_qoder_models
 from dtgame.bridge import BridgeError, GameBridge
-from dtgame.launcher import GameProcess, find_godot
+from dtgame.games import GameLauncher
+from dtgame.launcher import find_godot
 from dtgame.player import Player as DTPlayer
 from dtgame.rice import RiceTracker
+from dtgame.stardew import StardewGame, StardewPlayer
 from live_rice import RiceCounter, ai_context as rice_ai_context, validate_settings as validate_rice_settings
 from live_broadcast import Broadcast
 from live_theme import preview_jpeg as theme_preview_jpeg, validate_settings as validate_theme_settings
@@ -83,7 +85,7 @@ class App:
         self.dt_task = None
         self.dt_resume_lock = asyncio.Lock()
         self.engine_ready = asyncio.Event()
-        self.game = GameProcess(self.cfg.get("dtgame", {}))
+        self.game = GameLauncher(self.cfg)
         self.rice = RiceCounter()
         self.broadcast = Broadcast(self)
         self.status = {}
@@ -151,10 +153,10 @@ class App:
             self.engine_ready.set()
         if self.cfg.get("auto_connect") and self.cfg.get("room_id"):
             asyncio.create_task(self.connect())
-        if self.cfg.get("dtgame", {}).get("enabled") and "--manual-dt" not in sys.argv:
+        if self._autoplay_enabled() and "--manual-dt" not in sys.argv:
             r = self.start_dt()
             if not r.get("ok"):
-                self.push("log", {"level": "error", "msg": f"自动打牌启动失败：{r.get('error')}"})
+                self.push("log", {"level": "error", "msg": f"自动托管启动失败：{r.get('error')}"})
 
     async def _boot_engine(self):
         """先把语音引擎拉起来再去代打，否则开场几句会掉到系统语音。"""
@@ -179,6 +181,21 @@ class App:
         return GameBridge(c.get("bridge_host", "127.0.0.1"), int(c.get("bridge_port", 9787)),
                           grans_port=int(c.get("grans_bridge_port", 9788)))
 
+    def _active_game(self) -> str:
+        return str((self.cfg.get("game") or {}).get("active", "demontower"))
+
+    def _is_stardew(self) -> bool:
+        return self._active_game() == "stardew"
+
+    def _game_name(self) -> str:
+        return "星露谷物语" if self._is_stardew() else "恶魔之塔 Zero"
+
+    def _game_cfg(self) -> dict:
+        return self.cfg.get("stardew" if self._is_stardew() else "dtgame", {})
+
+    def _autoplay_enabled(self) -> bool:
+        return bool(self._game_cfg().get("enabled", True))
+
     def _dt_ai(self) -> dict:
         c = self.cfg.get("dtgame", {})
         ai = dict(self.cfg.get("ai", {}))
@@ -187,22 +204,73 @@ class App:
                 ai[key] = c[key]
         return ai
 
+    def _stardew_ai(self) -> dict:
+        c = self.cfg.get("stardew", {})
+        ai = dict(self.cfg.get("ai", {}))
+        if str(c.get("openai_base") or "").strip() and str(c.get("openai_model") or "").strip():
+            ai["backend"] = "openai"
+        for key in ("openai_base", "openai_key", "openai_model"):
+            if c.get(key):
+                ai[key] = c[key]
+        if c.get("persona"):
+            ai["persona"] = c["persona"]
+        for key in ("temperature", "max_tokens", "timeout", "tool_timeout"):
+            if c.get(key) is not None:
+                ai[key] = c[key]
+        ai["narrate"] = bool(c.get("narrate", True))
+        ai["step_interval"] = float(c.get("step_interval", 0.4))
+        return ai
+
+    def _game_ai(self) -> dict:
+        return self._stardew_ai() if self._is_stardew() else self._dt_ai()
+
     def _config_problem(self) -> str:
-        """模型侧的配置检查，返回空串表示没问题。"""
-        ai = self._dt_ai()
-        if not str(ai.get("openai_base", "")).strip():
-            return "还没填接口地址（AI 设置 → OpenAI 兼容 API）"
-        if not str(ai.get("openai_model", "")).strip():
-            return "还没填模型名"
-        if not str(ai.get("openai_key", "")).strip():
-            return "还没填 API Key（AI 设置 → OpenAI 兼容 API）"
+        """模型/启动配置检查，返回空串表示没问题。"""
+        ai = self._game_ai()
+        if not self._is_stardew() or str(ai.get("backend")) == "openai":
+            if not str(ai.get("openai_base", "")).strip():
+                return "还没填接口地址（AI 设置 → OpenAI 兼容 API）"
+            if not str(ai.get("openai_model", "")).strip():
+                return "还没填模型名"
+            if not str(ai.get("openai_key", "")).strip():
+                return "还没填 API Key（AI 设置 → OpenAI 兼容 API）"
+        elif self._is_stardew():
+            exe = ai.get("qoder_exe") or default_qoder_exe()
+            if not os.path.exists(exe):
+                return f"找不到 qodercli：{exe}（请先安装或运行 qoder_login.bat）"
+        if self._is_stardew():
+            c = self.cfg.get("stardew", {})
+            if not self._stardew_alive() and c.get("auto_launch", True):
+                game_dir = str(c.get("game_dir", "")).strip().rstrip("\\/")
+                if not game_dir:
+                    return "还没填星露谷游戏目录"
+                exe = str(c.get("smapi_exe", "")).strip() or os.path.join(game_dir, "StardewModdingAPI.exe")
+                if not os.path.exists(exe):
+                    return f"找不到 StardewModdingAPI.exe：{exe}"
         return ""
 
+    def _stardew_alive(self) -> bool:
+        c = self.cfg.get("stardew", {})
+        host = str(c.get("mcp_host", "127.0.0.1"))
+        port = int(c.get("mcp_port", 8770))
+        try:
+            with socket.create_connection((host, port), timeout=1.5):
+                return True
+        except OSError:
+            return False
+
+    def _game_alive(self) -> bool:
+        return self._stardew_alive() if self._is_stardew() else self._bridge_alive()
+
     def dt_ready(self) -> tuple[bool, str]:
-        """代打前的体检：模型配好没有、游戏在不在。"""
+        """托管前的体检：模型配好没有、游戏在不在。"""
         why = self._config_problem()
         if why:
             return False, why
+        if self._is_stardew():
+            if not self._stardew_alive():
+                return False, "星露谷 MCP 没连上（游戏没开或 mod 没加载）"
+            return True, ""
         try:
             self._dt_bridge().screen()
         except BridgeError as e:
@@ -219,26 +287,37 @@ class App:
     def start_dt(self) -> dict:
         """只建 Player 并丢进事件循环，游戏启动/体检放到 async 那一侧做。"""
         if self.dt and self.dt.running:
-            return {"ok": False, "error": "自动打牌已经在跑"}
+            return {"ok": False, "error": "自动托管已经在跑"}
         # 配置问题现在就报，别假装启动成功然后空转。
         why = self._config_problem()
         if why:
             return {"ok": False, "error": why}
-        c = self.cfg.get("dtgame", {})
-        p = DTPlayer(
-            self._dt_ai(),
-            self._dt_bridge(),
-            speak=self.pipe.narrate,
-            log_push=lambda level, msg: self.push("log", {"level": level, "msg": msg}),
-            narrate=bool(c.get("narrate", True)),
-            pipe=self.pipe,
-            emotions=lambda: self.cfg["live2d"].get("emotions", []) if self.cfg["live2d"].get("enabled") else [],
-            chars=c.get("recent_chars") or (),
-            on_chars=lambda names: self._remember_chars(names),
-            auto_depth=bool(c.get("auto_depth", True)),
-            depth=c.get("depth", 0),
-            observer=RiceTracker(self.rice, lambda: bool(self.cfg.get("rice_counter", {}).get("enabled")), self.rice_awarded),
-        )
+        c = self._game_cfg()
+        if self._is_stardew():
+            p = StardewPlayer(
+                self._stardew_ai(),
+                StardewGame(c),
+                speak=self.pipe.narrate,
+                log_push=lambda level, msg: self.push("log", {"level": level, "msg": msg}),
+                narrate=bool(c.get("narrate", True)),
+                pipe=self.pipe,
+                emotions=lambda: self.cfg["live2d"].get("emotions", []) if self.cfg["live2d"].get("enabled") else [],
+            )
+        else:
+            p = DTPlayer(
+                self._dt_ai(),
+                self._dt_bridge(),
+                speak=self.pipe.narrate,
+                log_push=lambda level, msg: self.push("log", {"level": level, "msg": msg}),
+                narrate=bool(c.get("narrate", True)),
+                pipe=self.pipe,
+                emotions=lambda: self.cfg["live2d"].get("emotions", []) if self.cfg["live2d"].get("enabled") else [],
+                chars=c.get("recent_chars") or (),
+                on_chars=lambda names: self._remember_chars(names),
+                auto_depth=bool(c.get("auto_depth", True)),
+                depth=c.get("depth", 0),
+                observer=RiceTracker(self.rice, lambda: bool(self.cfg.get("rice_counter", {}).get("enabled")), self.rice_awarded),
+            )
         p.running = True
         self.dt = p
         self.dt_task = asyncio.create_task(self._dt_supervise(p))
@@ -280,21 +359,20 @@ class App:
         if e is not None:
             log.error("代打任务异常退出：%r", e, exc_info=e)
 
-    async def _dt_supervise(self, p: DTPlayer):
+    async def _dt_supervise(self, p):
         """等语音引擎和游戏都就绪再开跑，避免开场几句用错音色。"""
-        c = self.cfg.get("dtgame", {})
+        c = self._game_cfg()
         if getattr(self, "engine_ready", None) is not None and not self.engine_ready.is_set():
             self.push("log", {"level": "info", "msg": "等语音引擎就绪…"})
             try:
                 await asyncio.wait_for(self.engine_ready.wait(), 180)
             except asyncio.TimeoutError:
-                self.push("log", {"level": "warn", "msg": "语音引擎等待超时，先开打"})
+                self.push("log", {"level": "warn", "msg": "语音引擎等待超时，先开始托管"})
         self.push("log", {"level": "info", "msg": "正在准备游戏…"})
 
         ok, why = await asyncio.to_thread(self.dt_ready)
         if not ok and c.get("auto_launch", True):
-            launcher = self.game
-            res = await launcher.launch_and_wait(self._bridge_alive)
+            res = await self.game.launch_and_wait(self._game_alive)
             if not res.get("ok"):
                 self.push("log", {"level": "error", "msg": f"游戏启动失败：{res.get('error')}"})
                 self.dt = None
@@ -302,19 +380,19 @@ class App:
             self.push("log", {"level": "info", "msg": "游戏已就绪"})
             ok, why = await asyncio.to_thread(self.dt_ready)
         if not ok:
-            self.push("log", {"level": "error", "msg": f"无法开始代打：{why}"})
+            self.push("log", {"level": "error", "msg": f"无法开始托管：{why}"})
             self.dt = None
             return
 
         a = self.cfg.get("audio", {})
-        pid = self.game.proc.pid if getattr(self.game, "proc", None) else None
-        if a.get("duck_game", True) and pid:
+        pids = self.game.audio_pids()
+        if a.get("duck_game", True) and pids:
             level = max(0.0, min(1.0, float(a.get("duck_level", 25)) / 100.0))
-            self.player.set_duck([pid], level)
+            self.player.set_duck(pids, level)
             self.push("log", {"level": "info",
                               "msg": "说话时会把游戏声压到 %d%%（语音设置里可关）" % int(level * 100)})
 
-        self.push("log", {"level": "info", "msg": "自动打牌已启动"})
+        self.push("log", {"level": "info", "msg": "自动托管已启动"})
         try:
             await p.run_forever(float(c.get("step_interval", 0.4)))
         finally:
@@ -344,7 +422,26 @@ class App:
             self.dt_task = None
         return {"ok": True}
 
+    async def _resume_stardew(self) -> dict:
+        async with self.dt_resume_lock:
+            if self.dt and self.dt.running and self._stardew_alive():
+                return {"ok": True, "already": True}
+            await self.stop_dt()
+            why = self._config_problem()
+            if why:
+                return {"ok": False, "error": why}
+            if not self._stardew_alive():
+                if not self.cfg.get("stardew", {}).get("auto_launch", True):
+                    return {"ok": False, "error": "星露谷没在运行，且自动启动是关的"}
+                result = await self.game.launch_and_wait(self._stardew_alive)
+                if not result.get("ok"):
+                    return result
+                self.push("log", {"level": "info", "msg": "星露谷已启动，等待 MCP 就绪"})
+            return self.start_dt()
+
     async def resume_dt(self, new_run: bool = False) -> dict:
+        if self._is_stardew():
+            return await self._resume_stardew()
         async with self.dt_resume_lock:
             if self.dt and self.dt.running and await asyncio.to_thread(self._bridge_alive):
                 return {"ok": True, "already": True}
@@ -390,16 +487,16 @@ class App:
         模型没配好不该让观众看不到画面。
         """
         launched = False
-        if not await asyncio.to_thread(self._bridge_alive):
-            if not self.cfg.get("dtgame", {}).get("auto_launch", True):
-                return {"ok": False, "error": "定时开播未执行：游戏没在跑，且代打的自动启动是关的"}
-            res = await self.game.launch_and_wait(self._bridge_alive)
+        if not await asyncio.to_thread(self._game_alive):
+            if not self._game_cfg().get("auto_launch", True):
+                return {"ok": False, "error": "定时开播未执行：游戏没在跑，且自动启动是关的"}
+            res = await self.game.launch_and_wait(self._game_alive)
             if not res.get("ok"):
                 return {"ok": False, "error": "定时开播未执行：游戏启动失败（%s）" % (res.get("error") or "")}
             launched = True
         r = await self.resume_dt()
         if not r.get("ok") and not r.get("already"):
-            self.push("log", {"level": "warn", "msg": "代打没有自动开起来，先照常开播：" + str(r.get("error"))})
+            self.push("log", {"level": "warn", "msg": "自动托管没有开起来，先照常开播：" + str(r.get("error"))})
         return {"ok": True, "launched": launched}
 
     async def shutdown(self):
@@ -646,8 +743,20 @@ def build_web(app: App):
             except ValueError as error:
                 return web.json_response({"ok": False, "error": str(error)}, status=400)
         old_room = app.cfg.get("room_id")
+        old_persona = app.cfg.get("ai", {}).get("persona")
+        old_game = (app.cfg.get("game") or {}).get("active")
         app.cfg = config.merge(app.cfg, patch)
         config.save(app.cfg)
+        app.game.sync(app.cfg)
+        if (app.cfg.get("game") or {}).get("active") != old_game:
+            await app.stop_dt()
+            app.push("log", {"level": "info", "msg": f"已切换为{app._game_name()}，请重新启动托管"})
+        if app.cfg.get("ai", {}).get("persona") != old_persona:
+            # 聊天的 Qoder 会按系统提示自动换会话；游戏保持本局决策记忆，只更新口吻。
+            if getattr(app, "brain", None) is not None:
+                app.brain.openai.history.clear()
+            if getattr(app, "dt", None) is not None:
+                app.dt.cfg["persona"] = app.cfg["ai"]["persona"]
         if "overlay" in patch:
             app.push("overlay_config", app.cfg["overlay"])
         if isinstance(patch.get("broadcast"), dict) and "auto_stop_minutes" in patch["broadcast"]:
@@ -797,7 +906,18 @@ def build_web(app: App):
 
     @routes.get("/api/broadcast/sources")
     async def broadcast_sources(_):
-        return web.json_response(await app.broadcast.sources())
+        data = await app.broadcast.sources()
+        try:
+            marks = ("stardew", "星露谷") if app._active_game() == "stardew" else (
+                "demontower", "godot", "恶魔之塔")
+            chosen = next((w for w in (data.get("windows") or [])
+                           if not w.get("minimized")
+                           and any(mark in str(w.get("title", "")).lower() for mark in marks)), None)
+            if chosen:
+                data["default_window"] = chosen["hwnd"]
+        except Exception:
+            pass
+        return web.json_response(data)
 
     @routes.get("/api/broadcast/status")
     async def broadcast_status(_):
@@ -1278,7 +1398,8 @@ def build_web(app: App):
             "app": "WhaleTalk", "running": bool(app.dt and app.dt.running),
             "starting": bool(app.dt and not app.engine_ready.is_set()),
             "engine_ready": engine_ready, "game_running": app.game.running(),
-            "connected": await asyncio.to_thread(app._bridge_alive),
+            "connected": await asyncio.to_thread(app._game_alive),
+            "game_kind": app._active_game(),
         })
 
     @routes.post("/api/dtgame/resume")
@@ -1299,16 +1420,29 @@ def build_web(app: App):
     @routes.get("/api/dtgame/status")
     async def dt_status(_):
         running = bool(app.dt and app.dt.running)
-        c = app.cfg.get("dtgame", {})
+        kind = app._active_game()
+        c = app._game_cfg()
         info = {
             "running": running,
             "turns": app.dt.turns_taken if app.dt else 0,
             "game_running": app.game.running(),
+            "game_kind": kind,
+            "game_name": app._game_name(),
             "auto_launch": bool(c.get("auto_launch", True)),
-            "godot": find_godot(str(c.get("godot_exe", ""))),
-            "project_dir": c.get("project_dir", ""),
         }
         why = app._config_problem()
+        if kind == "stardew":
+            info["game_text"] = app.dt.status_text() if app.dt and hasattr(app.dt, "status_text") else ""
+            info["game"] = app.dt.status_summary() if app.dt and hasattr(app.dt, "status_summary") else {}
+            alive = app._stardew_alive()
+            info["ready"] = not why and alive
+            info["why"] = why or ("" if alive else "星露谷 MCP 未连接，请先启动游戏")
+            info["mcp_port"] = int(c.get("mcp_port", 8770))
+            return web.json_response(info)
+        info.update({
+            "godot": find_godot(str(c.get("godot_exe", ""))),
+            "project_dir": c.get("project_dir", ""),
+        })
         try:
             info["game"] = await asyncio.to_thread(app._dt_bridge().screen)
             info["ready"] = not why
@@ -1321,9 +1455,9 @@ def build_web(app: App):
 
     @routes.post("/api/dtgame/launch")
     async def dt_launch(_):
-        if await asyncio.to_thread(app._bridge_alive):
+        if await asyncio.to_thread(app._game_alive):
             return web.json_response({"ok": True, "already": True})
-        res = await app.game.launch_and_wait(app._bridge_alive)
+        res = await app.game.launch_and_wait(app._game_alive)
         if res.get("ok"):
             app.push("log", {"level": "info", "msg": "游戏已启动"})
         return web.json_response(res)

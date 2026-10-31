@@ -13,7 +13,7 @@ release/
 
 # Local settings & runtime data (contain login cookies!)
 config.json
-config.json.bak
+config.json.bak*
 logs/
 qoder_workdir/
 gift_supporters.sqlite3*

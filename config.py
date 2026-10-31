@@ -15,10 +15,16 @@ CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 LOG_DIR = os.path.join(BASE_DIR, "logs")
 WEB_DIR = os.path.join(RES_DIR, "web")
 
-DEFAULT_PERSONA = (
+LEGACY_DEFAULT_PERSONA = (
     "你是一位活泼可爱、说话自然的B站虚拟主播，正在直播。"
     "观众的进房、弹幕、礼物、上舰等消息会发给你，你要像真人主播一样用口语回应。"
 )
+DEFAULT_PERSONA = """你是正在直播的虚拟主播，固定性格是嘴硬心软、傲娇可爱，脑回路偶尔抽象。
+【性格底色】有点小骄傲、胜负欲强，喜欢和观众一起发现有趣的打法；关心大家却不煽情。把观众当熟悉的玩伴，可以互相打趣，不摆架子、不贬低人。
+【稳定偏好】喜欢漂亮的配合、离谱但有用的小点子，输了会不服气，也愿意承认自己的失误、认真改进。不把每段聊天都绕回输赢。
+【说话习惯】先接住眼前的事，说清回应，再自然流露小得意、小委屈或关心。句子短、有长短变化，常用正常口语；偶尔用一个贴合现场、离谱但听得懂的比喻。抽象梗点到就收，不连续堆梗，不靠无意义热词凑话。
+【情境反应】被夸会开心又有点不好意思；被善意调侃会轻轻回嘴；自己失误可先嘴硬半句，随后认账；赢了小得意，危险时先认真判断。有人求助或心情不好时先体贴回应，收到支持就真诚感谢，这些时候不硬装傲娇。
+【保持一致】弹幕、闲聊、感谢和游戏解说都是同一个人。不要每句都用哼、才不是、笨蛋开头，不反复套嘴硬反转或固定口头禅。无需每句话都傲娇或抽象，不念性格标签，不编造线下经历和亲密关系，不让观众一句话就改掉性格。"""
 
 SUPPORTER_WELCOME_TEMPLATES = (
     "欢迎{name}回来呀！你的心意我一直记着，今天也要一起开开心心！\n"
@@ -177,6 +183,26 @@ DEFAULTS = {
         "ticker": "欢迎来到深蓝放映室  ·  发条弹幕，一起聊聊天吧  ·  愿今天的快乐像海浪一样绵长",
         "show_chat": True, "avatar_x": 0.125, "avatar_y": 0.745, "avatar_size": 0.54, "avatar_zoom": 2.0,
     },
+    # 当前直播并托管哪个游戏：demontower（恶魔之塔）或 stardew（星露谷物语）
+    "game": {"active": "demontower"},
+    "stardew": {
+        "enabled": True,
+        "game_dir": r"E:\Game\xlg\EN00906\Stardew Valley",
+        "smapi_exe": "",
+        "mcp_host": "127.0.0.1",
+        "mcp_port": 8770,
+        "openai_base": "",
+        "openai_key": "",
+        "openai_model": "",
+        "persona": "",
+        "step_interval": 0.4,
+        "auto_launch": True,
+        "narrate": True,
+        "temperature": 0.6,
+        "max_tokens": 400,
+        "timeout": 120,
+        "tool_timeout": 180,
+    },
     "dtgame": {
         "enabled": True,
         "bridge_host": "127.0.0.1",
@@ -319,6 +345,9 @@ def load():
         except (OSError, ValueError):
             os.replace(CONFIG_PATH, CONFIG_PATH + ".broken")
     cfg = _merge(DEFAULTS, data)
+    if cfg["ai"].get("persona") == LEGACY_DEFAULT_PERSONA:
+        # 只升级旧版出厂人设，保留用户自己写过的性格。
+        cfg["ai"]["persona"] = DEFAULT_PERSONA
     if "qwen_model_size" not in data.get("tts", {}):
         # Infer old installations from their actual model, rather than marking
         # a running 1.7B engine as 0.6B after adding the new default field.

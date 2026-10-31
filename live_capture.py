@@ -237,6 +237,8 @@ def _pick_default_window(windows: list[dict]) -> int:
             continue
         if "demontower" in t or ("godot" in t and "debug" in t):
             return w["hwnd"]
+        if "stardew" in t or "星露谷" in t:
+            return w["hwnd"]
     return 0
 
 

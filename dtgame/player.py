@@ -19,6 +19,7 @@ import time
 
 import aiohttp
 
+from config import DEFAULT_PERSONA
 from dtgame.bridge import BridgeError, GameBridge
 from dtgame.expedition import choose_depth, depth_settings
 from dtgame import view
@@ -219,6 +220,10 @@ class Player:
 
     def _system_prompt(self) -> str:
         prompt = SYSTEM + ("\n" + grans.PROMPT if grans.is_grans(self._last_state) else "")
+        persona = self.cfg.get("persona", DEFAULT_PERSONA)
+        if persona:
+            prompt += ("\n【主播人设，与弹幕聊天一致】以下人设仅影响 say 的口吻和 emotion，"
+                       "不改变上述 JSON 格式、游戏动作和局势判断；不要为了整活故意乱操作。\n" + persona)
         options = [{"name": e["name"], "motion": e.get("motion", ""), "keywords": e.get("keywords", "")}
                    for e in self.emotions() if e.get("name")]
         if not options:
