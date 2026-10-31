@@ -29,6 +29,20 @@ def _split(s):
     return [x.strip() for x in re.split(r"[\n,，;；]", s or "") if x.strip()]
 
 
+def badge(ev):
+    """直播间消息卡片上的身份信息：粉丝牌、舰队、房管。"""
+    medal = None
+    if ev.get("medal_name"):
+        medal = {"name": str(ev["medal_name"])[:12], "level": int(ev.get("medal_level") or 0),
+                 "color": int(ev.get("medal_color") or 0)}
+    guard = int(ev.get("guard_level") or 0)
+    if ev.get("type") == "guard":
+        guard = int(ev.get("level") or guard)
+    return {"medal": medal, "guard": guard, "admin": bool(ev.get("admin")),
+            "price": ev.get("price") if ev.get("type") == "superchat" else None,
+            "sender": ev.get("name")}
+
+
 def describe(ev):
     t = ev["type"]
     n = ev.get("name", "")
@@ -162,7 +176,7 @@ class Pipeline:
                 and self.supporters.contains(room, ev.get("uid")))
         if ev["type"] == "danmaku" and self.app.songs.on_danmaku(ev):
             self.app.push("event", {"type": "danmaku", "tname": "点歌", "desc": describe(ev), "skip": None,
-                                    "test": bool(ev.get("test"))})
+                                    "test": bool(ev.get("test")), **badge(ev)})
             return
         if ev["type"] == "danmaku":
             rule = self.match_fixed(ev.get("text"))
@@ -171,7 +185,7 @@ class Pipeline:
         reason = "已暂停" if self.paused else self._reject(ev)
         self.app.push("event", {"type": ev["type"], "tname": TYPE_NAMES.get(ev["type"], ev["type"]),
                                 "desc": describe(ev) + ("（命中固定回复）" if ev.get("fixed_rule") else ""),
-                                "skip": reason, "test": bool(ev.get("test"))})
+                                "skip": reason, "test": bool(ev.get("test")), **badge(ev)})
         if reason:
             return
         self.interaction.on_event(ev)

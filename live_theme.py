@@ -21,6 +21,14 @@ BACKGROUND = Path(config.WEB_DIR) / "assets" / "ocean-background.png"
 RADIO_RECT = (660, 978, 1858, 1040)
 RADIO_HINT_W = 240
 RADIO_SWITCH_SECONDS = 6.0
+CHAT_TTL = 120
+CHAT_SLOTS = 4
+CHAT_SLOT_H = 111
+CHAT_ANIM_SECONDS = 0.38
+# 舰队身份在弹幕卡片上的配色；粉丝牌用直播间自己的勋章色。
+GUARD_NAMES = {1: "总督", 2: "提督", 3: "舰长"}
+GUARD_COLORS = {1: (224, 180, 90), 2: (169, 140, 255), 3: (79, 174, 232)}
+GUARD_TINTS = {1: (255, 246, 228), 2: (243, 238, 255), 3: (233, 245, 255)}
 # Layout sample for the theme preview: a viewer request that just took over.
 DEMO_SONG = {
     "qid": 0, "name": "海风来信", "artist": "潮汐", "by": "海盐汽水", "source": "request",
@@ -65,11 +73,15 @@ class StreamTheme:
         self.song_state = song_state
         self._lock = threading.Lock()
         self._messages = deque(maxlen=80)
+        self._msg_id = 0
         self._version = 0
         self._skin_key = None
         self._base = None
         self._chat_key = None
+        self._chat_token = None
         self._chat = None
+        self._chat_prev = []
+        self._chat_plan = None
         self._radio_key = None
         self._radio = None
         self._song_qid = None
@@ -112,8 +124,20 @@ class StreamTheme:
         if not text:
             return
         name, sep, body = text.partition("：") if kind in ("danmaku", "superchat") else ("", "", text)
+        if kind not in ("danmaku", "superchat"):
+            sender = str(event.get("sender") or "").strip()
+            if sender:
+                name, sep = sender, True
+                if body.startswith(sender):
+                    body = body[len(sender):].lstrip()
+        medal = event.get("medal") or None
+        meta = {"medal": medal, "guard": int(event.get("guard") or event.get("guard_level") or 0),
+                "admin": bool(event.get("admin")),
+                "price": event.get("price") if kind == "superchat" else None}
         with self._lock:
-            self._messages.append((time.monotonic(), name[:24] if sep else "海面来信", body if sep else text, kind))
+            self._msg_id += 1
+            self._messages.append((self._msg_id, time.monotonic(), name[:24] if sep else "海面来信",
+                                   body if sep else text, kind, meta))
             self._version += 1
 
     def _text(self, draw, xy, text, font, fill, width):
@@ -156,42 +180,126 @@ class StreamTheme:
         self._base = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGBA2BGRA)
         self._skin_key = key
 
+    def _chat_replan(self, now, messages):
+        current = messages[-CHAT_SLOTS:]
+        previous = self._chat_prev
+        known = {m[0] for m in previous}
+        items = [(m, i, False) for i, m in enumerate(previous)]
+        for message in current:
+            if message[0] not in known:
+                items.append((message, len(items), True))
+        slots = {m[0]: i for i, m in enumerate(current)}
+        plan = [(m, start, slots.get(m[0], -1), entering) for m, start, entering in items]
+        # 用新消息到达时刻起算，直播卡顿时不至于把滑入动画整段跳过。
+        entering = [m[1] for m, _, _, new in plan if new]
+        self._chat_plan = (min(entering) if entering else now, plan)
+        self._chat_prev = current
+
     def _chat_panel(self, settings, now):
+        show = settings.get("show_chat", True)
         with self._lock:
-            messages = [m for m in self._messages if now - m[0] < 120][-4:]
-            key = (self._version, len(messages), settings.get("show_chat", True))
+            messages = [m for m in self._messages if now - m[1] < CHAT_TTL]
+            version = self._version
+        messages = messages[-CHAT_SLOTS:]
+        token = (version, tuple(m[0] for m in messages), show)
+        if token != self._chat_token:
+            if show:
+                self._chat_replan(now, messages)
+            else:
+                self._chat_prev, self._chat_plan = [], None
+            self._chat_token = token
+        progress = 1.0
+        if show and self._chat_plan is not None:
+            progress = min(1.0, (now - self._chat_plan[0]) / CHAT_ANIM_SECONDS)
+        key = (token, 20 if progress >= 1 else int(progress * 20))
         if key == self._chat_key:
             return self._chat
         image = Image.fromarray(cv2.cvtColor(self._base[221:700, 42:414], cv2.COLOR_BGRA2RGBA))
-        d = ImageDraw.Draw(image)
-        if settings.get("show_chat", True):
-            if not messages:
+        if show:
+            items = self._chat_plan[1] if self._chat_plan is not None else []
+            visible = any(end >= 0 or progress < 1 for _, _, end, _ in items)
+            if not visible:
+                d = ImageDraw.Draw(image)
                 d.text((22, 25), "等一封来自你的海面来信…", font=self.font(18), fill="#d2f1ff")
                 d.text((22, 59), "弹幕将在这里实时出现", font=self.font(16), fill="#acd9ee")
-            for i, (_, name, text, kind) in enumerate(messages):
-                y = i * 111
-                special = kind in ("gift", "guard", "superchat")
-                d.rounded_rectangle((0, y, 371, y + 99), 14, fill=(221, 247, 255, 239) if special else (233, 249, 255, 227), outline="#a7def3", width=1)
-                d.ellipse((16, y + 17, 24, y + 25), fill="#24a5ca")
-                self._text(d, (34, y + 9), name, self.font(16, True), "#36728d", 317)
-                # Wrap to two lines using measured glyph widths (CJK + emoji).
-                line, lines = "", []
-                for char in text:
-                    if d.textlength(line + char, font=self.font(20)) > 332:
-                        lines.append(line)
-                        line = ""
-                        if len(lines) == 2:
-                            break
-                    line += char
-                if len(lines) < 2 and line:
-                    lines.append(line)
-                elif len(lines) == 2:
-                    lines[-1] = lines[-1][:-1] + "…"
-                for j, line in enumerate(lines):
-                    d.text((17, y + 36 + j * 27), line, font=self.font(20), fill="#194a66")
+            else:
+                layer = Image.new("RGBA", image.size, (0, 0, 0, 0))
+                d = ImageDraw.Draw(layer)
+                ease = 1 - (1 - progress) ** 3
+                for message, start, end, entering in items:
+                    if end < 0 and progress >= 1:
+                        continue
+                    y = int(round((start + (end - start) * ease) * CHAT_SLOT_H))
+                    if y + 99 <= 0 or y >= image.height:
+                        continue
+                    if entering:
+                        alpha = ease
+                    elif end < 0:
+                        alpha = 1 - ease
+                    else:
+                        alpha = 1.0
+                    self._chat_card(d, y, message[2], message[3], message[4], message[5], alpha)
+                image = Image.alpha_composite(image, layer)
         self._chat = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGBA2BGRA)
         self._chat_key = key
         return self._chat
+
+    def _chat_card(self, d, y, name, text, kind, meta, alpha):
+        meta = meta or {}
+        a = lambda value: int(round(value * alpha))
+        guard = int(meta.get("guard") or 0)
+        medal = meta.get("medal") or {}
+        admin = bool(meta.get("admin"))
+        price = meta.get("price")
+        if guard in GUARD_COLORS:
+            fill, edge = (*GUARD_TINTS[guard], a(234)), (*GUARD_COLORS[guard], a(235))
+        elif kind == "superchat":
+            fill, edge = (255, 243, 216, a(240)), (242, 190, 92, a(255))
+        elif kind == "gift":
+            fill, edge = (255, 241, 246, a(232)), (243, 198, 216, a(255))
+        elif admin:
+            fill, edge = (255, 238, 243, a(232)), (251, 114, 153, a(255))
+        else:
+            fill, edge = (233, 249, 255, a(227)), (167, 222, 243, a(255))
+        d.rounded_rectangle((0, y, 371, y + 99), 14, fill=fill, outline=edge, width=1)
+        d.ellipse((16, y + 17, 24, y + 25), fill=(36, 165, 202, a(255)))
+        x = 34
+        if medal.get("name"):
+            level = int(medal.get("level") or 0)
+            label = str(medal["name"])[:8] + (f" {level}" if level else "")
+            color = int(medal.get("color") or 0)
+            rgb = ((color >> 16) & 255, (color >> 8) & 255, color & 255) if color else (43, 125, 166)
+            fg = (255, 255, 255) if 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2] < 150 else (31, 69, 88)
+            x = self._chip(d, x, y + 8, label, rgb, fg, alpha) + 4
+        if guard in GUARD_COLORS:
+            x = self._chip(d, x, y + 8, GUARD_NAMES[guard], GUARD_COLORS[guard], (255, 255, 255), alpha) + 4
+        if admin:
+            x = self._chip(d, x, y + 8, "房管", (251, 114, 153), (255, 255, 255), alpha) + 4
+        if price:
+            x = self._chip(d, x, y + 8, f"¥{price:g}", (240, 166, 60), (255, 255, 255), alpha) + 4
+        self._text(d, (x, y + 9), name, self.font(16, True), (54, 114, 141, a(255)), 363 - x)
+        # Wrap to two lines using measured glyph widths (CJK + emoji).
+        line, lines = "", []
+        for char in text:
+            if d.textlength(line + char, font=self.font(20)) > 332:
+                lines.append(line)
+                line = ""
+                if len(lines) == 2:
+                    break
+            line += char
+        if len(lines) < 2 and line:
+            lines.append(line)
+        elif len(lines) == 2:
+            lines[-1] = lines[-1][:-1] + "…"
+        for j, line in enumerate(lines):
+            d.text((17, y + 36 + j * 27), line, font=self.font(20), fill=(25, 74, 102, a(255)))
+
+    def _chip(self, d, x, y, text, bg, fg, alpha):
+        font = self.font(12, True)
+        width = int(d.textlength(text, font=font)) + 14
+        d.rounded_rectangle((x, y, x + width, y + 18), 9, fill=(*bg, int(round(255 * alpha))))
+        d.text((x + width / 2, y + 9), text, font=font, fill=(*fg, int(round(255 * alpha))), anchor="mm")
+        return x + width
 
     def _radio_strip(self, settings, now):
         state = None

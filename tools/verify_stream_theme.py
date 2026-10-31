@@ -44,7 +44,8 @@ class ThemeTests(unittest.TestCase):
     def test_chat_is_live_expires_and_stays_behind_avatar(self):
         empty = self.theme.compose(self.game)
         self.theme.add_event({"type": "danmaku", "desc": "观众：今天也一起去冒险吧"})
-        chat = self.theme.compose(self.game)
+        with patch('live_theme.time.monotonic', return_value=time.monotonic() + 0.5):
+            chat = self.theme.compose(self.game)
         self.assertFalse(np.array_equal(empty[221:320, 42:414], chat[221:320, 42:414]))
         layer = np.full((100, 100, 4), (230, 50, 100, 255), np.uint8)
         compositor = OverlayCompositor(SimpleNamespace(frame=lambda: layer), lambda: ('bl', 0.2, 0, 0.12, 0.27))
@@ -55,8 +56,31 @@ class ThemeTests(unittest.TestCase):
         self.assertFalse(np.array_equal(hidden[221:320, 42:414], chat[221:320, 42:414]))
         self.settings['show_chat'] = True
         with patch('live_theme.time.monotonic', return_value=time.monotonic() + 121):
+            self.theme.compose(self.game)
+        with patch('live_theme.time.monotonic', return_value=time.monotonic() + 121.5):
             expired = self.theme.compose(self.game)
         np.testing.assert_array_equal(expired[221:700, 42:414], empty[221:700, 42:414])
+
+    def test_chat_cards_slide_and_fade_on_new_messages(self):
+        now = time.monotonic()
+        with patch('live_theme.time.monotonic', return_value=now):
+            self.theme.compose(self.game)
+        self.theme.add_event({"type": "danmaku", "desc": "观众：第一条"})
+        with patch('live_theme.time.monotonic', return_value=now + 0.05):
+            start = self.theme.compose(self.game)
+        with patch('live_theme.time.monotonic', return_value=now + 0.2):
+            middle = self.theme.compose(self.game)
+        with patch('live_theme.time.monotonic', return_value=now + 0.6):
+            settled = self.theme.compose(self.game)
+        with patch('live_theme.time.monotonic', return_value=now + 0.7):
+            later = self.theme.compose(self.game)
+        panel = (221, 700, 42, 414)
+        self.assertFalse(np.array_equal(start[panel[0]:panel[1], panel[2]:panel[3]],
+                                        middle[panel[0]:panel[1], panel[2]:panel[3]]))
+        self.assertFalse(np.array_equal(middle[panel[0]:panel[1], panel[2]:panel[3]],
+                                        settled[panel[0]:panel[1], panel[2]:panel[3]]))
+        np.testing.assert_array_equal(settled[panel[0]:panel[1], panel[2]:panel[3]],
+                                      later[panel[0]:panel[1], panel[2]:panel[3]])
 
     def test_moderation_bounded_history_and_clear(self):
         for reason in ('屏蔽词', '忽略名单'):
@@ -196,6 +220,35 @@ class ThemeTests(unittest.TestCase):
         self.assertGreater(max(levels), 0.3)
         player.music_paused = True
         self.assertIsNone(player.music_levels())
+
+    def test_chat_cards_distinguish_fans_guards_and_admin(self):
+        def render(event):
+            theme = StreamTheme(lambda: self.settings)
+            theme.add_event(event)
+            with patch('live_theme.time.monotonic', return_value=time.monotonic() + 0.5):
+                frame = theme.compose(self.game)
+            return frame[221:320, 42:414]
+
+        plain = render({'type': 'danmaku', 'desc': '观众：你好'})
+        variants = (
+            {'medal': {'name': '深海团', 'level': 18, 'color': 0x2F6F8F}},
+            {'guard': 3},
+            {'admin': True},
+            {'type': 'superchat', 'price': 30},
+        )
+        for extra in variants:
+            with self.subTest(extra=extra):
+                event = {'type': 'danmaku', 'desc': '观众：你好', **extra}
+                self.assertFalse(np.array_equal(plain, render(event)))
+        gift = {'type': 'gift', 'desc': '看海的人 送出 小花花 ×1（1元）', 'sender': '看海的人'}
+        self.assertFalse(np.array_equal(render(gift), render({**gift, 'sender': ''})))
+        from pipeline import badge
+        info = badge({'type': 'danmaku', 'medal_name': '深海团', 'medal_level': 9, 'medal_color': 0x123456,
+                      'guard_level': 3, 'admin': 1, 'name': '海盐汽水'})
+        self.assertEqual(info['medal'], {'name': '深海团', 'level': 9, 'color': 0x123456})
+        self.assertEqual(info['guard'], 3)
+        self.assertTrue(info['admin'])
+        self.assertEqual(info['sender'], '海盐汽水')
 
     def test_cached_composition_budget(self):
         self.theme.compose(self.game)
