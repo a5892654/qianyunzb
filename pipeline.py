@@ -442,7 +442,7 @@ class Pipeline:
             return len(env)
         return emitted
 
-    async def _play_stream(self, item, loop):
+    async def _play_stream(self, item, loop, *, retried=False):
         from dtgame import ttsd
         a = self.cfg["audio"]
         text, dev, vol = item["text"], a.get("device", ""), float(a.get("volume", 80))
@@ -451,6 +451,7 @@ class Pipeline:
         t0, acc, env_n, sr = time.monotonic(), [], 0, None
         audio_s = 0.0
         generated_s = 0.0
+        error = None
         try:
             await loop.run_in_executor(None, self.app.player.begin_stream, dev, vol,
                                        self.cfg["tts"].get("stream_buffer_seconds", 0.8))
@@ -464,18 +465,11 @@ class Pipeline:
                 await loop.run_in_executor(None, self.app.player.feed_stream, pcm, r)
             generated_s = time.monotonic() - t0
         except Exception as e:
-            # 引擎没出声就挂了（掉线/显存不够）：退回整句链路，别把直播间留成哑巴
-            if acc:
-                log.warning("流式语音中途断流：%s", e)
-                self.app.push("log", {"level": "warn", "msg": f"流式语音中途断流：{e}"})
-                return
-            log.warning("流式语音失败，改整句合成：%s", e)
-            self.app.push("log", {"level": "warn", "msg": f"流式语音失败，改整句合成：{e}"})
-            pcm, psr = await self.app.engine.synth(self.cfg["tts"], text)
-            item["pcm"], item["sr"] = pcm, psr
-            await self._play_blocking(item, loop)
-            return
+            error = e
         finally:
+            if error is not None:
+                # 缓冲里可能还压着半句，不 abort 的话 end_stream 会一直等它放完。
+                await loop.run_in_executor(None, self.app.player.skip)
             await loop.run_in_executor(None, self.app.player.end_stream)
             stats = self.app.player.stream_stats()
             if audio_s and generated_s:
@@ -488,6 +482,38 @@ class Pipeline:
             if stats["output_underflows"]:
                 self.app.push("log", {"level": "warn", "msg":
                     f"音频设备输出欠载 {stats['output_underflows']} 次，请检查音频设备或 CPU 占用"})
+        if error is None:
+            return
+        if acc:
+            # 半句已经放出去了，整句重放会重复词：先把引擎恢复好，下一句直接用。
+            log.warning("流式语音中途断流：%s", error)
+            self.app.push("log", {"level": "warn", "msg": f"流式语音中途断流：{error}"})
+            asyncio.create_task(self._recover_stream_engine())
+            return
+        log.warning("流式语音失败：%s", error)
+        if retried:
+            self.app.push("log", {"level": "error", "msg":
+                f"流式引擎重启后这句仍没出声，已跳过（不降级）：{error}"})
+            return
+        ttsd.stop()
+        ok = await ttsd.ensure(self.cfg["tts"],
+                              lambda m: self.app.push("log", {"level": "info", "msg": m}))
+        if not ok:
+            self.app.push("log", {"level": "error", "msg":
+                f"流式语音引擎没能恢复，这句跳过（不降级到 SAPI）：{error}"})
+            return
+        self.app.push("log", {"level": "warn", "msg": "流式引擎已重启，重试这一句"})
+        return await self._play_stream(item, loop, retried=True)
+
+    async def _recover_stream_engine(self):
+        from dtgame import ttsd
+        try:
+            ttsd.stop()
+            if not await ttsd.ensure(self.cfg["tts"],
+                                     lambda m: self.app.push("log", {"level": "info", "msg": m})):
+                self.app.push("log", {"level": "error", "msg": "流式语音引擎没能恢复，后续句子会继续跳过"})
+        except Exception as e:
+            log.warning("重启流式引擎失败：%s", e)
 
     async def _play_blocking(self, item, loop):
         a = self.cfg["audio"]

@@ -46,11 +46,75 @@ async def alive(cfg_tts):
         return False
 
 
+def _listening_pids(port):
+    """占着端口的进程。残留服务会一直监听，新实例拉起来会撞端口。"""
+    try:
+        out = subprocess.run(["netstat", "-ano", "-p", "tcp"], capture_output=True, text=True,
+                             creationflags=procutil.CREATE_NO_WINDOW, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    pids = set()
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) < 5 or parts[0].upper() != "TCP" or parts[3].upper() != "LISTENING":
+            continue
+        if not parts[1].endswith(":%d" % port):
+            continue
+        try:
+            pids.add(int(parts[4]))
+        except ValueError:
+            continue
+    return pids
+
+
+def _ttsd_pids(script):
+    """命令行里跑着这个 ttsd 脚本的 python 进程（含 uv 再拉起的子进程）。"""
+    needle = os.path.basename(script).lower()
+    cmd = ("Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
+           "Where-Object { $_.CommandLine -and $_.CommandLine.ToLower().Contains('%s') } | "
+           "ForEach-Object { $_.ProcessId }" % needle)
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", cmd],
+                             capture_output=True, text=True, timeout=20,
+                             creationflags=procutil.CREATE_NO_WINDOW).stdout
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    pids = set()
+    for line in out.splitlines():
+        line = line.strip()
+        if line.isdigit():
+            pids.add(int(line))
+    return pids
+
+
+def kill_stale(cfg_tts, on_status=None):
+    """拉起前清掉残留的 ttsd：每份模型常驻约 4.8GB 显存，
+    端口不冲突时完全看不出来，直到新实例加载时把显卡挤爆（表现为引擎无声消失）。
+    """
+    script = str(cfg_tts.get("ttsd_script", r"C:\gamedata\ttsd\ttsd.py"))
+    try:
+        port = int(_base(cfg_tts).rsplit(":", 1)[-1])
+    except ValueError:
+        port = 8899
+    mine = {os.getpid()}
+    if _proc is not None and _proc.poll() is None:
+        mine.add(_proc.pid)
+    stale = sorted(p for p in (_listening_pids(port) | _ttsd_pids(script)) if p not in mine)
+    for pid in stale:
+        procutil.kill_tree(pid)
+    if stale:
+        log.warning("清理残留 ttsd 进程：%s", stale)
+        if on_status:
+            on_status("已清理残留的流式语音进程：%s" % ", ".join(str(p) for p in stale))
+    return stale
+
+
 def spawn(cfg_tts, on_status=None):
     """拉起 ttsd 常驻进程；模型首次上卡要几十秒，调用方自己等 alive()。"""
     global _proc
     if _proc is not None and _proc.poll() is None:
         return True
+    kill_stale(cfg_tts, on_status)
     py = str(cfg_tts.get("ttsd_python", r"C:\gamedata\ttsd\.venv\Scripts\python.exe"))
     script = str(cfg_tts.get("ttsd_script", r"C:\gamedata\ttsd\ttsd.py"))
     if not os.path.exists(py) or not os.path.exists(script):
