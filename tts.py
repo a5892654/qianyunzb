@@ -258,6 +258,8 @@ class GsvEngine:
         return False
 
     def stop(self, keep_comfyui: bool = False):
+        from dtgame import ttsd
+        ttsd.stop()
         if self.proc and self.proc.poll() is None:
             procutil.kill_tree(self.proc.pid)
         self.proc = None

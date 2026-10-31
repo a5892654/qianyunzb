@@ -13,6 +13,7 @@ Object.assign(cfg.live2d, {enabled: true, model_dir: 'fixture', model_file: 'fix
 ]});
 let previewing = false;
 let currentModel = 'fixture', rejectSwitch = false;
+let speechModelLoading = false, rejectSpeechModel = false;
 const requests = [], errors = [];
 function merge(a, b) {
   for (const [key, value] of Object.entries(b)) {
@@ -55,6 +56,17 @@ function merge(a, b) {
         }
       }
       else if (url.pathname === '/api/tts/weights') response = {gpt: [], sovits: []};
+      else if (url.pathname === '/api/tts/models') response = {ok: true, selected: cfg.tts.qwen_model_size, loading: speechModelLoading, ready: !speechModelLoading, actual: cfg.tts.qwen_model, runtime_ready: true, reference_ready: true};
+      else if (url.pathname === '/api/tts/model') {
+        assert.equal(req.headers()['x-bvb'], '1');
+        if (rejectSpeechModel) response = {ok: false, error: 'fixture speech model busy'};
+        else {
+          cfg.tts.qwen_model_size = body.size;
+          cfg.tts.qwen_model = `Qwen/Qwen3-TTS-12Hz-${body.size}-Base`;
+          speechModelLoading = true;
+          response = {ok: true, selected: body.size, loading: true, ready: false};
+        }
+      }
       else if (url.pathname === '/api/audio/devices') response = [];
       else if (url.pathname === '/api/songs/state') response = {current: null, queue: [], credits: []};
       else if (url.pathname === '/api/broadcast/account') response = {ok: true, logged_in: false, room_id: 0};
@@ -297,6 +309,21 @@ function merge(a, b) {
     assert.equal(await bufferInput.inputValue(), '1.2');
     assert.deepEqual(errors, []);
     console.log('PASS stream prebuffer setting is visible, saved and restored on reload');
+    await page.waitForFunction(() => document.querySelector('#qwenModelState').textContent.includes('0.6B'));
+    await page.selectOption('#qwenModelSize', '1.7B');
+    await page.click('#qwenModelApply');
+    await page.waitForFunction(() => document.querySelector('#qwenModelState').textContent.includes('正在切换'));
+    assert.equal(cfg.tts.qwen_model_size, '1.7B');
+    assert.equal(await page.locator('#qwenModelApply').isDisabled(), true);
+    speechModelLoading = false;
+    await page.evaluate(() => pollSpeechModel());
+    assert.ok((await page.locator('#qwenModelState').textContent()).includes('1.7B'));
+    rejectSpeechModel = true;
+    await page.selectOption('#qwenModelSize', '0.6B');
+    await page.click('#qwenModelApply');
+    await page.waitForFunction(() => document.querySelector('#toast').textContent.includes('fixture speech model busy'));
+    assert.equal(cfg.tts.qwen_model_size, '1.7B');
+    console.log('PASS speech model selector switches both sizes, shows loading and keeps old selection on rejection');
     await page.goto('http://127.0.0.1:18787/rice');
     await page.waitForFunction(() => document.querySelector('canvas').style.left !== '');
     await page.waitForFunction(() => document.querySelector('canvas').style.height === '240px');

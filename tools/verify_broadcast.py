@@ -250,6 +250,7 @@ def install_fakes():
     mod_c.sources = sources
     mod_c.OUT_W, mod_c.OUT_H = OUT_W, OUT_H   # live_broadcast 从这里取源画面尺寸
     mod_c.fit_borderless_client = lambda hwnd, w, h: (w, h)
+    mod_c.window_pixel_scale = lambda hwnd, fallback=1.0: fallback
     mod_c.close_window = lambda hwnd: None
     sys.modules["live_platform"] = mod_p
     sys.modules["live_capture"] = mod_c

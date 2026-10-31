@@ -68,6 +68,8 @@ class Pipeline:
         self.has_job = asyncio.Event()
         self.synth_q = asyncio.Queue(maxsize=1)
         self.play_q = asyncio.Queue(maxsize=1)
+        self.tts_ready = asyncio.Event()
+        self.tts_ready.set()
         self.paused = False
         self.last_seen = {}
         self.merging = {}
@@ -413,6 +415,7 @@ class Pipeline:
     async def _synth_worker(self):
         while True:
             item = await self.synth_q.get()
+            await self.tts_ready.wait()
             if self._during_farewell(item) or self._expired(item):
                 self._mark_done(item["id"])
                 continue
@@ -506,6 +509,7 @@ class Pipeline:
         loop = asyncio.get_running_loop()
         while True:
             item = await self.play_q.get()
+            await self.tts_ready.wait()
             if self._during_farewell(item) or self._expired(item):
                 self._mark_done(item["id"])
                 continue

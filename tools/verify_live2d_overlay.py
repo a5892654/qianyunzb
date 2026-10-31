@@ -4,6 +4,7 @@ r"""离线验证皮套透明合成、实时布局、预览与推流共用帧；�
 """
 import asyncio
 import sys
+import struct
 import threading
 import time
 import unittest
@@ -19,7 +20,7 @@ from aiohttp import web
 
 from live_broadcast import Broadcast
 from live_capture import FPS, OUT_H, OUT_W, WindowStreamCapture
-from live_overlay import Live2DOverlay, OverlayCompositor, OverlayError, _decode_png, find_edge
+from live_overlay import Live2DOverlay, OverlayCompositor, OverlayError, _decode_png, _decode_raw, find_edge
 
 
 class CompositorTests(unittest.TestCase):
@@ -34,6 +35,16 @@ class CompositorTests(unittest.TestCase):
         ok, png = cv2.imencode('.png', self.layer)
         self.assertTrue(ok)
         np.testing.assert_array_equal(_decode_png(png.tobytes()), self.layer)
+
+    def test_raw_frame_flips_webgl_rows_and_unpremultiplies_alpha(self):
+        raw = np.array([[[128, 0, 0, 128]], [[0, 200, 0, 255]]], np.uint8)
+        packet = struct.pack('<4I', 0x31525951, 1, 2, 1) + raw.tobytes()
+        image = _decode_raw(packet)
+        np.testing.assert_array_equal(image[0, 0], (0, 200, 0, 255))
+        np.testing.assert_array_equal(image[1, 0], (0, 0, 255, 128))
+        for invalid in (b'', struct.pack('<4I', 0, 1, 2, 1) + raw.tobytes(), packet[:-1]):
+            with self.assertRaises(OverlayError):
+                _decode_raw(invalid)
 
     def test_position_size_and_dynamic_move(self):
         frame = np.zeros((200, 400, 4), np.uint8)
@@ -333,6 +344,16 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
 
 
 class BrowserCaptureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_raw_frame_timeout_is_reported_instead_of_silent_freeze(self):
+        from unittest.mock import AsyncMock
+        overlay = Live2DOverlay()
+        socket = SimpleNamespace(prepare=AsyncMock(), send_json=AsyncMock(),
+                                 receive=AsyncMock(side_effect=asyncio.TimeoutError()), close=AsyncMock())
+        with patch('aiohttp.web.WebSocketResponse', return_value=socket):
+            await overlay._receive_frames(Mock())
+        self.assertIn('读取超时', overlay.error)
+        self.assertTrue(overlay._ready.is_set())
+
     @unittest.skipUnless(find_edge(), '本机没有 Edge')
     async def test_real_edge_transparent_frames_and_page_error(self):
         # 使用真实 Pixi WebGL 渲染器，合成图形替代仓库不分发的模型。

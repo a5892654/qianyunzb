@@ -526,7 +526,17 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
 
 <!-- ========== 语音 ========== -->
 <section id="voice">
-  <h2>语音设置（GPT-SoVITS）</h2>
+  <h2>语音设置</h2>
+  <div class="card">
+    <h3>Qwen3-TTS 模型</h3>
+    <div class="row">
+      <label class="f" style="max-width:300px">模型大小<select id="qwenModelSize"><option value="0.6B">0.6B · 较低显存</option><option value="1.7B">1.7B · 较大模型</option></select></label>
+      <button class="btn b" id="qwenModelApply" style="align-self:flex-end">切换模型</button>
+      <span class="hint" id="qwenModelState" role="status"></span>
+    </div>
+    <p class="hint">两种 Base 模型都沿用同一份参考音频。切换时先卸载旧模型再加载新模型，首次使用需要下载；本句语音播完后再切换。</p>
+    <div class="row"><label class="f">克隆参考音频<input data-k="tts.qwen_ref_audio"></label><span class="btn" data-pick="tts.qwen_ref_audio" data-kind="audio" style="margin-top:18px">浏览…</span></div>
+  </div>
   <div class="card">
     <div class="row">
       <label class="c"><input type="checkbox" data-k="tts.enabled">启用语音（关掉则只显示文字）</label>
@@ -843,6 +853,7 @@ $$('nav button[data-tab]').forEach(b => b.onclick = () => {
   syncL2dTestPreview();
   renderLayout();
   renderTheme();
+  if (b.dataset.tab === 'voice') pollSpeechModel();
 });
 
 // ---------- 回复规则卡片 ----------
@@ -1026,7 +1037,29 @@ $('#testBtn').onclick = () => api('/api/test_event', {type: $('#tType').value, n
 $('#aiTestBtn').onclick = async () => { $('#aiOut').textContent = '思考中…'; const r = await api('/api/ai/test', {prompt: $('#aiPrompt').value}); $('#aiOut').innerHTML = r.ok ? `<span style="color:var(--text)">${esc(r.text)}</span>（${r.seconds} 秒）` : `<span style="color:var(--red)">${esc(r.error)}</span>`; };
 $('#aiResetBtn').onclick = async () => { await api('/api/ai/reset', {}); toast('已清空 AI 记忆'); };
 $('#ttsTestBtn').onclick = async () => { await api('/api/say', {text: $('#ttsTest').value}); toast('已加入播放队列'); };
-$('#engStart').onclick = async () => { await api('/api/tts/start', {}); toast('正在启动引擎，进度看控制台'); };
+$('#engStart').onclick = async () => { await flushConfig(); const r = await api('/api/tts/start', {}); toast(r.ok ? '正在启动引擎，进度看控制台' : r.error); await pollSpeechModel(); };
+let speechModelBusy = false;
+async function pollSpeechModel() {
+  try {
+    const r = await api('/api/tts/models');
+    if (!r.ok) return;
+    if (!speechModelBusy && document.activeElement !== $('#qwenModelSize')) $('#qwenModelSize').value = r.selected;
+    $('#qwenModelApply').disabled = speechModelBusy || r.loading;
+    $('#qwenModelState').textContent = r.error || (r.phase === 'downloading' ? '首次使用正在下载模型…' : r.loading ? '正在切换并加载模型…' : r.ready ? `正在运行：${r.actual.split(/[\\/]/).pop()}${Number.isFinite(r.memory_mib) ? ' · 模型预留显存 ' + (r.memory_mib / 1024).toFixed(2) + ' GiB' : ''}` : !r.runtime_ready ? '语音环境未安装' : !r.reference_ready ? '请先选择克隆参考音频' : `已选择 ${r.selected}，引擎未启动`);
+  } catch {}
+}
+$('#qwenModelApply').onclick = async () => {
+  speechModelBusy = true; $('#qwenModelApply').disabled = true;
+  try {
+    await flushConfig();
+    const r = await api('/api/tts/model', {size: $('#qwenModelSize').value});
+    if (!r.ok) throw new Error(r.error || '模型切换失败');
+    toast(r.message || '正在切换模型，加载进度见控制台');
+    await loadConfig();
+  } catch (error) { toast(error.message); }
+  finally { speechModelBusy = false; await pollSpeechModel(); }
+};
+setInterval(() => { if ($('#voice').classList.contains('on')) pollSpeechModel(); }, 2000);
 $('#engStop').onclick = async () => { const r = await api('/api/tts/stop', {}); toast(r.ok ? '已关闭引擎' : r.error); };
 $('#engLogBtn').onclick = async () => { const el = $('#engLog'); el.style.display = ''; el.textContent = await fetch('/api/tts/log').then(r => r.text()) || '（暂无日志：引擎可能不是由本软件启动的）'; el.scrollTop = el.scrollHeight; };
 $('#wRefresh').onclick = loadWeights; $('#devRefresh').onclick = loadDevices;
@@ -2034,6 +2067,7 @@ async function pollBroadcast() {
     const measured = broadcastInfo.previewing && Number.isFinite(broadcastInfo.render_fps);
     health.textContent = measured
       ? `游戏更新 ${broadcastInfo.capture_fps} · 源画面处理 ${broadcastInfo.render_fps} / ${broadcastInfo.fps} 帧/秒 · 平均处理 ${broadcastInfo.frame_process_ms} 毫秒`
+        + (broadcastInfo.overlay && Number.isFinite(broadcastInfo.avatar_fps) ? ` · 皮套更新 ${broadcastInfo.avatar_fps} 帧/秒（读取 ${broadcastInfo.avatar_read_ms} 毫秒）` : '')
         + (raw.length === 2 ? ` · 原始采集 ${raw[0]}×${raw[1]}` : '')
         + (broadcastInfo.capture_age_ms > 2000 ? ` · 游戏已 ${(broadcastInfo.capture_age_ms / 1000).toFixed(1)} 秒未刷新（静止画面时正常）` : '')
       : '';

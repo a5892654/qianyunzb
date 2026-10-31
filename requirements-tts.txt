@@ -1,0 +1,4 @@
+# Install in .tts-venv; keep GPU speech dependencies separate from the UI.
+faster-qwen3-tts==0.5.4
+transformers==5.15.1
+aiohttp>=3.9,<4

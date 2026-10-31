@@ -511,7 +511,10 @@ class Broadcast:
                          getattr(self.capture, "compositor_error", "")) if enabled else ""
         ready = bool(enabled and not overlay_error and getattr(self.capture, "compositor", None) and
                      overlay and overlay.frame() is not None)
-        return {**state, "phase": self.phase, "error": self.error or state.get("error", "") or state.get("theme_error", ""),
+        timing = overlay.snapshot() if overlay is not None and callable(getattr(overlay, "snapshot", None)) else {}
+        if not isinstance(timing, dict):
+            timing = {}
+        return {**state, **timing, "phase": self.phase, "error": self.error or state.get("error", "") or state.get("theme_error", ""),
                 "running": self.running, "overlay": ready, "source": self.source_open,
                 "source_title": SOURCE_TITLE if self.source_open else "",
                 "overlay_error": overlay_error,

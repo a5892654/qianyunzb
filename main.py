@@ -15,6 +15,7 @@ from aiohttp import web, WSMsgType, ClientSession
 
 import config
 import live2d
+import tts_models
 from bili import BiliLive, QrLogin, SmsLogin
 from brain import Brain, default_qoder_exe, list_qoder_models
 from dtgame.bridge import BridgeError, GameBridge
@@ -460,6 +461,8 @@ def pick_path(kind, initial=""):
 
 def build_web(app: App):
     routes = web.RouteTableDef()
+    speech_switch_task = None
+    speech_switch_error = ""
 
     @web.middleware
     async def guard(request, handler):
@@ -598,6 +601,16 @@ def build_web(app: App):
             seconds = patch["tts"]["stream_buffer_seconds"]
             if type(seconds) not in (int, float) or not 0 <= seconds <= 3:
                 return web.json_response({"ok": False, "error": "流式预缓冲需为 0 至 3 秒"}, status=400)
+        if isinstance(patch.get("tts"), dict):
+            speech_patch = patch["tts"]
+            if "ttsd_chunk_size" in speech_patch and (type(speech_patch["ttsd_chunk_size"]) is not int
+                                                      or not 1 <= speech_patch["ttsd_chunk_size"] <= 32):
+                return web.json_response({"ok": False, "error": "流式块大小需为 1 至 32 的整数"}, status=400)
+            if "qwen_model_size" in speech_patch:
+                try:
+                    speech_patch.update(tts_models.selection_patch(app.cfg["tts"], speech_patch["qwen_model_size"]))
+                except ValueError as error:
+                    return web.json_response({"ok": False, "error": str(error)}, status=400)
         if "overlay" in patch:
             overlay = patch["overlay"]
             if (not isinstance(overlay, dict) or set(overlay) - {"enabled", "seconds"}
@@ -1121,14 +1134,94 @@ def build_web(app: App):
 
     @routes.post("/api/tts/start")
     async def tts_start(_):
+        nonlocal speech_switch_error
+        speech_switch_error = ""
         asyncio.create_task(app.engine.start(app.cfg["tts"], lambda m: app.push("log", {"level": "info", "msg": m})))
         return ok()
 
+    @routes.get("/api/tts/models")
+    async def tts_models_status(_):
+        from dtgame import ttsd
+        settings = app.cfg["tts"]
+        state = await ttsd.health(settings)
+        if not state.get("model"):
+            state["model"] = ttsd.owned_model()
+        py, script = ttsd.runtime_paths(settings)
+        actual = str(state.get("model", "")).replace("\\", "/").rstrip("/").split("/")[-1]
+        desired = str(settings.get("ttsd_model", "")).replace("\\", "/").rstrip("/").split("/")[-1]
+        mismatch = (f"当前引擎仍是 {actual}，尚未完成模型切换" if actual else "外部引擎未提供模型信息，无法确认模型大小") if state.get("ok") and actual != desired else ""
+        return ok(selected=tts_models.selected_size(settings), choices=tts_models.choices(settings),
+                  loading=bool(speech_switch_task and not speech_switch_task.done()) or state.get("phase") in ("loading", "downloading"),
+                  phase=state.get("phase", ""),
+                  ready=bool(state.get("ok")) and bool(actual) and actual == desired, actual=state.get("model", ""),
+                  error=speech_switch_error or state.get("error", "") or mismatch,
+                  memory_mib=state.get("vram_reserved_mib"),
+                  runtime_ready=os.path.isfile(py) and os.path.isfile(script),
+                  reference_ready=os.path.isfile(ttsd._resolve_ref(settings)))
+
+    @routes.post("/api/tts/model")
+    async def tts_model_switch(request):
+        nonlocal speech_switch_task, speech_switch_error
+        data = await request.json()
+        try:
+            if not isinstance(data, dict):
+                raise ValueError("请选择语音模型")
+            patch = tts_models.selection_patch(app.cfg["tts"], data.get("size"))
+        except (ValueError, TypeError) as error:
+            return web.json_response({"ok": False, "error": str(error)}, status=400)
+        if speech_switch_task and not speech_switch_task.done():
+            return web.json_response({"ok": False, "error": "模型正在切换，请等待加载完成"}, status=409)
+        if getattr(getattr(app, "pipe", None), "current", None):
+            return web.json_response({"ok": False, "error": "请等当前语音播完再切换模型"}, status=409)
+        app.cfg["tts"].update(patch)
+        config.save(app.cfg)
+        speech_switch_error = ""
+        if not (app.cfg["tts"].get("enabled", True) and app.cfg["tts"].get("qwen_enabled", True)
+                and app.cfg["tts"].get("stream_enabled", True)):
+            return ok(selected=data["size"], loading=False, ready=False, message="模型选择已保存，启用 Qwen3-TTS 流式后生效")
+        from dtgame import ttsd
+        py, script = ttsd.runtime_paths(app.cfg["tts"])
+        if not os.path.isfile(py) or not os.path.isfile(script) or not os.path.isfile(ttsd._resolve_ref(app.cfg["tts"])):
+            speech_switch_error = "模型选择已保存；请配置有效的流式语音环境和克隆参考音频，再启动引擎"
+            return ok(selected=data["size"], loading=False, ready=False, message=speech_switch_error)
+
+        async def switch():
+            nonlocal speech_switch_error
+            try:
+                messages = []
+                def status(message):
+                    messages.append(message)
+                    app.push("log", {"level": "info", "msg": message})
+                if not await ttsd.ensure(dict(app.cfg["tts"]), status):
+                    speech_switch_error = messages[-1] if messages else "语音模型切换失败"
+                else:
+                    app.push("log", {"level": "info", "msg": f"流式语音已切换为 {data['size']}"})
+            except Exception as error:
+                speech_switch_error = str(error)
+            finally:
+                if speech_gate is not None:
+                    speech_gate.set()
+        speech_gate = getattr(getattr(app, "pipe", None), "tts_ready", None)
+        if speech_gate is not None:
+            speech_gate.clear()
+        speech_switch_task = asyncio.create_task(switch())
+        if hasattr(app, "tasks"):
+            app.tasks.append(speech_switch_task)
+        return ok(selected=data["size"], loading=True, ready=False)
+
     @routes.post("/api/tts/stop")
     async def tts_stop(_):
-        if app.engine.proc:
-            app.engine.stop()
-            app.push("log", {"level": "info", "msg": "已关闭 GPT-SoVITS 引擎"})
+        nonlocal speech_switch_task
+        from dtgame import ttsd
+        if speech_switch_task and not speech_switch_task.done():
+            speech_switch_task.cancel()
+            try:
+                await speech_switch_task
+            except asyncio.CancelledError:
+                pass
+        if ttsd.owned() or app.engine.proc or getattr(app.engine, "comfy_proc", None):
+            await asyncio.to_thread(app.engine.stop)
+            app.push("log", {"level": "info", "msg": "已关闭本软件启动的语音引擎并释放其显存"})
             return ok()
         return web.json_response({"ok": False, "error": "引擎不是本软件启动的，请在它自己的窗口关闭"})
 
@@ -1241,6 +1334,14 @@ def build_web(app: App):
         return web.json_response({"ok": ok})
 
     wapp = web.Application(middlewares=[guard], client_max_size=MAX_BODY_BYTES)
+    async def cleanup_speech_switch(_):
+        if speech_switch_task and not speech_switch_task.done():
+            speech_switch_task.cancel()
+            try:
+                await speech_switch_task
+            except asyncio.CancelledError:
+                pass
+    wapp.on_cleanup.append(cleanup_speech_switch)
     wapp.add_routes(routes)
     wapp.router.add_static("/static", config.WEB_DIR)
     return wapp

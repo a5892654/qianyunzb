@@ -1,0 +1,44 @@
+{
+  "date": "2026-10-31",
+  "speech": {
+    "load_s": 24.28,
+    "health": {
+      "ok": true,
+      "phase": "ready",
+      "model": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+      "error": "",
+      "service": "whaletalk-tts",
+      "vram_allocated_mib": 2250.2,
+      "vram_reserved_mib": 2448.0
+    },
+    "utterances": [
+      {
+        "first_chunk_s": 0.203,
+        "generation_s": 3.281,
+        "audio_s": 5.2,
+        "sample_rate": 24000
+      },
+      {
+        "first_chunk_s": 0.25,
+        "generation_s": 1.265,
+        "audio_s": 4.56,
+        "sample_rate": 24000
+      }
+    ],
+    "reference": "Windows SAPI test fixture, not the user's voice"
+  },
+  "avatar_before": {
+    "avatar_fps": 25.9,
+    "avatar_read_ms": 24.5,
+    "observed_fps": 26.0,
+    "different_images": 104,
+    "error": ""
+  },
+  "avatar_after": {
+    "avatar_fps": 29.8,
+    "avatar_read_ms": 20.2,
+    "observed_fps": 30.0,
+    "different_images": 120,
+    "error": ""
+  }
+}
