@@ -37,9 +37,13 @@ def selection_patch(settings, size):
 
 
 def choices(settings):
-    return [{"size": size, "name": model_id(size),
-             "downloaded": downloaded(MODEL_DIR / model_id(size).split("/")[-1])}
-            for size in SIZES]
+    """按实际解析出来的路径判断是否已下载：模型既可能在仓库 models/tts，
+    也可能在旧配置指向的目录旁边（本机就是 ComfyUI 的模型目录）。"""
+    items = []
+    for size in SIZES:
+        path = Path(selection_patch(settings, size)["ttsd_model"])
+        items.append({"size": size, "name": model_id(size), "downloaded": downloaded(path)})
+    return items
 
 
 def downloaded(path):
