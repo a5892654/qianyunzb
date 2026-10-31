@@ -367,13 +367,34 @@ class BrowserCaptureTests(unittest.IsolatedAsyncioTestCase):
         site = web.TCPSite(runner, '127.0.0.1', 0)
         await site.start()
         port = site._server.sockets[0].getsockname()[1]
-        overlay = Live2DOverlay()
+        view = {'size': 120, 'zoom': 1}
+        overlay = Live2DOverlay(lambda: dict(view))
         try:
             await asyncio.to_thread(overlay.start, f'http://127.0.0.1:{port}/?overlay=1', 120)
             frame = overlay.frame()
             self.assertIsNotNone(frame)
             self.assertEqual(int(frame[0, 0, 3]), 0)
             self.assertEqual(int(frame[60, 60, 3]), 255)
+            self.assertEqual(frame.shape, (120, 120, 4))
+            view.update(size=240, zoom=2)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                frame = overlay.frame()
+                if frame is not None and frame.shape == (240, 240, 4):
+                    break
+                await asyncio.sleep(0.03)
+            self.assertEqual(frame.shape, (240, 240, 4))
+            self.assertEqual(int(frame[120, 0, 3]), 255, '半身应在 WebGL 里放大后填满画布')
+            self.assertEqual(int(frame[0, 0, 3]), 0, '半身取景的顶部偏移应保持不变')
+            view['zoom'] = 1
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                frame = overlay.frame()
+                if frame is not None and not frame[120, 0, 3]:
+                    break
+                await asyncio.sleep(0.03)
+            self.assertEqual(int(frame[120, 0, 3]), 0, '切回全身不应残留半身变换')
+            self.assertEqual(int(frame[120, 120, 3]), 255)
             await asyncio.to_thread(overlay.stop)
             with self.assertRaisesRegex(OverlayError, 'fixture model failed'):
                 await asyncio.to_thread(overlay.start, f'http://127.0.0.1:{port}/error', 120)

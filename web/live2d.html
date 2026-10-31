@@ -57,12 +57,31 @@ let assetGeneration = 0, expressionRequest = 0;
 let defaultPartOpacities = null;
 
 // 同步渲染后读取 WebGL 画布，避免默认清空绘图缓冲后得到全透明图片。
-window.captureLive2DFrame = () => {
+window.captureLive2DFrame = (view = {}) => {
   const error = window.live2dOverlayState.error || errBox.textContent;
   if (error) return {error};
   if (!CFG?.enabled || !model) return {ready: false};
-  app.renderer.render(app.stage);
-  return {png: app.view.toDataURL('image/png').split(',')[1]};
+  // 先让模型按最终取景绘制，再读取 PNG，避免半身裁切损失一半像素。
+  // 保留逻辑视口和模型配置，独立浏览器源与气泡位置不受影响。
+  const W = innerWidth, H = innerHeight;
+  const size = Math.max(48, Math.min(2160, Math.round(Number(view.size) || H * (window.devicePixelRatio || 1))));
+  const resolution = size / H;
+  if (app.renderer.resolution !== resolution) {
+    app.renderer.resolution = resolution;
+    app.renderer.resize(W, H);
+  }
+  const zoom = Math.max(1, Math.min(3, Number(view.zoom) || 1));
+  const cw = Math.max(1, Math.round(W / zoom)), ch = Math.max(1, Math.round(H / zoom));
+  const x = Math.floor((W - cw) / 2), y = Math.min(H - ch, Math.round(H * 0.065));
+  app.stage.scale.set(W / cw, H / ch);
+  app.stage.position.set(-x * W / cw, -y * H / ch);
+  try {
+    app.renderer.render(app.stage);
+    return {png: app.view.toDataURL('image/png').split(',')[1]};
+  } finally {
+    app.stage.scale.set(1);
+    app.stage.position.set(0);
+  }
 };
 
 // 无窗口渲染校验用：强制画布尺寸并重排（隐藏标签页里 ticker 不跑，resize 事件不生效）。

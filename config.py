@@ -138,8 +138,9 @@ DEFAULTS = {
         "comfy_auto_start": True,
         "comfy_python": "",
         "comfy_keep_on_exit": True,
-        # 流式引擎：模型常驻，首块 ~0.4s 就开口；起来后不再碰 ComfyUI
+        # 流式引擎：模型常驻，预留短缓冲以吸收生成抖动；起来后不再碰 ComfyUI
         "stream_enabled": True,
+        "stream_buffer_seconds": 0.8,
         "ttsd_base": "http://127.0.0.1:8899",
         "ttsd_python": r"C:\gamedata\ttsd\.venv\Scripts\python.exe",
         "ttsd_script": r"C:\gamedata\ttsd\ttsd.py",
@@ -160,7 +161,7 @@ DEFAULTS = {
     },
     # duck_game：说话时把游戏那个进程的音量压低；duck_level 是压到百分之多少
     "audio": {"device": "", "volume": 130, "duck_game": True, "duck_level": 25},
-    "overlay": {"seconds": 8},
+    "overlay": {"enabled": True, "seconds": 8},
     "rice_counter": {"enabled": False, "large_gift_yuan": 10,
                      "overlay_size": 0.16, "overlay_x": None, "overlay_y": None},
     "broadcast": {

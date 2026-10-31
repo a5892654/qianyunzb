@@ -262,6 +262,11 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
     <p class="hint">预览画面就是观众看到的画面，包含已启用的 Live2D 皮套。位置和大小可在「画面调整」中实时修改，自动保存。</p>
   </div>
   <div class="card">
+    <h3>画面字幕</h3>
+    <label class="c"><input type="checkbox" data-k="overlay.enabled">显示底部字幕</label>
+    <p class="hint">控制千音源画面与 OBS 字幕浏览器源的底部台词，关闭后立即隐藏。皮套头顶气泡可在「Live2D 皮套」中单独开关。</p>
+  </div>
+  <div class="card">
     <h3>大碗白饭 · 干饭计数</h3>
     <div class="row"><label class="c"><input type="checkbox" data-k="rice_counter.enabled">把白饭计数叠加到直播画面</label><span style="flex:1"></span><b id="riceTotal">0 碗</b></div>
     <div class="row"><label class="f" style="max-width:240px">大额礼物门槛（单次总额 / 元）<input type="number" min="0.01" step="0.01" data-k="rice_counter.large_gift_yuan"></label><span class="hint" id="riceGiftProgress">普通礼物进度 0/10</span></div>
@@ -349,6 +354,7 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
     <div class="row"><label class="f">底部滚动公告（没有播放音乐时显示）<textarea data-k="stream_theme.ticker" maxlength="300" placeholder="写一段想告诉观众的话，留空隐藏文字"></textarea></label></div>
     <div class="row"><label class="f">角色取景（1 = 全身，2 = 半身）<input type="range" data-k="stream_theme.avatar_zoom" min="1" max="3" step="0.05"></label><b data-show="stream_theme.avatar_zoom"></b></div>
     <label class="c"><input type="checkbox" data-k="stream_theme.show_chat">显示真实弹幕与礼物消息</label>
+    <label class="c"><input type="checkbox" data-k="overlay.enabled">显示底部字幕</label>
     <p class="hint">设置自动保存，预览、千音源画面和直播同步生效。底部电台条会自动显示正在播放的点歌、点播观众、切换提示和随音乐跳动的声形条。海洋主题的皮套位置独立保存，切回原始画面即可恢复原布局。</p>
   </div>
   <div class="hint" id="themeSaveState" role="status" aria-live="polite"></div>
@@ -529,10 +535,14 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
       <label class="c"><input type="checkbox" data-k="tts.fallback_sapi">没配 GPT-SoVITS 时用系统语音兜底</label>
     </div>
     <div class="row">
-      <label class="c"><input type="checkbox" data-k="tts.stream_enabled">Qwen3-TTS 流式（边说边合成，开口约 0.4 秒）</label>
+      <label class="c"><input type="checkbox" data-k="tts.stream_enabled">Qwen3-TTS 流式（边说边合成）</label>
       <label class="c"><input type="checkbox" data-k="tts.ttsd_auto_start">软件启动时自动拉起流式引擎</label>
       <label class="f">流式块大小（codec 帧，8 ≈ 0.67 秒）<input type="number" data-k="tts.ttsd_chunk_size"></label>
       <span class="hint" style="margin-top:22px">流式引擎独立常驻显存，起来后不再碰 ComfyUI；勾掉才回到整句合成老路</span>
+    </div>
+    <div class="row">
+      <label class="f" style="max-width:240px">流式预缓冲（秒）<input type="number" data-k="tts.stream_buffer_seconds" min="0" max="3" step="0.1"></label>
+      <span class="hint" style="align-self:flex-end">默认 0.8 秒。提高可减少说到一半断续，开始说话会稍晚；0 = 首块即播。下句生效，无需重启引擎。生成持续慢于播放时，缓冲只能暂时缓解。</span>
     </div>
     <div class="row">
       <label class="f">系统语音语速（-10~10，默认 1）<input type="number" data-k="tts.sapi_rate"></label>
@@ -807,10 +817,11 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
 <section id="obs">
   <h2>OBS 字幕</h2>
   <div class="card">
+    <label class="c"><input type="checkbox" data-k="overlay.enabled">显示底部字幕</label>
     <p>在 OBS 里添加 <b>浏览器源</b>，网址填：</p>
     <div class="row"><input id="ovUrl" readonly><span class="btn" id="ovCopy">复制</span></div>
     <p class="hint">宽 1280、高 200 左右即可，背景透明。正在说话时显示字幕，说完一段时间后自动隐藏。</p>
-    <div class="row"><label class="f" style="max-width:240px">说完后保留秒数<input type="number" data-k="overlay.seconds"></label></div>
+    <div class="row"><label class="f" style="max-width:240px">说完后保留秒数<input type="number" min="0" max="600" step="0.5" data-k="overlay.seconds"></label></div>
   </div>
 </section>
 </main>

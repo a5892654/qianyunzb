@@ -454,20 +454,3 @@ def preview_jpeg(settings):
     if not ok:
         raise ValueError("主题预览生成失败")
     return encoded.tobytes()
-
-
-class ThemeAvatar:
-    """A theme-local upper-body crop; the underlying Live2D settings stay intact."""
-    def __init__(self, overlay, theme):
-        self.overlay, self.theme = overlay, theme
-
-    def frame(self):
-        layer = self.overlay.frame()
-        if layer is None or not self.theme.active:
-            return layer
-        zoom = float(self.theme.settings().get("avatar_zoom", DEFAULTS["avatar_zoom"]))
-        zoom = max(1.0, min(3.0, zoom))
-        h, w = layer.shape[:2]
-        ch, cw = max(1, round(h / zoom)), max(1, round(w / zoom))
-        x, y = (w - cw) // 2, min(h - ch, round(h * 0.065))
-        return layer[y:y + ch, x:x + cw]

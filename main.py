@@ -590,6 +590,17 @@ def build_web(app: App):
     async def set_config(request):
         patch = await request.json()
         patch.pop("bili_cookie", None)
+        if isinstance(patch.get("tts"), dict) and "stream_buffer_seconds" in patch["tts"]:
+            seconds = patch["tts"]["stream_buffer_seconds"]
+            if type(seconds) not in (int, float) or not 0 <= seconds <= 3:
+                return web.json_response({"ok": False, "error": "流式预缓冲需为 0 至 3 秒"}, status=400)
+        if "overlay" in patch:
+            overlay = patch["overlay"]
+            if (not isinstance(overlay, dict) or set(overlay) - {"enabled", "seconds"}
+                    or ("enabled" in overlay and type(overlay["enabled"]) is not bool)
+                    or ("seconds" in overlay and (type(overlay["seconds"]) not in (int, float)
+                        or not 0 <= overlay["seconds"] <= 600))):
+                return web.json_response({"ok": False, "error": "字幕设置无效，保留时间需为 0 至 600 秒"}, status=400)
         if "stream_theme" in patch:
             try:
                 validate_theme_settings(patch["stream_theme"])
@@ -620,6 +631,8 @@ def build_web(app: App):
         old_room = app.cfg.get("room_id")
         app.cfg = config.merge(app.cfg, patch)
         config.save(app.cfg)
+        if "overlay" in patch:
+            app.push("overlay_config", app.cfg["overlay"])
         if isinstance(patch.get("broadcast"), dict) and "auto_stop_minutes" in patch["broadcast"]:
             app.schedule.refresh_auto_timer()
         if "live2d" in patch:
