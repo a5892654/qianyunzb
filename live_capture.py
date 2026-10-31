@@ -30,6 +30,10 @@ except Exception:  # pragma: no cover - 依赖缺失时接口仍可读
 
 from procutil import bind_to_app as _bind_to_app
 
+import logging
+
+log = logging.getLogger("live_capture")
+
 FFMPEG_PATH = r"C:/rg/ffmpeg.exe"
 # 直播姬画布默认 1920x1080；我们只出 720p 的话它还得再放大一次，等于糊上加糊。
 OUT_W, OUT_H, FPS = 1920, 1080, 30
@@ -65,6 +69,19 @@ _user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, cty
 _user32.SetWindowPos.restype = wintypes.BOOL
 _user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
 _user32.PostMessageW.restype = wintypes.BOOL
+_user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+_user32.ShowWindow.restype = wintypes.BOOL
+_user32.IsIconic.argtypes = [wintypes.HWND]
+_user32.IsIconic.restype = wintypes.BOOL
+_SW_SHOWNOACTIVATE = 4
+
+
+def _is_minimized(hwnd: int) -> bool:
+    return bool(_user32.IsIconic(wintypes.HWND(hwnd)))
+
+
+def _show_noactivate(hwnd: int) -> bool:
+    return bool(_user32.ShowWindow(wintypes.HWND(hwnd), _SW_SHOWNOACTIVATE))
 _WM_CLOSE = 0x0010
 _GWL_STYLE = -16
 _WS_CAPTION, _WS_THICKFRAME, _WS_BORDER, _WS_DLGFRAME = 0x00C00000, 0x00040000, 0x00800000, 0x00400000
@@ -315,6 +332,7 @@ class WindowStreamCapture:
         self.audio_level = 0.0
         self.started_at: float | None = None
         self.latest = 0.0  # 最新帧时间戳(time.monotonic)
+        self._revived_at = 0.0  # 上次自动还原游戏窗口的时间（防抖）
         self.encoded_frames = 0  # ffmpeg 已编码视频帧数（进度解析）
         self._lock = threading.RLock()
         self._frame_cv = threading.Condition(self._lock)
@@ -344,6 +362,7 @@ class WindowStreamCapture:
         self._stream = None
         self._audio_stop = threading.Event()
         self._audio_thread: threading.Thread | None = None
+        self._watch_thread: threading.Thread | None = None
         self._audio_rate = 48000
         self._audio_ch = 1
         self._output_active = False
@@ -450,6 +469,8 @@ class WindowStreamCapture:
         self._audio_thread.start()
         self._jpeg_thread = threading.Thread(target=self._jpeg_worker, name="lc-render", daemon=True)
         self._jpeg_thread.start()
+        self._watch_thread = threading.Thread(target=self._watch_frame_age, name="lc-watch", daemon=True)
+        self._watch_thread.start()
         # 等待首帧，过滤纯黑或空白加载画面。
         deadline = time.monotonic() + _FRAME_WAIT_S
         while time.monotonic() < deadline:
@@ -971,6 +992,50 @@ class WindowStreamCapture:
             self._srv = None
             self._conn = None
 
+    _STALE_WARN_S = 3.0
+    _REVIVE_COOLDOWN_S = 5.0
+
+    def revive_if_stale(self, now: float | None = None) -> dict:
+        """直播画面停住的两个原因：游戏窗口被最小化（Godot 停止渲染、WGC 没有新帧），
+        或采集本身卡了。最小化只做 SW_SHOWNOACTIVATE 还原（不抢焦点），
+        绝不主动重启采集——同窗口 stop+start 会把服务崩掉。
+        """
+        now = time.monotonic() if now is None else now
+        hwnd = self.hwnd
+        if not self.previewing or not hwnd or not self.latest:
+            return {}
+        age = now - self.latest
+        if age < self._STALE_WARN_S:
+            return {}
+        if _is_minimized(hwnd):
+            if now - self._revived_at >= self._REVIVE_COOLDOWN_S:
+                self._revived_at = now
+                _show_noactivate(hwnd)
+                log.warning("游戏窗口被最小化，已自动还原（最小化时采集拿不到新帧，直播画面会冻结）")
+            return {"revived": True, "age": age}
+        return {"stale": True, "age": age}
+
+    def _watch_frame_age(self) -> None:
+        """帧龄看门狗：每 2 秒看一次，能还原就还原，还原不了就明确告警。"""
+        warned_at = 0.0
+        while not self._audio_stop.wait(2.0):
+            if not self.previewing:
+                return
+            try:
+                info = self.revive_if_stale()
+            except Exception as exc:
+                log.warning("帧龄看门狗异常：%s", _safe(str(exc)))
+                return
+            if info.get("revived"):
+                warned_at = 0.0
+                continue
+            if info.get("stale"):
+                now = time.monotonic()
+                if now - warned_at >= 30.0:
+                    warned_at = now
+                    log.warning("采集已 %.0f 秒没有新帧，直播画面可能停住（游戏窗口被遮挡或挂起？）",
+                                info.get("age", 0.0))
+
     def stop_preview(self) -> None:
         self.stop_source_frames()
         self.stop_output()
@@ -988,6 +1053,9 @@ class WindowStreamCapture:
         with self._lock:
             reader, self._audio_thread = self._audio_thread, None
             encoder, self._jpeg_thread = self._jpeg_thread, None
+            watcher, self._watch_thread = self._watch_thread, None
+        if watcher and watcher.is_alive() and watcher is not threading.current_thread():
+            watcher.join(timeout=2.0)
         if reader and reader.is_alive() and reader is not threading.current_thread():
             reader.join(timeout=2.0)
         if encoder and encoder.is_alive() and encoder is not threading.current_thread():
