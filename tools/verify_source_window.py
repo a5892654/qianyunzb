@@ -19,6 +19,7 @@ def make_app(previewing=False, running=False):
     capture = SimpleNamespace(previewing=previewing, output_running=running, snapshot=lambda: {"previewing": previewing},
                               stop_preview=Mock(), start_preview=Mock(), pixel_scale=lambda: 1.0,
                               stop_output=Mock(), frame_jpeg=lambda: None,
+                              start_source_frames=Mock(return_value='Local\\test-source'), stop_source_frames=Mock(),
                               compositor=None)
     app = SimpleNamespace(cfg={"web_port": 8787, "live2d": {"enabled": False}, "broadcast": {}},
                           push=Mock(), bili=SimpleNamespace(login_uid=None, login_name=""),
@@ -81,6 +82,8 @@ class SourceWindowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("http://127.0.0.1:8787/source", args[2])
         self.assertEqual(args[3], SOURCE_TITLE)          # 直播姬按这个标题找窗口
         self.assertEqual(args[4:6], [str(SOURCE_W), str(SOURCE_H)])
+        self.assertEqual(args[8:], ['--shared-memory', 'Local\\test-source'])
+        b.capture.start_source_frames.assert_called_once()
         self.assertTrue(b.source_open)
         self.assertTrue(b.status()["source"])
         self.assertEqual(b.status()["source_title"], SOURCE_TITLE)
@@ -131,6 +134,16 @@ class SourceWindowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fit.call_args.args[1:], target)  # 目标是折算后的逻辑尺寸
         self.assertEqual(fit.call_count, 1)               # 闭环校正在 fit_borderless_client 里迭代
         self.assertIn("客户区", str(app.push.call_args_list))
+
+    async def test_native_window_uses_its_exact_dpi_instead_of_game_borders(self):
+        b, _ = make_app()
+        wins = {"windows": [{"hwnd": 555, "title": SOURCE_TITLE}], "audio": []}
+        with patch.object(live_broadcast, "sources", return_value=wins), \
+             patch.object(live_broadcast, "window_pixel_scale", return_value=1.5), \
+             patch.object(live_broadcast, "fit_borderless_client", return_value=(1280, 720)) as fit:
+            result = await b.fit_source_window(1.506)
+        fit.assert_called_once_with(555, 1280, 720)
+        self.assertEqual(result, (SOURCE_W, SOURCE_H))
 
     async def test_ignores_same_titled_window_left_by_last_run(self):
         """服务崩过一轮后，桌面上可能还留着上一轮的同名窗口。窗口归属按「新出现的
@@ -188,7 +201,7 @@ class SourceWindowTests(unittest.IsolatedAsyncioTestCase):
              patch.object(live_broadcast, "_SOURCE_FIT_S", 0.2):
             result = await b.start_source({"hwnd": 1111, "audio_device": 2222})
         self.assertFalse(result["ok"])
-        self.assertIn("WebView2", result["error"])
+        self.assertIn("原生窗口启动失败", result["error"])
         self.assertFalse(b.source_open)
         b.stop_preview.assert_awaited_once()          # 自己起的预览要收回去
 

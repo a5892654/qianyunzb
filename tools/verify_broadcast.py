@@ -204,6 +204,9 @@ class FakeCapture:
         controller.stop_preview_calls += 1
         self.previewing = False
 
+    def stop_source_frames(self):
+        pass
+
     def start_output(self, target):
         controller.output_starts.append(str(target))
         if controller.output_fail_msg:

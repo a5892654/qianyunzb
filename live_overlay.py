@@ -268,17 +268,28 @@ class OverlayCompositor:
         self.overlay = overlay
         self.settings = settings
         self._box = (0, 0, 0, 0)
+        self._last_layer = None
+        self._target_h = 0
+        self._scaled = None
 
     def _resize(self, layer: np.ndarray, target_h: int) -> np.ndarray:
+        if layer is self._last_layer and target_h == self._target_h:
+            return self._scaled
         scale = target_h / layer.shape[0]
         target_w = max(1, int(round(layer.shape[1] * scale)))
         interp = cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR
-        scaled = cv2.resize(layer, (target_w, target_h), interpolation=interp)
+        scaled = (layer if layer.shape[:2] == (target_h, target_w) else
+                  cv2.resize(layer, (target_w, target_h), interpolation=interp))
         alpha = scaled[..., 3]
-        rows = np.flatnonzero(alpha.max(axis=1) > 0)
-        cols = np.flatnonzero(alpha.max(axis=0) > 0)
-        self._box = ((int(cols[0]), int(rows[0]), int(cols[-1]) + 1, int(rows[-1]) + 1)
-                     if rows.size and cols.size else (0, 0, target_w, target_h))
+        x, y, w, h = cv2.boundingRect(alpha)
+        self._box = (x, y, x + w, y + h)
+        visible = scaled[y:y + h, x:x + w]
+        a = visible[..., 3].astype(np.float32) * (1.0 / 255.0)
+        self._visible = visible
+        self._alpha = a
+        self._inverse_alpha = 1.0 - a
+        self._saved_alpha = np.empty_like(visible[..., 3])
+        self._last_layer, self._target_h, self._scaled = layer, target_h, scaled
         return scaled
 
     def apply(self, frame: np.ndarray) -> None:
@@ -305,17 +316,15 @@ class OverlayCompositor:
         cx1, cy1 = min(width, x0 + bx1), min(height, y0 + by1)
         if cx1 <= cx0 or cy1 <= cy0:
             return
-        src = layer[cy0 - y0:cy1 - y0, cx0 - x0:cx1 - x0]
+        sy, sx = cy0 - y0 - by0, cx0 - x0 - bx0
+        sh, sw = cy1 - cy0, cx1 - cx0
+        region = np.s_[sy:sy + sh, sx:sx + sw]
         dst = frame[cy0:cy1, cx0:cx1]
-        alpha = src[..., 3]
-        # 只算有人像的像素，避免整块缩放后的透明区域也参与浮点运算
-        ys, xs = np.nonzero(alpha)
-        if not ys.size:
-            return
-        y_from, y_to = ys.min(), ys.max() + 1
-        x_from, x_to = xs.min(), xs.max() + 1
-        a = alpha[y_from:y_to, x_from:x_to].astype(np.float32) * (1.0 / 255.0)
-        a = a[..., None]
-        patch_dst = dst[y_from:y_to, x_from:x_to, :3]
-        patch_src = src[y_from:y_to, x_from:x_to, :3].astype(np.float32)
-        patch_dst[::] = (patch_src * a + patch_dst.astype(np.float32) * (1.0 - a)).astype(np.uint8)
+        saved_alpha = self._saved_alpha[region]
+        # OpenCV blends the interleaved BGRA pixels in place using SIMD. The
+        # strided BGR NumPy expression needs large float buffers and runs much
+        # slower. Keep output alpha unchanged, just like the original blend.
+        np.copyto(saved_alpha, dst[..., 3])
+        cv2.blendLinear(dst, self._visible[region], self._inverse_alpha[region],
+                        self._alpha[region], dst=dst)
+        np.copyto(dst[..., 3], saved_alpha)

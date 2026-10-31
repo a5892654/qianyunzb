@@ -91,6 +91,10 @@ class App:
     # ---------- 推送到界面 ----------
     def push(self, kind, data):
         msg = {"kind": kind, "t": time.strftime("%H:%M:%S"), **data}
+        if kind in ("speak", "speak_end", "overlay_config", "bye"):
+            subtitles = getattr(getattr(self, "broadcast", None), "source_subtitles", None)
+            if subtitles is not None:
+                subtitles.event(kind, data)
         if kind == "event" and getattr(self, "broadcast", None):
             self.broadcast.theme.add_event(data)
         if kind in ("event", "reply", "log"):
