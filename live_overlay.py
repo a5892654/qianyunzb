@@ -7,17 +7,20 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import collections
 import json
 import os
 import subprocess
+import struct
 import tempfile
 import threading
 import time
+import uuid
 
 import cv2
 import numpy as np
 
-from procutil import bind_to_app
+from procutil import bind_to_app, kill_tree
 
 _EDGE_CANDIDATES = ("ProgramFiles(x86)", "ProgramFiles", "LOCALAPPDATA")
 _MAX_EDGE_MS = 40000
@@ -51,6 +54,18 @@ def _decode_png(raw: bytes) -> np.ndarray | None:
     return image
 
 
+def _decode_raw(raw: bytes) -> np.ndarray:
+    if len(raw) < 16:
+        raise OverlayError("Live2D 原始帧数据不完整")
+    magic, width, height, premultiplied = struct.unpack_from("<4I", raw)
+    if (magic != 0x31525951 or not 1 <= width <= 2160 or not 1 <= height <= 2160
+            or premultiplied not in (0, 1) or len(raw) != 16 + width * height * 4):
+        raise OverlayError("Live2D 原始帧尺寸无效")
+    rgba = np.frombuffer(raw, np.uint8, offset=16).reshape(height, width, 4)[::-1]
+    image = cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGRA)
+    return cv2.cvtColor(image, cv2.COLOR_mRGBA2RGBA) if premultiplied else image
+
+
 class Live2DOverlay:
     """后台线程把 Live2D 渲染成 RGBA 帧；调用方只取最新一帧。"""
 
@@ -67,6 +82,17 @@ class Live2DOverlay:
         self._viewport = 720
         self.width = 0
         self.height = 0
+        self._transport = "png"
+        self._frame_times = collections.deque(maxlen=180)
+        self._read_times = collections.deque(maxlen=90)
+
+    def snapshot(self):
+        now = time.monotonic()
+        with self._lock:
+            recent = [at for at in self._frame_times if now - at < 3]
+            return {"avatar_transport": self._transport,
+                    "avatar_fps": round((len(recent) - 1) / max(now - recent[0], 0.001), 1) if len(recent) > 1 else 0.0,
+                    "avatar_read_ms": round(sum(self._read_times) / len(self._read_times), 1) if self._read_times else 0.0}
 
     @property
     def error(self) -> str:
@@ -91,6 +117,8 @@ class Live2DOverlay:
         self._ready.clear()
         with self._lock:
             self._frame, self._error, self._frame_at = None, "", 0.0
+            self._frame_times.clear()
+            self._read_times.clear()
         self._thread = threading.Thread(target=self._run, args=(edge,), name="l2d-overlay", daemon=True)
         self._thread.start()
         if not self._ready.wait(timeout):
@@ -115,7 +143,7 @@ class Live2DOverlay:
         proc = self._proc
         if proc and proc.poll() is None:
             try:
-                proc.terminate()
+                kill_tree(proc.pid)
                 proc.wait(timeout=5)
             except (subprocess.TimeoutExpired, OSError):
                 try:
@@ -147,12 +175,23 @@ class Live2DOverlay:
         self._ready.set()
 
     async def _serve(self, edge: str) -> None:
+        from aiohttp import web
+        bridge = web.Application()
+        path = "/frames/" + uuid.uuid4().hex
+        bridge.router.add_get(path, self._receive_frames)
+        runner = web.AppRunner(bridge)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        self._bridge_url = f"ws://127.0.0.1:{site._server.sockets[0].getsockname()[1]}{path}"
         port = 9340 + (os.getpid() % 400)
         profile = os.path.join(tempfile.gettempdir(), f"qianyin-l2d-{os.getpid()}")
         proc = subprocess.Popen(
             [edge, "--headless=new", f"--remote-debugging-port={port}",
              f"--user-data-dir={profile}", "--no-first-run", "--no-default-browser-check",
              "--use-angle=default", "--enable-gpu", "--disable-gpu-vsync",
+             "--disable-background-timer-throttling", "--disable-backgrounding-occluded-windows",
+             "--disable-renderer-backgrounding",
              "--disable-features=CalculateNativeWinOcclusion,Translate",
              "--mute-audio",
              "about:blank"],
@@ -169,11 +208,66 @@ class Live2DOverlay:
                 raise OverlayError("Live2D 渲染窗口没有响应")
             await self._capture_frames(ws_url)
         finally:
+            await runner.cleanup()
             if proc.poll() is None:
                 try:
                     proc.terminate()
                 except OSError:
                     pass
+
+    def _accept_frame(self, image, started):
+        if not np.any(image[..., 3] > 8):
+            return False
+        with self._lock:
+            self._frame, self._frame_at = image, time.monotonic()
+            self._frame_times.append(self._frame_at)
+            self._read_times.append((self._frame_at - started) * 1000)
+            self.height, self.width = image.shape[:2]
+        self._ready.set()
+        return True
+
+    async def _receive_frames(self, request):
+        from aiohttp import web, WSMsgType
+        ws = web.WebSocketResponse(max_msg_size=32 * 1024 * 1024, heartbeat=10)
+        await ws.prepare(request)
+        deadline = time.monotonic() + _MAX_EDGE_MS / 1000
+        blank_since = None
+        next_frame = time.monotonic()
+        try:
+            while not self._stop.is_set():
+                started = time.monotonic()
+                await ws.send_json(self._render_settings() if self._render_settings else {})
+                msg = await ws.receive(timeout=5)
+                if msg.type == WSMsgType.BINARY:
+                    self._transport = "raw"
+                    image = _decode_raw(msg.data)
+                    if self._accept_frame(image, started):
+                        blank_since = None
+                    else:
+                        blank_since = blank_since or started
+                        if started - blank_since > _BLANK_GRACE_S:
+                            raise OverlayError("Live2D 画面为空白，请在皮套页调整取景或检查模型")
+                elif msg.type == WSMsgType.TEXT:
+                    state = json.loads(msg.data)
+                    if state.get("error"):
+                        raise OverlayError(str(state["error"]))
+                    if time.monotonic() > deadline:
+                        raise OverlayError("Live2D 模型加载超时，请检查模型文件和渲染库")
+                else:
+                    if not self._stop.is_set():
+                        raise OverlayError("Live2D 原始帧通道已断开")
+                    break
+                next_frame += _FRAME_INTERVAL_S
+                now = time.monotonic()
+                if next_frame < now - _FRAME_INTERVAL_S:
+                    next_frame = now
+                await asyncio.sleep(max(0.001, next_frame - now))
+        except Exception as error:
+            if not self._stop.is_set():
+                self._fail(str(error) or "Live2D 原始帧读取超时，请检查显卡负载")
+        finally:
+            await ws.close()
+        return ws
 
     async def _wait_target(self, port: int, proc: subprocess.Popen) -> str | None:
         import aiohttp
@@ -227,8 +321,16 @@ class Live2DOverlay:
                 await command(ws, "Page.navigate", {"url": self._url})
                 deadline = time.monotonic() + _MAX_EDGE_MS / 1000
                 blank_since = None
+                next_frame = time.monotonic()
                 while not self._stop.is_set():
                     started = time.monotonic()
+                    connected = await command(ws, "Runtime.evaluate", {
+                        "expression": "window.connectLive2DFrameStream ? window.connectLive2DFrameStream("
+                                      + json.dumps(self._bridge_url) + ") : false", "returnByValue": True})
+                    if connected.get("result", {}).get("value") is True:
+                        while not self._stop.is_set() and not self.error:
+                            await asyncio.sleep(0.1)
+                        return
                     view = self._render_settings() if self._render_settings else {}
                     result = await command(ws, "Runtime.evaluate", {
                         "expression": "window.captureLive2DFrame ? window.captureLive2DFrame("
@@ -254,11 +356,17 @@ class Live2DOverlay:
                             # 保留整张画布，避免首次包围盒裁掉后续动作和位置变化。
                             with self._lock:
                                 self._frame, self._frame_at = image, time.monotonic()
+                                self._frame_times.append(self._frame_at)
+                                self._read_times.append((self._frame_at - started) * 1000)
                                 self.height, self.width = image.shape[:2]
                             self._ready.set()
                     elif time.monotonic() > deadline:
                         raise OverlayError("Live2D 模型加载超时，请检查模型文件和渲染库")
-                    await asyncio.sleep(max(0.001, _FRAME_INTERVAL_S - (time.monotonic() - started)))
+                    next_frame += _FRAME_INTERVAL_S
+                    now = time.monotonic()
+                    if next_frame < now - _FRAME_INTERVAL_S:
+                        next_frame = now
+                    await asyncio.sleep(max(0.001, next_frame - now))
 
 
 class OverlayCompositor:

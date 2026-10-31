@@ -1,5 +1,7 @@
 # Python
 .venv/
+.tts-venv/
+models/tts/
 __pycache__/
 *.py[cod]
 

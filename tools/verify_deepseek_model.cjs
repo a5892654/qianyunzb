@@ -89,7 +89,9 @@ asyncio.run(main())
     const capture = await page.evaluate(async () => {
       app.ticker.stop();
       const wasAutoUpdate = model.autoUpdate;
+      const savedUpdate = model.update;
       model.autoUpdate = false;
+      model.update = () => {};
       const configBefore = JSON.stringify(CFG);
       const decode = async png => {
         const image = new Image(); image.src = 'data:image/png;base64,' + png;
@@ -126,7 +128,14 @@ asyncio.run(main())
           restored: reset.width === 720 && reset.height === 720 && app.stage.scale.x === 1
             && app.stage.scale.y === 1 && app.stage.x === 0 && app.stage.y === 0,
           configUnchanged: JSON.stringify(CFG) === configBefore};
-      } finally { model.autoUpdate = wasAutoUpdate; app.ticker.start(); }
+      } finally {
+        model.update = savedUpdate;
+        model.autoUpdate = wasAutoUpdate;
+        if (OVERLAY_MODE) {
+          app.stop();
+          window.__testCompositorClock = setInterval(() => window.captureLive2DFrame({size: 720, zoom: 1}), 33);
+        } else app.ticker.start();
+      }
     });
     assert.ok(capture.opaque > 50000, '真实模型半身不能为空白');
     assert.ok(capture.alphaError < 5 && capture.colorError < 12, '原生半身应与双分辨率全身的同一取景一致');
@@ -200,6 +209,20 @@ asyncio.run(main())
     assert.deepEqual(failures, []);
     assert.deepEqual(maskErrors, []);
     console.log('PASS backend switch and websocket update; no page errors or missing resources');
+    await page.goto(base + '/live2d?overlay=1');
+    await page.waitForFunction(() => model && model.internalModel);
+    const manualClock = await page.evaluate(async () => {
+      PIXI.Ticker.shared.stop();
+      const before = model.elapsedTime;
+      window.captureLive2DFrame({size: 720, zoom: 1});
+      await new Promise(resolve => setTimeout(resolve, 120));
+      window.captureLive2DFrame({size: 720, zoom: 1});
+      return {elapsed: model.elapsedTime - before, autoUpdate: model.automator.autoUpdate, ticker: app.ticker.started};
+    });
+    assert.equal(manualClock.autoUpdate, false);
+    assert.equal(manualClock.ticker, false);
+    assert.ok(manualClock.elapsed >= 50, JSON.stringify(manualClock));
+    console.log('PASS overlay animation advances with the compositor clock even when browser RAF stops', manualClock);
     console.log('Screenshot:', screenshot);
   } finally {
     if (browser) await browser.close();

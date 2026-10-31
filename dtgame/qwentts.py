@@ -16,7 +16,7 @@ import aiohttp
 
 log = logging.getLogger("qwentts")
 
-DEFAULT_MODEL = "Qwen/Qwen3-TTS-12Hz-1.7B-Base"
+DEFAULT_MODEL = "Qwen/Qwen3-TTS-12Hz-0.6B-Base"
 
 
 def build_prompt(text: str, cfg: dict, node_id: str) -> dict:

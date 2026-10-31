@@ -129,7 +129,8 @@ DEFAULTS = {
         "sapi_pitch": 18,
         "qwen_enabled": True,
         "qwen_base": "http://127.0.0.1:8188",
-        "qwen_model": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
+        "qwen_model_size": "0.6B",
+        "qwen_model": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
         "qwen_ref_audio": "dafeiyu_voice_ref.wav",
         "qwen_language": "Chinese",
         "qwen_precision": "bf16",
@@ -142,9 +143,9 @@ DEFAULTS = {
         "stream_enabled": True,
         "stream_buffer_seconds": 0.8,
         "ttsd_base": "http://127.0.0.1:8899",
-        "ttsd_python": r"C:\gamedata\ttsd\.venv\Scripts\python.exe",
-        "ttsd_script": r"C:\gamedata\ttsd\ttsd.py",
-        "ttsd_model": r"C:\max\ComfyUI\models\Qwen3-TTS-Models\Qwen3-TTS-12Hz-1.7B-Base",
+        "ttsd_python": os.path.join(BASE_DIR, ".tts-venv", "Scripts", "python.exe"),
+        "ttsd_script": os.path.join(BASE_DIR, "tools", "tts_server.py"),
+        "ttsd_model": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
         "ttsd_chunk_size": 8,
         "ttsd_auto_start": True,
         "gpt_weights": "GPT_SoVITS/pretrained_models/s1v3.ckpt",
@@ -318,6 +319,13 @@ def load():
         except (OSError, ValueError):
             os.replace(CONFIG_PATH, CONFIG_PATH + ".broken")
     cfg = _merge(DEFAULTS, data)
+    if "qwen_model_size" not in data.get("tts", {}):
+        # Infer old installations from their actual model, rather than marking
+        # a running 1.7B engine as 0.6B after adding the new default field.
+        for size in ("1.7B", "0.6B"):
+            if any(f"-{size}-" in str(data.get("tts", {}).get(k, "")) for k in ("ttsd_model", "qwen_model")):
+                cfg["tts"]["qwen_model_size"] = size
+                break
     save(cfg)
     return cfg
 
