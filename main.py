@@ -23,7 +23,9 @@ from dtgame.player import Player as DTPlayer
 from dtgame.rice import RiceTracker
 from live_rice import RiceCounter, ai_context as rice_ai_context, validate_settings as validate_rice_settings
 from live_broadcast import Broadcast
+from live_theme import preview_jpeg as theme_preview_jpeg, validate_settings as validate_theme_settings
 from live_schedule import DailyBroadcastSchedule
+from live_context import rice_question
 from pipeline import Pipeline
 from songs import SongManager
 from netease import CAPTCHA_ID, DEVICE_APP_ID
@@ -89,6 +91,8 @@ class App:
     # ---------- 推送到界面 ----------
     def push(self, kind, data):
         msg = {"kind": kind, "t": time.strftime("%H:%M:%S"), **data}
+        if kind == "event" and getattr(self, "broadcast", None):
+            self.broadcast.theme.add_event(data)
         if kind in ("event", "reply", "log"):
             self.history.append(msg)
         if kind == "log":
@@ -243,7 +247,9 @@ class App:
                            "x": settings.get("overlay_x"), "y": settings.get("overlay_y")},
                 "error": getattr(self.broadcast.capture, "rice_error", "")}
 
-    def live_context(self):
+    def live_context(self, question=""):
+        if not rice_question(question):
+            return ""
         return rice_ai_context(self.cfg.get("rice_counter", {}), self.rice_state())
 
     def rice_awarded(self):
@@ -478,6 +484,11 @@ def build_web(app: App):
     async def rice_page(_):
         return page("rice.html")
 
+    @routes.get("/api/theme/preview.jpg")
+    async def theme_preview(_):
+        data = await asyncio.to_thread(theme_preview_jpeg, dict(app.cfg.get("stream_theme", {})))
+        return web.Response(body=data, content_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
     @routes.get("/api/rice/state")
     async def rice_state(_):
         return web.json_response(app.rice_state())
@@ -579,6 +590,11 @@ def build_web(app: App):
     async def set_config(request):
         patch = await request.json()
         patch.pop("bili_cookie", None)
+        if "stream_theme" in patch:
+            try:
+                validate_theme_settings(patch["stream_theme"])
+            except ValueError as error:
+                return web.json_response({"ok": False, "error": str(error)}, status=400)
         if isinstance(patch.get("broadcast"), dict) and "schedule" in patch["broadcast"]:
             return web.json_response({"ok": False, "error": "请通过定时直播计划的保存按钮确认修改"}, status=400)
         if isinstance(patch.get("broadcast"), dict) and "auto_stop_minutes" in patch["broadcast"]:
@@ -619,6 +635,8 @@ def build_web(app: App):
             app.wishlist.push()
         if str(app.cfg.get("room_id")) != str(old_room) and app.bili.client:
             asyncio.create_task(app.connect())
+        if str(app.cfg.get("room_id")) != str(old_room):
+            app.broadcast.theme.clear()
         return ok()
 
     @routes.post("/api/bili/connect")
@@ -898,7 +916,7 @@ def build_web(app: App):
             return ok()
         if d.get("ai"):
             try:
-                text, emotion = await app.brain.ai(app.cfg, text)
+                text, emotion = await app.brain.ai(app.cfg, text, question=text)
             except Exception as e:
                 return web.json_response({"ok": False, "error": str(e)})
         else:
@@ -911,7 +929,7 @@ def build_web(app: App):
         prompt = (await request.json()).get("prompt", "")
         t0 = time.time()
         try:
-            text, emotion = await app.brain.ai(app.cfg, prompt)
+            text, emotion = await app.brain.ai(app.cfg, prompt, question=prompt)
             return ok(text=text, emotion=emotion, seconds=round(time.time() - t0, 1))
         except Exception as e:
             return web.json_response({"ok": False, "error": str(e)})

@@ -309,6 +309,7 @@ class WindowStreamCapture:
         self._capture_closed = threading.Event()
         self._frame: bytes | None = None          # OUT_W x OUT_H BGRA
         self._source_frame: np.ndarray | None = None  # 最新游戏画面，合成时复制，避免残影
+        self._native_source_frame: np.ndarray | None = None
         self._raw_size: tuple[int, int] | None = None  # 采集帧原始尺寸（物理像素）
         self._mean = 0.0
         self._capture_times = collections.deque(maxlen=180)
@@ -332,6 +333,8 @@ class WindowStreamCapture:
         self._conn: socket.socket | None = None
         self._threads: list[threading.Thread] = []
         self.compositor = None  # 直播时叠加皮套（live_overlay.OverlayCompositor）
+        self.theme_compositor = None
+        self.theme_error = ""
         self.rice_compositor = None  # 独立直播彩蛋，不依赖皮套开关
         self.compositor_error = ""
 
@@ -344,8 +347,10 @@ class WindowStreamCapture:
             if self.previewing:
                 raise CaptureError("预览已在运行")
             self.error = ""
+            self.theme_error = ""
             self._frame = self._jpeg = None
             self._source_frame = None
+            self._native_source_frame = None
             self.latest = self._jpeg_at = 0.0
             self._capture_times.clear()
             self._render_times.clear()
@@ -473,11 +478,15 @@ class WindowStreamCapture:
                                  interpolation=cv2.INTER_AREA if s < 1 else cv2.INTER_LINEAR))
             x0, y0 = (nw - OUT_W) // 2, (nh - OUT_H) // 2
             canvas = scaled[y0:y0 + OUT_H, x0:x0 + OUT_W]
+            # Retain non-16:9 edges for themes that contain the full game. The
+            # source also survives switching themes while a game is static.
+            native = canvas if (nw, nh) == (OUT_W, OUT_H) else buf.copy()
             tiny = cv2.resize(canvas, (16, 9), interpolation=cv2.INTER_AREA)
             rgb = tiny[2:-2, 3:-3, :3]
             mean = float(rgb.mean()) if float(rgb.std()) > 3.0 else 0.0
             with self._lock:
                 self._source_frame = canvas
+                self._native_source_frame = native
                 self._mean = mean
                 self.latest = time.monotonic()
                 self._capture_times.append(self.latest)
@@ -485,7 +494,20 @@ class WindowStreamCapture:
             self._fail(_safe(f"帧处理异常: {exc}"))
 
     def _compose_frame(self, source: np.ndarray) -> None:
-        canvas = source.copy()
+        canvas = None
+        theme = self.theme_compositor
+        if theme is not None and theme.active:
+            try:
+                with self._lock:
+                    native = self._native_source_frame
+                canvas = theme.compose(native if native is not None else source)
+                self.theme_error = ""
+            except Exception as exc:
+                self.theme_error = f"直播主题合成失败：{exc}"
+        else:
+            self.theme_error = ""
+        if canvas is None:
+            canvas = source.copy()
         compositor = self.compositor
         if compositor is not None:
             try:
@@ -628,6 +650,7 @@ class WindowStreamCapture:
                     "output_running": self.output_running,
                     "audio_level": self.audio_level,
                     "error": self.error, "width": OUT_W, "height": OUT_H,
+                    "theme_error": self.theme_error,
                     "capture_size": list(self._raw_size or []), "fps": FPS,
                     "capture_fps": rate(self._capture_times),
                     "render_fps": rate(self._render_times),
@@ -915,9 +938,11 @@ class WindowStreamCapture:
         with self._lock:
             self._frame = self._jpeg = None
             self._source_frame = None
+            self._native_source_frame = None
             self.latest = self.audio_level = 0.0
             self._crop = None
             self.error = ""
+            self.theme_error = ""
         self._capture_closed.set()
 
 def _rms(data: bytes) -> float:

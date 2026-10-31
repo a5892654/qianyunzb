@@ -95,7 +95,10 @@ class _Handler(blivedm.BaseHandler):
 
     def _on_danmaku(self, client, m: wm.DanmakuMessage):
         self.emit({"type": "danmaku", "uid": m.uid, "name": m.uname, "text": m.msg,
-                   "emoticon": m.dm_type == 1, "guard_level": m.privilege_type})
+                   "emoticon": m.dm_type == 1, "guard_level": m.privilege_type,
+                   "medal_name": m.medal_name, "medal_level": m.medal_level,
+                   "medal_color": m.mcolor, "medal_room_id": m.medal_room_id,
+                   "admin": m.admin, "vip": m.vip, "svip": m.svip})
 
     def _on_gift(self, client, m: wm.GiftMessage):
         paid = m.coin_type == "gold"

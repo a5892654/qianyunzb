@@ -1,7 +1,6 @@
 """从已读到的局势识别反应时机，控制解说长短和频率。"""
 import collections
 import json
-import random
 import time
 
 from dtgame.rice import RiceTracker
@@ -23,9 +22,9 @@ def scene(state):
               ((maximum and hp / maximum <= 0.25) or incoming - (number(battle.get("block")) or 0) >= hp))
     settled = battle.get("battle_over") or battle.get("victory") or battle.get("awaiting_confirm")
     if state.get("busy") or (screen == "battle" and not settled and (danger or RiceTracker._boss(state))):
-        mode, label = "tense", "局势紧张，先专心操作，回应观众时简短接话，不主动展开闲聊或求关注"
+        mode, label = "tense", "战况紧张，用简短有反应的一句话解说，保持和观众交流"
     elif screen == "battle" and not settled:
-        mode, label = "battle", "正在打牌，话少一点，优先回应观众，不逐张牌念操作"
+        mode, label = "battle", "正在打牌，自然解说当下，优先回应观众"
     elif screen in ("reward", "campfire", "shop", "map", "event", "loot", "hall", "run_end") or settled:
         mode, label = "rest", "正在选择或结算，可以顺着聊天自然多说一两句"
     else:
@@ -50,16 +49,14 @@ PRIORITY = {"death": 100, "clutch_win": 95, "win": 90, "low_health": 80,
 class GameCommentary:
     MOMENT_TTL = 20
 
-    def __init__(self, clock=time.monotonic, jitter=random.uniform):
-        self.clock, self.jitter = clock, jitter
+    def __init__(self, clock=time.monotonic):
+        self.clock = clock
         self.previous = None
         self.battle_key = None
         self.lowest_ratio = 1.0
         self.pending = None
         self.seen = collections.deque(maxlen=128)
         self.counts = collections.Counter()
-        self.last_spoken = None
-        self.next_speech = 0
         self.recent = collections.deque(maxlen=6)
 
     def _cue(self, kind, token, facts):
@@ -131,8 +128,8 @@ class GameCommentary:
     def prompt(self, state):
         situation = scene(state)
         prompt = ("\n【直播说话节奏】" + situation["label"]
-                  + f"。say 可留空；有值得说的才说，约{min(situation['max_chars'], 30)}字以内，"
-                  "不用每次都说明下一步操作，也不要提前宣告尚未发生的胜利、回血或奖励。")
+                  + f"。本次 say 请说一句约{min(situation['max_chars'], 30)}字的自然口语，保持边玩边聊，"
+                  "也不要提前宣告尚未发生的胜利、回血或奖励。")
         moment = self.moment()
         if moment:
             prompt += ("\n【刚发生的真实变化】" + json.dumps(moment["facts"], ensure_ascii=False)
@@ -146,10 +143,17 @@ class GameCommentary:
         kind = moment["kind"]
         return LINES[kind][self.counts[kind] % len(LINES[kind])]
 
+    def filler(self, state):
+        """模型漏写或跑题时，用一句贴合局面的短解说补上，不再多等一轮。"""
+        lines = (("这下得留点神，咱们稳住。", "先别慌，我认真看看。", "这场我得认真一点。")
+                 if scene(state)["mode"] == "tense" else
+                 ("这手接着往下打。", "我看看接下来怎么接。", "先把眼前这步走好。")
+                 if scene(state)["mode"] == "battle" else
+                 ("咱们接着来。", "我看看接下来怎么选。", "这里我稍微想一下。"))
+        return next(line for line in lines if not self.recent or line != self.recent[-1])
+
     def can_speak(self, state, text, important=False):
-        if not text or text in self.recent:
-            return False
-        return important or self.last_spoken is None or self.clock() >= self.next_speech
+        return bool(text) and (not self.recent or text != self.recent[-1])
 
     def spoken(self, state, text):
         moment = self.moment()
@@ -157,6 +161,3 @@ class GameCommentary:
             self.counts[moment["kind"]] += 1
         self.pending = None
         self.recent.append(text)
-        self.last_spoken = self.clock()
-        gap = {"tense": 20, "battle": 10, "rest": 7, "neutral": 10}[scene(state)["mode"]]
-        self.next_speech = self.last_spoken + gap + self.jitter(0, gap * 0.5)

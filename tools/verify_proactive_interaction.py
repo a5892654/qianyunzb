@@ -35,7 +35,6 @@ def make_app(*, follow=False):
     app.player.voice_clock.return_value = 0
     app.pipe = Pipeline(app, supporters=Mock(contains=Mock(return_value=False)))
     app.pipe.interaction.clock = lambda: now[0]
-    app.pipe.interaction.jitter = lambda low, high: low  # 固定时钟用最短合法间隔；随机节奏另行验证。
     return app, now
 
 
@@ -240,19 +239,16 @@ class ProactiveInteractionTests(InteractionTestCase):
         app.pipe.interaction.tick()
         self.assertFalse(app.pipe.jobs)
 
-    async def test_near_duplicate_is_rewritten_and_recent_spoken_chat_is_in_prompt(self):
+    async def test_near_duplicate_uses_local_fallback_without_a_second_model_call(self):
         app, _ = self.active()
         previous = "大家玩游戏时更喜欢稳一点，还是大胆试试新打法？"
-        revised = "小时候玩过的游戏里，哪一段背景音乐最难忘？"
         app.pipe.interaction.remember_spoken(previous)
-        app.brain.openai.ask.side_effect = [
-            "大家玩游戏时更喜欢稳一点，还是大胆试试新打法呀？", revised]
+        app.brain.openai.ask.return_value = "大家玩游戏时更喜欢稳一点，还是大胆试试新打法呀？"
         app.pipe.interaction.tick()
         text, _, _ = await app.pipe.interaction.reply(app.pipe.jobs[0]["ev"])
-        self.assertEqual(text, revised)
-        self.assertEqual(app.brain.openai.ask.await_count, 2)
+        self.assertNotEqual(text, app.brain.openai.ask.return_value)
+        self.assertEqual(app.brain.openai.ask.await_count, 1)
         self.assertIn(previous, app.brain.openai.ask.await_args.args[2])
-        self.assertIn("换一个开头和内容角度", app.brain.openai.ask.await_args.args[2])
 
     async def test_stubborn_repetition_falls_back_to_another_topic_and_rotates_style(self):
         app, now = self.active()

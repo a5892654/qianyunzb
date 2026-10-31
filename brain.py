@@ -10,6 +10,7 @@ import re
 import aiohttp
 
 import procutil
+from live_context import mentions_rice, rice_question
 from config import BASE_DIR, SUPPORTER_WELCOME_PROMPT, SUPPORTER_WELCOME_TEMPLATES
 
 log = logging.getLogger("ai")
@@ -166,7 +167,9 @@ class OpenAIChat:
 
     async def ask(self, cfg_ai, system_prompt, user_text):
         base = cfg_ai["openai_base"].rstrip("/")
-        msgs = [{"role": "system", "content": system_prompt}, *self.history, {"role": "user", "content": user_text}]
+        transient = cfg_ai.get("transient_context", False)
+        msgs = [{"role": "system", "content": system_prompt},
+                *([] if transient else self.history), {"role": "user", "content": user_text}]
         async with aiohttp.ClientSession() as s:
             async with s.post(f"{base}/chat/completions",
                               headers={"Authorization": f"Bearer {cfg_ai['openai_key']}"},
@@ -177,7 +180,8 @@ class OpenAIChat:
                 if r.status != 200:
                     raise RuntimeError(f"API 错误 {r.status}: {str(d)[:300]}")
         text = d["choices"][0]["message"]["content"] or ""
-        self.history.extend([{"role": "user", "content": user_text}, {"role": "assistant", "content": text}])
+        if not transient and not mentions_rice(text):
+            self.history.extend([{"role": "user", "content": user_text}, {"role": "assistant", "content": text}])
         return text
 
 
@@ -245,6 +249,7 @@ REPLY_STYLES = (
 class Brain:
     def __init__(self, live_context=None):
         self.qoder = QoderSession()
+        self.rice_qoder = QoderSession()
         self.openai = OpenAIChat()
         self.live_context = live_context
         self.recent_replies = collections.defaultdict(lambda: collections.deque(maxlen=8))
@@ -270,18 +275,21 @@ class Brain:
                    "台词只说自然口语，不念表情动作标签或描述操作过程。")
         return sp
 
-    async def ai(self, cfg, prompt):
+    async def ai(self, cfg, prompt, *, question=""):
         """返回 (文本, 表情名或空)。"""
         cfg_ai = cfg["ai"]
         sp = self.system_prompt(cfg)
-        if self.live_context is not None:
-            context = self.live_context()
+        context = ""
+        if question and self.live_context is not None:
+            context = self.live_context(question)
             if context:
                 prompt += "\n\n" + context
+                cfg_ai = {**cfg_ai, "transient_context": True}
         if cfg_ai.get("backend") == "openai":
             raw = await self.openai.ask(cfg_ai, sp, prompt)
         else:
-            raw = await self.qoder.ask(cfg_ai, sp, prompt)
+            session = self.rice_qoder if context else self.qoder
+            raw = await session.ask(cfg_ai, sp, prompt)
         raw = re.sub(r"<think>.*?</think>", "", raw or "", flags=re.S).strip()
         emotion = ""
         m = re.match(r"^\s*[【\[]([^】\]]{1,8})[】\]]", raw)
@@ -290,7 +298,10 @@ class Brain:
             raw = raw[m.end():]
         if emotion not in self.emotion_names(cfg):
             emotion = ""
-        return clean_reply(raw, int(cfg_ai.get("reply_max_chars", cfg_ai.get("max_chars", 40)))), emotion
+        text = clean_reply(raw, int(cfg_ai.get("reply_max_chars", cfg_ai.get("max_chars", 40))))
+        if not rice_question(question) and mentions_rice(text):
+            return "", ""
+        return text, emotion
 
     async def reply(self, cfg, ev_cfg, ev, context="", conversation=""):
         """返回 (文本, 来源, 表情)。AI 失败时自动退回模板。"""
@@ -301,7 +312,8 @@ class Brain:
         if ev["type"] == "gift" and ev_cfg.get("tiered_thanks", True):
             return await self._gift_reply(cfg, ev_cfg, ev)
         lines = [l.strip() for l in ev_cfg.get("templates", "").splitlines() if l.strip()]
-        key = (cfg.get("room_id"), ev["type"], bool(ev.get("_gift_supporter")))
+        question = ev.get("text", "") if ev["type"] in ("danmaku", "superchat") else ""
+        key = (cfg.get("room_id"), ev["type"], bool(ev.get("_gift_supporter")), rice_question(question))
         history = self.recent_replies[key]
         recent = [text.replace(name, "观众") if name else text for text, name in history]
         name = ev.get("name", "")
@@ -326,18 +338,14 @@ class Brain:
                                "聊到游戏时结合当前局势，普通闲聊就自然接话，不要只继续解说游戏。")
                 if conversation:
                     prompt += "\n" + conversation
-                async with asyncio.timeout(float(cfg["ai"].get("timeout", 30))):
-                    for _ in range(2):
-                        text, emotion = await self.ai(cfg, prompt)
-                        if text and not similar_reply(normalize_name(text), recent):
-                            history.append((text, name))
-                            if ev["type"] == "danmaku" and ev_cfg.get("read_original"):
-                                text = f"{ev['name']}说：{ev['text']}。{text}"
-                            return text, "AI", emotion
-                        if not text:
-                            break
-                        prompt += ("\n刚才生成的这句与近期回复太相似：" + json.dumps(text, ensure_ascii=False)
-                                   + "。请重新回应本次事件，改用不同的开头和表达角度，只输出新台词。")
+                # 每条事件只调用一次模型，避免为了换措辞再等一轮。
+                text, emotion = await self.ai(cfg, prompt, question=question)
+                if text and (ev["type"] in ("danmaku", "superchat")
+                             or not similar_reply(normalize_name(text), recent)):
+                    history.append((text, name))
+                    if ev["type"] == "danmaku" and ev_cfg.get("read_original"):
+                        text = f"{ev['name']}说：{ev['text']}。{text}"
+                    return text, "AI", emotion
             except Exception as e:
                 log.warning("AI 生成失败，改用模板：%s", e)
                 history.append((template_text, name))
@@ -379,3 +387,4 @@ class Brain:
 
     async def close(self):
         await self.qoder.close()
+        await self.rice_qoder.close()

@@ -1,0 +1,7 @@
+Asset: ocean-background.png
+Generation mode: built-in image_gen imagegen (no CLI/API fallback).
+Purpose: project-bound background behind the real game capture, chat and existing Live2D model.
+Reference images: user-provided pink stream layout; used as composition guidance, not edited or embedded.
+
+Final prompt:
+Use case: stylized-concept. Asset type: production background illustration for a 16:9 VTuber livestream ocean theme, to be layered BEHIND real live game video, real chat and a separate Live2D avatar. Create a beautiful polished 1920x1080 landscape underwater blue ocean illustration, soft anime painted environment, luminous pale cerulean and turquoise water, sunbeams filtering diagonally down from surface, graceful distant whale silhouettes, tiny schooling fish, luminous bubbles and subtle watery caustics, pearly seashells and delicate blue coral in the lower corners. Composition: most decorative details along top edge, leftmost 24 percent, and bottom 12 percent; the large right area must be quiet open blue water as it will be covered by a rectangular game screen. The lower left must be uncluttered blue so an existing character can be composited there. Premium serene ocean live stream aesthetic, airy, delicate, cohesive blue palette with white highlights and a little deep indigo. No people, no character, no text, no letters, no watermark, no logos, no UI, no panels, no borders, no game screenshot. This is only a background asset, not a UI mockup.
