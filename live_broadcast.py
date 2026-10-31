@@ -9,12 +9,12 @@ from live_capture import (CaptureError, OUT_H, OUT_W, WindowStreamCapture,
                           close_window, fit_borderless_client, sources)
 from live_overlay import Live2DOverlay, OverlayCompositor, OverlayError, find_edge
 from live_rice import RiceCompositor
-from live_theme import StreamTheme, ThemeAvatar, DEFAULTS as THEME_DEFAULTS
+from live_theme import StreamTheme, DEFAULTS as THEME_DEFAULTS
 from live_platform import (BiliBroadcastPlatform, FaceAuthRequiredError,
                            PlatformError)
 
-# 皮套视口保持 720：默认布局只占画面高度 0.49，1080p 下叠上去是缩小而不是放大，
-# 而实测 1080 视口会把皮套从 21fps 拖到 13.5fps（每帧 PNG 大了 2.25 倍）。
+# 逻辑视口保持 720；半身取景在 WebGL 中放大，实际像素按上镜尺寸增加。
+# 避免先裁成 360px 再放大，也不必传输高分辨率全身画布。
 OVERLAY_BOX = 720
 # 源画面窗口：给直播姬「窗口采集」用的那个窗口，标题要独特、好认
 SOURCE_TITLE = "千音源画面"
@@ -116,6 +116,15 @@ class Broadcast:
             return "找不到 Microsoft Edge，直播画面不会有皮套"
         return ""
 
+    def overlay_render_settings(self) -> dict:
+        """渲染最终取景，保证放大皮套时有足够像素；每帧读取以支持实时调整。"""
+        settings = self.overlay_settings()
+        height = round(OUT_H * settings[1]) if settings else OVERLAY_BOX
+        # 按 128px 分档，拖动大小时避免每帧重建 WebGL 缓冲区。
+        size = max(OVERLAY_BOX, math.ceil(height / 128) * 128)
+        zoom = self.app.cfg.get("stream_theme", {}).get("avatar_zoom", THEME_DEFAULTS["avatar_zoom"]) if self.theme.active else 1
+        return {"size": size, "zoom": zoom}
+
     async def prepare_overlay(self) -> None:
         """预览/配置变化时准备渲染器，保留失败原因供界面展示和开播校验。"""
         problem = self.overlay_problem()
@@ -135,7 +144,7 @@ class Broadcast:
             return
         port = int(self.app.cfg.get("web_port", 8787))
         url = f"http://127.0.0.1:{port}/live2d?overlay=1"
-        overlay = self.overlay or Live2DOverlay()
+        overlay = self.overlay or Live2DOverlay(self.overlay_render_settings)
         self.overlay = overlay
         try:
             await asyncio.to_thread(overlay.start, url, OVERLAY_BOX)
@@ -147,7 +156,7 @@ class Broadcast:
         self.overlay_error = ""
         self.capture.compositor_error = ""
         if getattr(self.capture, "compositor", None) is None:
-            self.capture.compositor = OverlayCompositor(ThemeAvatar(overlay, self.theme), self.overlay_settings)
+            self.capture.compositor = OverlayCompositor(overlay, self.overlay_settings)
             self.app.push("log", {"level": "info", "msg": "皮套已叠加到直播画面"})
 
     async def refresh_overlay(self) -> None:

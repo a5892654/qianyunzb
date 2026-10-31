@@ -84,6 +84,60 @@ asyncio.run(main())
     await page.screenshot({path: path.join(root, 'logs/deepseek-face-fixed.png'), clip: {x: 100, y: 80, width: 700, height: 650}});
     await page.evaluate(() => { CFG.scale = 1; CFG.y = 0; layout(); });
     console.log('PASS all 49 clipping masks fit the allocated buffers; face screenshot saved', masks);
+    await page.setViewportSize({width: 720, height: 720});
+    await page.waitForFunction(() => app.screen.width === 720 && app.screen.height === 720);
+    const capture = await page.evaluate(async () => {
+      app.ticker.stop();
+      const wasAutoUpdate = model.autoUpdate;
+      model.autoUpdate = false;
+      const configBefore = JSON.stringify(CFG);
+      const decode = async png => {
+        const image = new Image(); image.src = 'data:image/png;base64,' + png;
+        await image.decode(); return image;
+      };
+      const crop = image => {
+        const canvas = document.createElement('canvas'); canvas.width = canvas.height = 720;
+        const s = image.height / 720;
+        canvas.getContext('2d').drawImage(image, 180*s, 47*s, 360*s, 360*s, 0, 0, 720, 720);
+        return canvas;
+      };
+      try {
+        const full = window.captureLive2DFrame({size: 720, zoom: 1}).png;
+        const before = crop(await decode(full));
+        const after = window.captureLive2DFrame({size: 720, zoom: 2}).png;
+        const reference = crop(await decode(window.captureLive2DFrame({size: 1440, zoom: 1}).png));
+        const actual = document.createElement('canvas'); actual.width = actual.height = 720;
+        actual.getContext('2d').drawImage(await decode(after), 0, 0);
+        const a = actual.getContext('2d').getImageData(0, 0, 720, 720).data;
+        const b = reference.getContext('2d').getImageData(0, 0, 720, 720).data;
+        let alphaError = 0, colorError = 0, opaque = 0;
+        for (let i = 0; i < a.length; i += 4) {
+          alphaError += Math.abs(a[i+3] - b[i+3]);
+          if (a[i+3] > 240 && b[i+3] > 240) {
+            opaque++;
+            for (let c = 0; c < 3; c++) colorError += Math.abs(a[i+c] - b[i+c]);
+          }
+        }
+        const large = await decode(window.captureLive2DFrame({size: 1536, zoom: 3}).png);
+        const reset = await decode(window.captureLive2DFrame({size: 720, zoom: 1}).png);
+        return {before: before.toDataURL('image/png').split(',')[1], after,
+          alphaError: alphaError / (720*720), colorError: colorError / (opaque*3),
+          opaque, large: [large.width, large.height],
+          restored: reset.width === 720 && reset.height === 720 && app.stage.scale.x === 1
+            && app.stage.scale.y === 1 && app.stage.x === 0 && app.stage.y === 0,
+          configUnchanged: JSON.stringify(CFG) === configBefore};
+      } finally { model.autoUpdate = wasAutoUpdate; app.ticker.start(); }
+    });
+    assert.ok(capture.opaque > 50000, '真实模型半身不能为空白');
+    assert.ok(capture.alphaError < 5 && capture.colorError < 12, '原生半身应与双分辨率全身的同一取景一致');
+    assert.deepEqual(capture.large, [1536, 1536]);
+    for (const name of ['before', 'after']) fs.writeFileSync(path.join(root, 'logs/live2d-sharpness-' + name + '.png'), Buffer.from(capture[name], 'base64'));
+    assert.ok(capture.restored && capture.configUnchanged, '取景切换必须恢复画布且不修改模型配置');
+    console.log('PASS native half-body matches high-resolution crop; enlarged capture and full-body reset', {
+      alphaError: capture.alphaError, colorError: capture.colorError, large: capture.large,
+    });
+    if (process.argv.includes('--capture-only')) return;
+    await page.setViewportSize({width: 900, height: 1000});
     for (const expr of info.expressions) {
       const result = await page.evaluate(id => window.__l2dDebugExpr(id), expr.id);
       assert.equal(result, 'ok:' + expr.id);

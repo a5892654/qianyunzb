@@ -17,7 +17,7 @@ import config
 from live_broadcast import Broadcast
 from live_capture import OUT_H, OUT_W, WindowStreamCapture
 from live_overlay import OverlayCompositor
-from live_theme import DEFAULTS, GAME_RECT, RADIO_RECT, RADIO_SWITCH_SECONDS, StreamTheme, ThemeAvatar
+from live_theme import DEFAULTS, GAME_RECT, RADIO_RECT, RADIO_SWITCH_SECONDS, StreamTheme
 
 
 class ThemeTests(unittest.TestCase):
@@ -92,16 +92,23 @@ class ThemeTests(unittest.TestCase):
         self.theme.clear()
         self.assertEqual(len(self.theme._messages), 0)
 
-    def test_upper_body_crop_is_local_to_the_theme(self):
-        layer = np.full((720, 720, 4), (80, 70, 60, 255), np.uint8)
-        wrapped = ThemeAvatar(SimpleNamespace(frame=lambda: layer), self.theme)
-        self.assertEqual(wrapped.frame().shape, (360, 360, 4))
-        np.testing.assert_array_equal(wrapped.frame(), layer[47:407, 180:540])
-        self.settings['preset'] = 'classic'
-        self.assertIs(wrapped.frame(), layer)
-        self.settings['preset'] = 'ocean'
-        self.settings['avatar_zoom'] = 1
-        np.testing.assert_array_equal(wrapped.frame(), layer)
+    def test_upper_body_is_rendered_at_output_size_without_changing_model(self):
+        cfg = copy.deepcopy(config.DEFAULTS)
+        cfg['live2d']['enabled'] = True
+        original = copy.deepcopy(cfg['live2d'])
+        broadcast = Broadcast(SimpleNamespace(cfg=cfg))
+        self.assertEqual(broadcast.overlay_render_settings(), {'size': 720, 'zoom': 1})
+        cfg['stream_theme']['preset'] = 'ocean'
+        self.assertEqual(broadcast.overlay_render_settings(), {'size': 720, 'zoom': 2})
+        cfg['stream_theme'].update(avatar_zoom=3, avatar_size=1.4)
+        view = broadcast.overlay_render_settings()
+        self.assertGreaterEqual(view['size'], round(OUT_H * 1.4))
+        self.assertEqual(view['zoom'], 3)
+        cfg['stream_theme']['preset'] = 'classic'
+        self.assertEqual(broadcast.overlay_render_settings(), {'size': 720, 'zoom': 1})
+        self.assertEqual(cfg['live2d'], original)
+        cfg['live2d']['overlay_size'] = 1.4
+        self.assertGreaterEqual(broadcast.overlay_render_settings()['size'], round(OUT_H * 1.4))
 
     def test_switch_isolates_layout_and_shared_capture_frames(self):
         cfg = copy.deepcopy(config.DEFAULTS)
@@ -272,6 +279,24 @@ class ThemeRouteTests(unittest.IsolatedAsyncioTestCase):
         self.client = TestClient(TestServer(main.build_web(self.app)))
         await self.client.start_server()
         self.addAsyncCleanup(self.client.close)
+
+    async def test_subtitle_switch_is_saved_and_broadcast_without_toggling_bubble(self):
+        bubble = self.app.cfg['live2d']['bubble']
+        self.assertTrue(self.app.cfg['overlay']['enabled'])
+        for enabled in (False, True):
+            with patch('config.save') as save:
+                response = await self.client.post('/api/config', json={'overlay': {'enabled': enabled, 'seconds': 0.5}}, headers={'X-BVB': '1'})
+            self.assertEqual(response.status, 200)
+            save.assert_called_once_with(self.app.cfg)
+            self.app.push.assert_called_with('overlay_config', {'enabled': enabled, 'seconds': 0.5})
+            saved = await (await self.client.get('/api/config')).json()
+            self.assertEqual(saved['overlay']['enabled'], enabled)
+            self.assertEqual(saved['live2d']['bubble'], bubble)
+        for value in (None, {'enabled': 'false'}, {'seconds': -1}, {'seconds': float('nan')}, {'seconds': 601}):
+            with self.subTest(value=value), patch('config.save') as save:
+                response = await self.client.post('/api/config', json={'overlay': value}, headers={'X-BVB': '1'})
+                self.assertEqual(response.status, 400)
+                save.assert_not_called()
 
     async def test_save_validation_and_local_preview(self):
         headers = {'X-BVB': '1'}

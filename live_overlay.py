@@ -54,7 +54,8 @@ def _decode_png(raw: bytes) -> np.ndarray | None:
 class Live2DOverlay:
     """后台线程把 Live2D 渲染成 RGBA 帧；调用方只取最新一帧。"""
 
-    def __init__(self) -> None:
+    def __init__(self, render_settings=None) -> None:
+        self._render_settings = render_settings
         self._lock = threading.Lock()
         self._frame: np.ndarray | None = None
         self._frame_at = 0.0
@@ -228,8 +229,10 @@ class Live2DOverlay:
                 blank_since = None
                 while not self._stop.is_set():
                     started = time.monotonic()
+                    view = self._render_settings() if self._render_settings else {}
                     result = await command(ws, "Runtime.evaluate", {
-                        "expression": "window.captureLive2DFrame ? window.captureLive2DFrame() : (window.live2dOverlayState || {})",
+                        "expression": "window.captureLive2DFrame ? window.captureLive2DFrame("
+                                      + json.dumps(view) + ") : (window.live2dOverlayState || {})",
                         "returnByValue": True,
                     })
                     if result.get("exceptionDetails"):

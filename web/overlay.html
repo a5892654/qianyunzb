@@ -15,9 +15,26 @@ html.off body{visibility:hidden}
 <body>
 <div id="box"></div>
 <script>
-let keep = 8, hideTimer = null;
-fetch('/api/config').then(r => r.json()).then(c => keep = c.overlay?.seconds ?? 8).catch(() => {});
+let keep = 8, enabled = false, hideTimer = null, settingsVersion = 0;
 const box = document.getElementById('box');
+function hideSubtitle() {
+  clearTimeout(hideTimer);
+  box.classList.remove('on');
+  box.textContent = '';
+}
+function applySettings(settings = {}) {
+  settingsVersion++;
+  keep = settings.seconds ?? 8;
+  enabled = settings.enabled !== false;
+  if (!enabled) hideSubtitle();
+}
+async function loadSettings() {
+  const version = settingsVersion;
+  try {
+    const c = await fetch('/api/config').then(r => r.json());
+    if (version === settingsVersion) applySettings(c.overlay);
+  } catch {}
+}
 let lastOk = 0, shown = true, stopped = false;
 function setOnline(ok) {
   if (ok === shown) return;
@@ -27,11 +44,13 @@ function setOnline(ok) {
 setInterval(() => setOnline(!stopped && Date.now() - lastOk < 5000), 1000);
 function connect() {
   const ws = new WebSocket(`ws://${location.host}/ws`);
-  ws.onopen = () => { stopped = false; lastOk = Date.now(); };
+  ws.onopen = () => { stopped = false; lastOk = Date.now(); loadSettings(); };
   ws.onmessage = e => {
     const m = JSON.parse(e.data);
-    if (m.kind === 'bye') { stopped = true; lastOk = 0; box.classList.remove('on'); setOnline(false); return; }
+    if (m.kind === 'bye') { stopped = true; lastOk = 0; hideSubtitle(); setOnline(false); return; }
     lastOk = Date.now();
+    if (m.kind === 'overlay_config') { applySettings(m); return; }
+    if (!enabled) return;
     if (m.kind === 'speak') { clearTimeout(hideTimer); box.textContent = m.text; box.classList.add('on'); }
     if (m.kind === 'speak_end') { clearTimeout(hideTimer); hideTimer = setTimeout(() => box.classList.remove('on'), keep * 1000); }
   };

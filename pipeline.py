@@ -406,7 +406,7 @@ class Pipeline:
             await self.synth_q.put(item)
 
     def _stream_mode(self):
-        """流式：边生成边播，首块到位就开口，不用等整句合成完。"""
+        """流式：边生成边播，积累短缓冲后开口，不用等整句合成完。"""
         t = self.cfg["tts"]
         return bool(t.get("enabled", True) and t.get("qwen_enabled") and t.get("stream_enabled", True))
 
@@ -448,16 +448,21 @@ class Pipeline:
         text, dev, vol = item["text"], a.get("device", ""), float(a.get("volume", 80))
         self.app.push("speak", {"text": text, "id": item["id"], "emotion": item.get("emotion", ""),
                                "fps": ENV_FPS, "env": [], "dur": None, "stream": True})
-        t0, acc, env_n, sr = time.time(), [], 0, None
+        t0, acc, env_n, sr = time.monotonic(), [], 0, None
+        audio_s = 0.0
+        generated_s = 0.0
         try:
-            await loop.run_in_executor(None, self.app.player.begin_stream, dev, vol)
+            await loop.run_in_executor(None, self.app.player.begin_stream, dev, vol,
+                                       self.cfg["tts"].get("stream_buffer_seconds", 0.8))
             async for pcm, r in ttsd.synth_stream(text, self.cfg["tts"]):
                 sr = r
                 if not acc:
-                    item["synth_s"] = round(time.time() - t0, 2)  # 流式下这栏显示的是开口延迟
+                    item["synth_s"] = round(time.monotonic() - t0, 2)  # 首块延迟；开口还含预缓冲与设备延迟
                 acc.append(pcm)
+                audio_s += len(pcm) / r
                 env_n = self._push_env(item, acc, sr, env_n)
                 await loop.run_in_executor(None, self.app.player.feed_stream, pcm, r)
+            generated_s = time.monotonic() - t0
         except Exception as e:
             # 引擎没出声就挂了（掉线/显存不够）：退回整句链路，别把直播间留成哑巴
             if acc:
@@ -472,6 +477,17 @@ class Pipeline:
             return
         finally:
             await loop.run_in_executor(None, self.app.player.end_stream)
+            stats = self.app.player.stream_stats()
+            if audio_s and generated_s:
+                log.info("流式语音：音频 %.2fs，生成 %.2fs，生成/音频 %.2f，缺音 %d 次 / %dms，设备欠载 %d 次",
+                         audio_s, generated_s, generated_s / audio_s,
+                         stats["gaps"], stats["gap_ms"], stats["output_underflows"])
+            if stats["gaps"]:
+                self.app.push("log", {"level": "warn", "msg":
+                    f"语音缓冲耗尽 {stats['gaps']} 次（累计 {stats['gap_ms']}ms），可在语音设置提高流式预缓冲；持续生成过慢时需减少 GPU 负载"})
+            if stats["output_underflows"]:
+                self.app.push("log", {"level": "warn", "msg":
+                    f"音频设备输出欠载 {stats['output_underflows']} 次，请检查音频设备或 CPU 占用"})
 
     async def _play_blocking(self, item, loop):
         a = self.cfg["audio"]
