@@ -46,13 +46,21 @@ async def alive(cfg_tts):
         return False
 
 
+def _run_bytes(argv, timeout):
+    """跑系统命令拿字节。不能用 text=True：中文 Windows 的默认代码页不是 UTF-8，
+    解码失败会让 stdout 变成 None（PowerShell 读线程直接抛 UnicodeDecodeError），
+    后面的 splitlines 就炸——引擎永远起不来，表现为直播间彻底没声。"""
+    try:
+        proc = subprocess.run(argv, capture_output=True, timeout=timeout,
+                              creationflags=procutil.CREATE_NO_WINDOW)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return (proc.stdout or b"").decode("utf-8", "replace")
+
+
 def _listening_pids(port):
     """占着端口的进程。残留服务会一直监听，新实例拉起来会撞端口。"""
-    try:
-        out = subprocess.run(["netstat", "-ano", "-p", "tcp"], capture_output=True, text=True,
-                             creationflags=procutil.CREATE_NO_WINDOW, timeout=10).stdout
-    except (OSError, subprocess.SubprocessError):
-        return set()
+    out = _run_bytes(["netstat", "-ano", "-p", "tcp"], 10)
     pids = set()
     for line in out.splitlines():
         parts = line.split()
@@ -73,12 +81,7 @@ def _ttsd_pids(script):
     cmd = ("Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
            "Where-Object { $_.CommandLine -and $_.CommandLine.ToLower().Contains('%s') } | "
            "ForEach-Object { $_.ProcessId }" % needle)
-    try:
-        out = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", cmd],
-                             capture_output=True, text=True, timeout=20,
-                             creationflags=procutil.CREATE_NO_WINDOW).stdout
-    except (OSError, subprocess.SubprocessError):
-        return set()
+    out = _run_bytes(["powershell", "-NoProfile", "-NonInteractive", "-Command", cmd], 20)
     pids = set()
     for line in out.splitlines():
         line = line.strip()
@@ -90,6 +93,8 @@ def _ttsd_pids(script):
 def kill_stale(cfg_tts, on_status=None):
     """拉起前清掉残留的 ttsd：每份模型常驻约 4.8GB 显存，
     端口不冲突时完全看不出来，直到新实例加载时把显卡挤爆（表现为引擎无声消失）。
+
+    清理是尽力而为：扫描或杀进程失败都只记日志，绝不能拦住引擎启动。
     """
     script = str(cfg_tts.get("ttsd_script", r"C:\gamedata\ttsd\ttsd.py"))
     try:
@@ -99,9 +104,20 @@ def kill_stale(cfg_tts, on_status=None):
     mine = {os.getpid()}
     if _proc is not None and _proc.poll() is None:
         mine.add(_proc.pid)
-    stale = sorted(p for p in (_listening_pids(port) | _ttsd_pids(script)) if p not in mine)
+    try:
+        found = _listening_pids(port) | _ttsd_pids(script)
+    except Exception as e:
+        log.warning("残留 ttsd 扫描失败（不影响启动）：%s", e)
+        found = set()
+    stale = sorted(p for p in found if p not in mine)
+    killed = []
     for pid in stale:
-        procutil.kill_tree(pid)
+        try:
+            procutil.kill_tree(pid)
+            killed.append(pid)
+        except Exception as e:
+            log.warning("清理残留 pid=%s 失败（继续启动）：%s", pid, e)
+    stale = killed
     if stale:
         log.warning("清理残留 ttsd 进程：%s", stale)
         if on_status:

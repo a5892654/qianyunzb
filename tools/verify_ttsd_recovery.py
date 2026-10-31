@@ -166,6 +166,46 @@ class KillStaleTests(unittest.TestCase):
         self.assertEqual(stale, [])
         self.assertEqual(killed, [])
 
+    def test_scanner_crash_never_blocks_start(self):
+        """扫描炸了也必须让引擎照常启动：曾经这里抛异常导致全直播间没声。"""
+        with patch.object(ttsd, "_ttsd_pids", side_effect=AttributeError("'NoneType' object has no attribute 'splitlines'")):
+            stale = ttsd.kill_stale({"ttsd_base": "http://127.0.0.1:8899"})
+        self.assertEqual(stale, [])
+
+    def test_kill_failure_does_not_stop_cleanup(self):
+        killed = []
+
+        def flaky(pid):
+            if pid == 111:
+                raise PermissionError("access denied")
+            killed.append(pid)
+
+        with patch.object(ttsd, "_listening_pids", return_value={111, 222}), \
+                patch.object(ttsd, "_ttsd_pids", return_value=set()), \
+                patch.object(ttsd.procutil, "kill_tree", flaky):
+            stale = ttsd.kill_stale({"ttsd_base": "http://127.0.0.1:8899"})
+        self.assertEqual(killed, [222])
+        self.assertEqual(stale, [222])
+
+
+class DecodeTests(unittest.TestCase):
+    """中文 Windows 的 PowerShell 输出不是 UTF-8：按 text=True 解会炸。"""
+
+    def _fake_run(self, stdout):
+        return lambda *a, **k: SimpleNamespace(stdout=stdout)
+
+    def test_parses_pids_when_output_is_not_utf8(self):
+        out = b"\xbb\xbb\xb2\xe2\xca\xd4\r\n12345\r\n"
+        with patch.object(ttsd.subprocess, "run", self._fake_run(out)), \
+                patch.object(ttsd.procutil, "CREATE_NO_WINDOW", 0, create=True):
+            self.assertEqual(ttsd._ttsd_pids(r"C:\gamedata\ttsd\ttsd.py"), {12345})
+
+    def test_missing_stdout_is_not_a_crash(self):
+        with patch.object(ttsd.subprocess, "run", self._fake_run(None)), \
+                patch.object(ttsd.procutil, "CREATE_NO_WINDOW", 0, create=True):
+            self.assertEqual(ttsd._ttsd_pids(r"C:\gamedata\ttsd\ttsd.py"), set())
+            self.assertEqual(ttsd._listening_pids(8899), set())
+
 
 if __name__ == "__main__":
     unittest.main()
