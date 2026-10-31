@@ -72,6 +72,7 @@ class Pipeline:
         self.last_seen = {}
         self.merging = {}
         self.current = None
+        self._recovering = False
         self._spoken_ids = set()
         self.pending_replies = set()
         self._interaction_task = None
@@ -442,7 +443,7 @@ class Pipeline:
             return len(env)
         return emitted
 
-    async def _play_stream(self, item, loop, *, retried=False):
+    async def _play_stream(self, item, loop):
         from dtgame import ttsd
         a = self.cfg["audio"]
         text, dev, vol = item["text"], a.get("device", ""), float(a.get("volume", 80))
@@ -485,35 +486,31 @@ class Pipeline:
         if error is None:
             return
         if acc:
-            # 半句已经放出去了，整句重放会重复词：先把引擎恢复好，下一句直接用。
+            # 半句已经放出去了，整句重放会重复词。
             log.warning("流式语音中途断流：%s", error)
             self.app.push("log", {"level": "warn", "msg": f"流式语音中途断流：{error}"})
-            asyncio.create_task(self._recover_stream_engine())
-            return
-        log.warning("流式语音失败：%s", error)
-        if retried:
-            self.app.push("log", {"level": "error", "msg":
-                f"流式引擎重启后这句仍没出声，已跳过（不降级）：{error}"})
-            return
-        ttsd.stop()
-        ok = await ttsd.ensure(self.cfg["tts"],
-                              lambda m: self.app.push("log", {"level": "info", "msg": m}))
-        if not ok:
-            self.app.push("log", {"level": "error", "msg":
-                f"流式语音引擎没能恢复，这句跳过（不降级到 SAPI）：{error}"})
-            return
-        self.app.push("log", {"level": "warn", "msg": "流式引擎已重启，重试这一句"})
-        return await self._play_stream(item, loop, retried=True)
+        else:
+            log.warning("流式语音失败，跳过这一句：%s", error)
+            self.app.push("log", {"level": "warn", "msg":
+                f"流式语音失败，这句跳过（不降级），后台重启引擎：{error}"})
+        asyncio.create_task(self._recover_stream_engine())
 
     async def _recover_stream_engine(self):
+        """后台清残留并重拉引擎：加载要 40 秒，不能让播报队列等它。"""
         from dtgame import ttsd
+        if self._recovering:
+            return
+        self._recovering = True
         try:
             ttsd.stop()
             if not await ttsd.ensure(self.cfg["tts"],
                                      lambda m: self.app.push("log", {"level": "info", "msg": m})):
-                self.app.push("log", {"level": "error", "msg": "流式语音引擎没能恢复，后续句子会继续跳过"})
+                self.app.push("log", {"level": "error", "msg":
+                    "流式语音引擎没能恢复，后续句子会继续跳过（不降级到 SAPI）"})
         except Exception as e:
             log.warning("重启流式引擎失败：%s", e)
+        finally:
+            self._recovering = False
 
     async def _play_blocking(self, item, loop):
         a = self.cfg["audio"]

@@ -1,4 +1,4 @@
-"""流式语音失败不再降级：清残留 -> 重启引擎 -> 重试一次，仍失败就跳过这一句。"""
+"""流式语音失败不降级：跳过这一句，后台清残留重启引擎，下一句继续用克隆音。"""
 import asyncio
 import sys
 import unittest
@@ -20,7 +20,7 @@ def chunk(frames=2400, sr=1000):
 
 
 class Recorder:
-    """按脚本逐次产出的假 synth_stream；第 N 次是异常就抛。"""
+    """按脚本逐次产出的假 synth_stream；脚本项是异常就抛。"""
 
     def __init__(self, plan):
         self.plan = list(plan)
@@ -28,8 +28,7 @@ class Recorder:
 
     def __call__(self, text, cfg_tts, timeout_first=25.0):
         self.calls.append(text)
-        step = self.plan.pop(0)
-        return self._gen(step)
+        return self._gen(self.plan.pop(0))
 
     async def _gen(self, step):
         if step == "raise":
@@ -52,48 +51,98 @@ class FakeApp:
         self.engine = SimpleNamespace(synth=AsyncMock(return_value=(np.zeros((10, 1), np.int16), 24000)))
 
 
+def messages(app):
+    return [str(c) for c in app.push.call_args_list]
+
+
 class NoDegradeTests(unittest.IsolatedAsyncioTestCase):
-    async def play(self, recorder, ensure_ok=True):
+    async def play(self, recorder, recover=None):
         app = FakeApp()
         pipe = Pipeline(app)
+        if recover is None:
+            pipe._recover_stream_engine = AsyncMock()
+        else:
+            pipe._recover_stream_engine = recover
         loop = asyncio.get_running_loop()
         item = {"id": 7, "text": "测试一句", "emotion": ""}
-        with patch.object(ttsd, "synth_stream", recorder), \
-                patch.object(ttsd, "ensure", AsyncMock(return_value=ensure_ok)) as ensure, \
-                patch.object(ttsd, "stop", Mock()):
+        with patch.object(ttsd, "synth_stream", recorder):
             await pipe._play_stream(item, loop)
-        return app, pipe, ensure
+        await asyncio.sleep(0)  # 让 create_task 跑起来
+        return app, pipe
 
-    async def test_failure_restarts_and_retries_without_degrading(self):
-        rec = Recorder(["raise", 3])
-        app, _, ensure = await self.play(rec, ensure_ok=True)
-        self.assertEqual(len(rec.calls), 2, "应当重试一次")
-        ensure.assert_awaited_once()
-        app.engine.synth.assert_not_awaited()          # 不降级到整句/SAPI
-        self.assertGreaterEqual(app.push.call_count, 2)
-
-    async def test_second_failure_skips_line(self):
-        rec = Recorder(["raise", "raise"])
-        app, _, _ = await self.play(rec)
-        self.assertEqual(len(rec.calls), 2, "只重试一次，不无限循环")
-        app.engine.synth.assert_not_awaited()
-        msgs = [str(c) for c in app.push.call_args_list]
-        self.assertTrue(any("已跳过（不降级）" in m for m in msgs), msgs)
-
-    async def test_engine_cannot_restart_skips_without_retry(self):
+    async def test_failure_skips_line_and_recovers_in_background(self):
         rec = Recorder(["raise"])
-        app, _, ensure = await self.play(rec, ensure_ok=False)
-        self.assertEqual(len(rec.calls), 1)
-        ensure.assert_awaited_once()
-        app.engine.synth.assert_not_awaited()
-        msgs = [str(c) for c in app.push.call_args_list]
-        self.assertTrue(any("没能恢复" in m for m in msgs), msgs)
+        app, pipe = await self.play(rec)
+        self.assertEqual(len(rec.calls), 1, "不重试，直接跳过这一句")
+        pipe._recover_stream_engine.assert_awaited_once()   # 后台恢复已排上
+        app.engine.synth.assert_not_awaited()               # 不降级到整句/SAPI
+        self.assertTrue(any("这句跳过（不降级）" in m for m in messages(app)), messages(app))
+
+    async def test_skip_returns_without_waiting_for_engine(self):
+        """关键是别让播报队列等 40 秒加载：恢复放进后台任务。"""
+        rec = Recorder(["raise"])
+        gate = asyncio.Event()
+
+        async def slow_recover():
+            await gate.wait()
+
+        app, pipe = await self.play(rec, recover=slow_recover)
+        self.assertFalse(gate.is_set(), "恢复仍在进行中时 _play_stream 已返回")
+        gate.set()
+        await asyncio.sleep(0)  # 收尾，别留悬挂任务
 
     async def test_mid_stream_break_does_not_replay_words(self):
         rec = Recorder(["raise-after-one"])
-        app, pipe, _ = await self.play(rec)
+        app, pipe = await self.play(rec)
         self.assertEqual(len(rec.calls), 1, "半句已播出，不能整句重放")
+        pipe._recover_stream_engine.assert_awaited_once()
         app.engine.synth.assert_not_awaited()
+
+    async def test_success_does_not_trigger_recovery(self):
+        rec = Recorder([2])
+        app, pipe = await self.play(rec)
+        pipe._recover_stream_engine.assert_not_awaited()
+        self.assertEqual(len(rec.calls), 1)
+
+
+class RecoverTests(unittest.IsolatedAsyncioTestCase):
+    async def test_recover_restarts_and_reports_failure(self):
+        app = FakeApp()
+        pipe = Pipeline(app)
+        with patch.object(ttsd, "stop", Mock()) as stop, \
+                patch.object(ttsd, "ensure", AsyncMock(return_value=False)) as ensure:
+            await pipe._recover_stream_engine()
+        stop.assert_called_once()
+        ensure.assert_awaited_once()
+        self.assertTrue(any("没能恢复" in m for m in messages(app)), messages(app))
+        self.assertFalse(pipe._recovering)
+
+    async def test_recover_is_not_run_twice_in_parallel(self):
+        app = FakeApp()
+        pipe = Pipeline(app)
+        gate = asyncio.Event()
+        calls = []
+
+        async def slow_ensure(cfg, on_status):
+            calls.append(1)
+            await gate.wait()
+            return True
+
+        with patch.object(ttsd, "stop", Mock()), patch.object(ttsd, "ensure", slow_ensure):
+            first = asyncio.create_task(pipe._recover_stream_engine())
+            await asyncio.sleep(0)
+            await pipe._recover_stream_engine()   # 第二次进不去
+            gate.set()
+            await first
+        self.assertEqual(len(calls), 1)
+
+    async def test_recover_swallows_exceptions(self):
+        app = FakeApp()
+        pipe = Pipeline(app)
+        with patch.object(ttsd, "stop", Mock()), \
+                patch.object(ttsd, "ensure", AsyncMock(side_effect=OSError("boom"))):
+            await pipe._recover_stream_engine()
+        self.assertFalse(pipe._recovering)
 
 
 class KillStaleTests(unittest.TestCase):
