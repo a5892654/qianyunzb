@@ -237,7 +237,7 @@ DEFAULTS = {
         "tpl_play": "下面播放{name}点的《{song}》。",
         "tpl_fail": "抱歉{name}，没找到能播放的《{query}》。",
         "tpl_need": "{name}，送{num}个{gift}就可以点歌哦！",
-        "tpl_need_follow": "{name}，先关注主播，再发点歌加歌名就可以免费点歌啦！",
+        "tpl_need_follow": "{name}，先点个关注嘛，关注完就能免费点歌啦，拜托拜托！",
         "tpl_follow_error": "{name}，暂时无法确认关注状态，请稍后再试一次点歌哦！",
         "announce_usage": True,
         "tpl_usage": "发弹幕点歌加歌名就可以点歌啦，比如点歌加晴天！",
