@@ -6,9 +6,10 @@ import sys
 import time
 
 from live_capture import (CaptureError, OUT_H, OUT_W, WindowStreamCapture,
-                          close_window, fit_borderless_client, sources)
+                          close_window, fit_borderless_client, sources, window_pixel_scale)
 from live_overlay import Live2DOverlay, OverlayCompositor, OverlayError, find_edge
 from live_rice import RiceCompositor
+from live_subtitles import SourceSubtitles
 from live_theme import StreamTheme, DEFAULTS as THEME_DEFAULTS
 from live_platform import (BiliBroadcastPlatform, FaceAuthRequiredError,
                            PlatformError)
@@ -25,7 +26,7 @@ _SOURCE_FIT_S = 6.0      # 等源画面窗口出现的最长时间
 
 
 def source_python() -> str:
-    """源画面窗口要 import webview，只有项目 .venv 那个解释器装了它。"""
+    """使用项目解释器；原生模式只需标准库，旧网页模式还需 pywebview。"""
     venv = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         ".venv", "Scripts", "python.exe")
     return venv if os.path.isfile(venv) else sys.executable
@@ -58,6 +59,8 @@ class Broadcast:
     def __init__(self, app):
         self.app = app
         self.capture = WindowStreamCapture()
+        self.source_subtitles = SourceSubtitles(lambda: app.cfg.get("overlay", {}))
+        self.capture.source_subtitles = self.source_subtitles
         self.theme = StreamTheme(lambda: app.cfg.get("stream_theme", {}), lambda: song_snapshot(app))
         self.capture.theme_compositor = self.theme
         if getattr(app, "rice", None) is not None:
@@ -76,7 +79,12 @@ class Broadcast:
 
     @property
     def source_open(self) -> bool:
-        return bool(self.source_proc and self.source_proc.poll() is None)
+        if self.source_proc is None:
+            return False
+        if self.source_proc.poll() is None:
+            return True
+        self.capture.stop_source_frames()
+        return False
 
     @property
     def running(self):
@@ -324,17 +332,20 @@ class Broadcast:
         stale = {w["hwnd"] for w in (await asyncio.to_thread(sources)).get("windows", [])
                  if w.get("title") == SOURCE_TITLE}
         try:
+            name = self.capture.start_source_frames()
+            cmd.extend(["--shared-memory", name])
             self.source_proc = subprocess.Popen(
                 cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         except OSError as error:
+            self.capture.stop_source_frames()
             if not was_previewing:
                 await self.stop_preview()
             return {"ok": False, "error": f"源画面窗口启动失败：{error}"}
         self.source_owns_preview = not was_previewing
         client = await self.fit_source_window(scale, stale)
         if self.source_proc.poll() is not None or client == (0, 0):
-            err = "源画面窗口没能起来（多半是这台机器没有 WebView2 运行时）"
+            err = "源画面原生窗口启动失败，请查看本机窗口或共享内存是否可用"
             await self.stop_source()
             self.app.push("log", {"level": "warn", "msg": err})
             return {"ok": False, "error": err}
@@ -355,13 +366,17 @@ class Broadcast:
         窗口只能按逻辑像素设，所以设的是 SOURCE_W/scale，回报给界面时再乘回缩放。
         `stale` 是开窗口前就在屏幕上的同名窗口（上一轮服务崩掉留下的），那些不归我们管。
         """
-        target = (max(2, round(SOURCE_W / scale)), max(2, round(SOURCE_H / scale)))
         got = (0, 0)
         deadline = time.monotonic() + _SOURCE_FIT_S
         while True:
             for w in (await asyncio.to_thread(sources)).get("windows", []):
                 if w.get("title") != SOURCE_TITLE or w["hwnd"] in stale:
                     continue
+                # The native source is DPI-aware. Read its exact monitor DPI;
+                # estimating from the game's borders can shrink 1920 by a few
+                # pixels and introduce another scale operation in live capture.
+                scale = await asyncio.to_thread(window_pixel_scale, w["hwnd"], scale)
+                target = (max(2, round(SOURCE_W / scale)), max(2, round(SOURCE_H / scale)))
                 got = await asyncio.to_thread(fit_borderless_client, w["hwnd"], *target)
                 self.source_hwnd = w["hwnd"]
                 return (round(got[0] * scale), round(got[1] * scale))
@@ -370,6 +385,7 @@ class Broadcast:
             await asyncio.sleep(0.25)
 
     async def stop_source(self) -> dict:
+        self.capture.stop_source_frames()
         proc, self.source_proc = self.source_proc, None
         hwnd, self.source_hwnd = self.source_hwnd, 0
         if proc and proc.poll() is None:

@@ -17,6 +17,12 @@ import cv2
 import numpy as np
 import pyaudiowpatch as pa
 
+# The frame budget is 33 ms, while OpenCV defaults to every logical CPU.
+# Two workers keep 1080p below budget without waking dozens of threads for
+# each small avatar ROI; leave explicitly smaller thread pools unchanged.
+if cv2.getNumThreads() > 2:
+    cv2.setNumThreads(2)
+
 try:
     import windows_capture
 except Exception:  # pragma: no cover - 依赖缺失时接口仍可读
@@ -44,6 +50,8 @@ _user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
 _user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
 _user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
 _user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+_user32.GetDpiForWindow.argtypes = [wintypes.HWND]
+_user32.GetDpiForWindow.restype = wintypes.UINT
 _user32.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
 _user32.MoveWindow.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_int,
                                ctypes.c_int, ctypes.c_int, wintypes.BOOL]
@@ -96,6 +104,12 @@ def client_size(hwnd: int) -> tuple[int, int]:
     if not _user32.GetClientRect(wintypes.HWND(hwnd), ctypes.byref(r)):
         return (0, 0)
     return (max(0, r.right - r.left), max(0, r.bottom - r.top))
+
+
+def window_pixel_scale(hwnd: int, fallback: float = 1.0) -> float:
+    """Exact DPI of the DPI-aware native source, without changing capture DPI."""
+    dpi = _user32.GetDpiForWindow(wintypes.HWND(hwnd))
+    return dpi / 96 if dpi else fallback
 
 
 def strip_caption(hwnd: int) -> None:
@@ -318,6 +332,11 @@ class WindowStreamCapture:
         self._jpeg: bytes | None = None
         self._jpeg_seq = 0
         self._jpeg_at = 0.0
+        self._jpeg_requested_until = 0.0
+        self._jpeg_times = collections.deque(maxlen=180)
+        self._source_sink = None
+        self._last_source_data = None
+        self.source_subtitles = None
         self._jpeg_thread: threading.Thread | None = None
         self._audio_q: queue.Queue = queue.Queue(maxsize=96)
         self._control = None
@@ -352,6 +371,9 @@ class WindowStreamCapture:
             self._source_frame = None
             self._native_source_frame = None
             self.latest = self._jpeg_at = 0.0
+            self._jpeg_requested_until = 0.0
+            self._jpeg_seq = 0
+            self._jpeg_times.clear()
             self._capture_times.clear()
             self._render_times.clear()
             self._process_times.clear()
@@ -426,7 +448,7 @@ class WindowStreamCapture:
         self._audio_thread = threading.Thread(target=self._audio_reader,
                                               name="lc-audio", daemon=True)
         self._audio_thread.start()
-        self._jpeg_thread = threading.Thread(target=self._jpeg_worker, name="lc-jpeg", daemon=True)
+        self._jpeg_thread = threading.Thread(target=self._jpeg_worker, name="lc-render", daemon=True)
         self._jpeg_thread.start()
         # 等待首帧，过滤纯黑或空白加载画面。
         deadline = time.monotonic() + _FRAME_WAIT_S
@@ -481,9 +503,14 @@ class WindowStreamCapture:
             # Retain non-16:9 edges for themes that contain the full game. The
             # source also survives switching themes while a game is static.
             native = canvas if (nw, nh) == (OUT_W, OUT_H) else buf.copy()
-            tiny = cv2.resize(canvas, (16, 9), interpolation=cv2.INTER_AREA)
-            rgb = tiny[2:-2, 3:-3, :3]
-            mean = float(rgb.mean()) if float(rgb.std()) > 3.0 else 0.0
+            # Black/loading validation is only needed before the first valid
+            # frame. Full-frame AREA reduction on every WGC callback costs
+            # several milliseconds and competes with the game for CPU.
+            mean = self._mean
+            if mean <= 6.0:
+                tiny = cv2.resize(canvas, (16, 9), interpolation=cv2.INTER_AREA)
+                rgb = tiny[2:-2, 3:-3, :3]
+                mean = float(rgb.mean()) if float(rgb.std()) > 3.0 else 0.0
             with self._lock:
                 self._source_frame = canvas
                 self._native_source_frame = native
@@ -523,7 +550,20 @@ class WindowStreamCapture:
             except Exception as exc:
                 self.rice_error = f"白饭画面合成失败：{exc}"
         data = canvas.tobytes()
+        with self._lock:
+            sink = self._source_sink
+        source_data = data
+        if sink is not None and self.source_subtitles is not None and self.source_subtitles.apply(canvas):
+            source_data = canvas.tobytes()
         with self._frame_cv:
+            if sink is not None and sink is self._source_sink:
+                # /source used to add the subtitle iframe after MJPEG decode.
+                # Keep it on the native source only, without doubling subtitles
+                # in the legacy web page or changing the encoder's output.
+                # No queue, no wait for the window to draw. Retry next render
+                # if the consumer briefly owns the shared-memory mutex.
+                if source_data != self._last_source_data and sink.publish(source_data):
+                    self._last_source_data = source_data
             self._frame = data
             self._render_times.append(time.monotonic())
             self._frame_cv.notify_all()
@@ -563,6 +603,7 @@ class WindowStreamCapture:
         # 先睡 33ms 再干活会把周期变成「33ms + 编码耗时」，实测掉到 ~16fps。
         # 改成按固定截止时间追帧，编码时间落在同一个周期里，才能跑到采集帧率。
         next_t = time.monotonic()
+        bgr = None
         while not self._audio_stop.is_set() and self.previewing:
             delay = next_t - time.monotonic()
             if delay > 0 and self._audio_stop.wait(delay):
@@ -580,18 +621,24 @@ class WindowStreamCapture:
                 self._compose_frame(source)
                 with self._lock:
                     frame = self._frame
+                    wants_jpeg = time.monotonic() < self._jpeg_requested_until
+                if not wants_jpeg:
+                    continue
                 # 必须比较完整画面。16x9 均值指纹会吞掉文字、鼠标和嘴型等局部变化；
                 # bytes 比较在 C 层完成，有变化时会提前结束，也保留了静止画面免编码。
                 if frame == last_frame:
                     continue
+                if bgr is None:
+                    bgr = np.empty((OUT_H, OUT_W, 3), np.uint8)
                 bgra = np.frombuffer(frame, np.uint8).reshape(OUT_H, OUT_W, 4)
-                bgr = cv2.cvtColor(bgra, cv2.COLOR_BGRA2BGR)
+                cv2.cvtColor(bgra, cv2.COLOR_BGRA2BGR, dst=bgr)
                 ok, encoded = cv2.imencode(".jpg", bgr,
                                            [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
                 if ok:
                     with self._frame_cv:
                         self._jpeg = encoded.tobytes()
                         self._jpeg_at = time.monotonic()
+                        self._jpeg_times.append(self._jpeg_at)
                         self._jpeg_seq += 1
                         self._frame_cv.notify_all()
                     last_frame = frame
@@ -608,6 +655,7 @@ class WindowStreamCapture:
         生产 30fps、消费也 30fps 轮询的话平均只能捡到一半，所以预览和源画面走事件等待。"""
         deadline = time.monotonic() + timeout
         with self._frame_cv:
+            self._jpeg_requested_until = max(self._jpeg_requested_until, deadline + 1.0)
             while True:
                 if self._jpeg is not None and self._jpeg_seq > after_seq:
                     return self._jpeg_seq, self._jpeg
@@ -618,7 +666,23 @@ class WindowStreamCapture:
 
     def frame_jpeg(self) -> bytes | None:
         with self._lock:
+            self._jpeg_requested_until = time.monotonic() + 1.0
             return self._jpeg
+
+    def start_source_frames(self) -> str:
+        from live_source import SourceFrames
+        with self._lock:
+            if self._source_sink is None:
+                self._source_sink = SourceFrames(OUT_W, OUT_H)
+                self._last_source_data = None
+            return self._source_sink.name
+
+    def stop_source_frames(self) -> None:
+        with self._lock:
+            sink, self._source_sink = self._source_sink, None
+            self._last_source_data = None
+            if sink is not None:
+                sink.close()
 
     def pixel_scale(self) -> float:
         """显示器缩放倍数（1.0 / 1.25 / 1.5 …）。
@@ -654,6 +718,9 @@ class WindowStreamCapture:
                     "capture_size": list(self._raw_size or []), "fps": FPS,
                     "capture_fps": rate(self._capture_times),
                     "render_fps": rate(self._render_times),
+                    "jpeg_fps": rate(self._jpeg_times),
+                    "jpeg_active": now < self._jpeg_requested_until,
+                    "source_transport": "shared_memory" if self._source_sink else "",
                     "frame_process_ms": round(sum(self._process_times) / len(self._process_times), 1)
                     if self._process_times else 0.0,
                     "capture_age_ms": round((now - self.latest) * 1000) if self.latest else None}
@@ -905,6 +972,7 @@ class WindowStreamCapture:
             self._conn = None
 
     def stop_preview(self) -> None:
+        self.stop_source_frames()
         self.stop_output()
         with self._lock:
             control, stream, p = self._control, self._stream, self._pa
