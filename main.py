@@ -24,6 +24,7 @@ from dtgame.launcher import find_godot
 from dtgame.player import Player as DTPlayer
 from dtgame.rice import RiceTracker
 from dtgame.stardew import StardewGame, StardewPlayer
+from gift_banner import GiftBanner
 from live_rice import RiceCounter, ai_context as rice_ai_context, validate_settings as validate_rice_settings
 from live_broadcast import Broadcast
 from live_theme import preview_jpeg as theme_preview_jpeg, validate_settings as validate_theme_settings
@@ -88,6 +89,7 @@ class App:
         self.engine_ready = asyncio.Event()
         self.game = GameLauncher(self.cfg)
         self.rice = RiceCounter()
+        self.gift_banner = GiftBanner()
         self.broadcast = Broadcast(self)
         self.livehime = LivehimeController(self)
         self.status = {}

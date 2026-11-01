@@ -357,7 +357,9 @@ class WindowStreamCapture:
         self.theme_compositor = None
         self.theme_error = ""
         self.rice_compositor = None  # 独立直播彩蛋，不依赖皮套开关
+        self.banner_compositor = None  # 送礼横幅，叠在所有画面之上
         self.compositor_error = ""
+        self.banner_error = ""
 
     # ---------------- 预览 ----------------
 
@@ -551,6 +553,13 @@ class WindowStreamCapture:
                 self.rice_error = ""
             except Exception as exc:
                 self.rice_error = f"白饭画面合成失败：{exc}"
+        banner = getattr(self, "banner_compositor", None)
+        if banner is not None:
+            try:
+                banner.apply(canvas)
+                self.banner_error = ""
+            except Exception as exc:
+                self.banner_error = f"送礼横幅合成失败：{exc}"
         data = canvas.tobytes()
         with self._lock:
             sink = self._source_sink

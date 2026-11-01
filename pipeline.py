@@ -246,6 +246,10 @@ class Pipeline:
             self.interaction.tick()
 
     def _enqueue(self, ev, text=None):
+        if ev["type"] == "gift":
+            banner = getattr(self.app, "gift_banner", None)
+            if banner is not None:
+                banner.trigger(ev)
         job = {"id": next(_seq), "type": ev["type"], "ev": ev, "text": text, "ts": time.time(),
                "prio": PRIORITY.get(ev["type"], 3)}
         self.jobs.append(job)
