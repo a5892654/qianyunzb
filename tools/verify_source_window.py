@@ -118,7 +118,8 @@ class SourceWindowTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("不能采集它自己", res["error"])
         b.capture.start_preview.assert_not_called()
         await b.stop_source()
-        self.assertEqual(b.source_hwnd, 0)
+        self.assertFalse(b.source_open)
+        self.assertEqual(b.source_hwnd, 555)   # 隐藏保留句柄，直播姬不用重选
 
     async def test_wrong_client_area_says_so(self):
         b, app = make_app()
@@ -205,18 +206,46 @@ class SourceWindowTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(b.source_open)
         b.stop_preview.assert_awaited_once()          # 自己起的预览要收回去
 
-    async def test_stop_closes_window_and_keeps_user_preview(self):
+    async def test_stop_hides_window_and_next_start_reuses_it(self):
+        """直播姬按窗口句柄记采集目标：关闭只隐藏，下次开沿用同一个窗口。"""
         b, _ = make_app()
         _, _, proc = await self.start(b)
-        result = await b.stop_source()
+        b.source_hwnd = 555
+        with patch.object(live_broadcast, "hide_window", return_value=True) as hide:
+            result = await b.stop_source()
+        self.assertTrue(result["ok"] and result["hidden"])
+        self.assertTrue(b.source_hidden)
+        self.assertFalse(proc.terminated)
+        self.assertFalse(b.source_open)
+        self.assertEqual(b.source_hwnd, 555)
+        hide.assert_called_once_with(555)
+        b.capture.stop_source_frames.assert_not_called()   # 共享内存留给下次复用
+
+        with patch.object(live_broadcast, "show_window", return_value=True) as show,              patch.object(live_broadcast.subprocess, "Popen", side_effect=AssertionError("不应新建窗口")),              patch.object(Broadcast, "fit_source_window", AsyncMock(return_value=(SOURCE_W, SOURCE_H))):
+            again = await b.start_source({"hwnd": 1111, "audio_device": 2222})
+        self.assertTrue(again["ok"] and again["reused"])
+        self.assertEqual(b.source_hwnd, 555)
+        self.assertFalse(b.source_hidden)
+        show.assert_called_once_with(555)
+
+    async def test_destroy_closes_window_and_keeps_user_preview(self):
+        b, _ = make_app()
+        _, _, proc = await self.start(b)
+        b.source_hwnd = 555
+        with patch.object(live_broadcast, "close_window") as close:
+            result = await b.stop_source(destroy=True)
         self.assertTrue(result["ok"])
         self.assertTrue(proc.terminated)
-        self.assertFalse(b.source_open)
+        self.assertEqual(b.source_hwnd, 0)
+        close.assert_called_once_with(555)
+        b.capture.stop_source_frames.assert_called_once()
         b.stop_preview.assert_awaited_once()
 
         b2, _ = make_app(previewing=True)
         _, _, _ = await self.start(b2)
-        await b2.stop_source()
+        b2.source_hwnd = 556
+        with patch.object(live_broadcast, "close_window"):
+            await b2.stop_source(destroy=True)
         b2.stop_preview.assert_not_awaited()          # 预览不是它起的，别替用户关
 
     async def test_platform_start_blocked_while_source_open(self):

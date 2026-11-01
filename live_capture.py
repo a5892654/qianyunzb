@@ -73,7 +73,10 @@ _user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
 _user32.ShowWindow.restype = wintypes.BOOL
 _user32.IsIconic.argtypes = [wintypes.HWND]
 _user32.IsIconic.restype = wintypes.BOOL
+_user32.IsWindowVisible.argtypes = [wintypes.HWND]
+_user32.IsWindowVisible.restype = wintypes.BOOL
 _SW_SHOWNOACTIVATE = 4
+_SW_HIDE = 0
 
 
 def _is_minimized(hwnd: int) -> bool:
@@ -82,6 +85,17 @@ def _is_minimized(hwnd: int) -> bool:
 
 def _show_noactivate(hwnd: int) -> bool:
     return bool(_user32.ShowWindow(wintypes.HWND(hwnd), _SW_SHOWNOACTIVATE))
+
+
+def show_window(hwnd: int) -> bool:
+    # ShowWindow 对「原本隐藏」的窗口显示成功也返回 0，只能看最终可见状态。
+    _user32.ShowWindow(wintypes.HWND(hwnd), _SW_SHOWNOACTIVATE)
+    return bool(_user32.IsWindowVisible(wintypes.HWND(hwnd)))
+
+
+def hide_window(hwnd: int) -> bool:
+    _user32.ShowWindow(wintypes.HWND(hwnd), _SW_HIDE)
+    return not bool(_user32.IsWindowVisible(wintypes.HWND(hwnd)))
 _WM_CLOSE = 0x0010
 _GWL_STYLE = -16
 _WS_CAPTION, _WS_THICKFRAME, _WS_BORDER, _WS_DLGFRAME = 0x00C00000, 0x00040000, 0x00800000, 0x00400000
@@ -1047,8 +1061,11 @@ class WindowStreamCapture:
                     log.warning("采集已 %.0f 秒没有新帧，直播画面可能停住（游戏窗口被遮挡或挂起？）",
                                 info.get("age", 0.0))
 
-    def stop_preview(self) -> None:
-        self.stop_source_frames()
+    def stop_preview(self, keep_source_frames: bool = False) -> None:
+        # 源画面窗口还开着时不能释放共享内存：那个原生窗口把「生产者退出」
+        # 当成结束信号，会自己销毁窗口，下次开启句柄就变了。
+        if not keep_source_frames:
+            self.stop_source_frames()
         self.stop_output()
         with self._lock:
             control, stream, p = self._control, self._stream, self._pa

@@ -253,6 +253,8 @@ def install_fakes():
     mod_c.fit_borderless_client = lambda hwnd, w, h: (w, h)
     mod_c.window_pixel_scale = lambda hwnd, fallback=1.0: fallback
     mod_c.close_window = lambda hwnd: None
+    mod_c.hide_window = lambda hwnd: True
+    mod_c.show_window = lambda hwnd: True
     sys.modules["live_platform"] = mod_p
     sys.modules["live_capture"] = mod_c
 

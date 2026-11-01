@@ -6,7 +6,8 @@ import sys
 import time
 
 from live_capture import (CaptureError, OUT_H, OUT_W, WindowStreamCapture,
-                          close_window, fit_borderless_client, sources, window_pixel_scale)
+                          close_window, fit_borderless_client, hide_window, show_window,
+                          sources, window_pixel_scale)
 from live_overlay import Live2DOverlay, OverlayCompositor, OverlayError, find_edge
 from live_rice import RiceCompositor
 from live_subtitles import SourceSubtitles
@@ -77,13 +78,14 @@ class Broadcast:
         self.source_proc = None
         self.source_hwnd = 0
         self.source_owns_preview = False
+        self.source_hidden = False
 
     @property
     def source_open(self) -> bool:
         if self.source_proc is None:
             return False
         if self.source_proc.poll() is None:
-            return True
+            return not self.source_hidden
         self.capture.stop_source_frames()
         return False
 
@@ -300,7 +302,9 @@ class Broadcast:
         async with self.lock:
             if self.running:
                 return {"ok": False, "error": "请先停止直播，再关闭预览"}
-            await asyncio.to_thread(self.capture.stop_preview)
+            keep_source = (self.source_proc is not None and self.source_proc.poll() is None
+                           and bool(self.source_hwnd))
+            await asyncio.to_thread(self.capture.stop_preview, keep_source)
             await asyncio.to_thread(self.stop_overlay)
             self.overlay_error = ""
             self.phase = "idle"
@@ -322,10 +326,25 @@ class Broadcast:
             return res
         if self.source_open:
             return {"ok": True, "already": True, "title": SOURCE_TITLE}
+        scale = await asyncio.to_thread(self.capture.pixel_scale) or 1.0
+        if (self.source_proc is not None and self.source_proc.poll() is None
+                and self.source_hwnd):
+            # 直播姬按窗口句柄记采集目标：关闭时只隐藏，下次沿用同一个窗口，
+            # 否则每次开窗口句柄都变，直播间里就得重新选一次采集窗口。
+            self.capture.start_source_frames()
+            self.source_hidden = False
+            shown = await asyncio.to_thread(show_window, self.source_hwnd)
+            client = await self.fit_source_window(scale, set()) if shown else (0, 0)
+            if shown and client != (0, 0):
+                self.source_owns_preview = not was_previewing
+                self.app.push("log", {"level": "info", "msg":
+                    f"源画面窗口已重新显示，沿用同一个窗口；直播姬里不用重新选「{SOURCE_TITLE}」"})
+                return {"ok": True, "already": True, "reused": True, "title": SOURCE_TITLE,
+                        "width": SOURCE_W, "height": SOURCE_H, "client": list(client)}
+            await self.stop_source(destroy=True)
         port = int(self.app.cfg.get("web_port", 8787))
         url = f"http://127.0.0.1:{port}/source?w={SOURCE_W}&h={SOURCE_H}"
         # 窗口尺寸先按显示器缩放折算成逻辑像素，零头交给 fit_borderless_client 闭环补齐
-        scale = await asyncio.to_thread(self.capture.pixel_scale) or 1.0
         cmd = [source_python(), SOURCE_SCRIPT, url, SOURCE_TITLE,
                str(round(SOURCE_W / scale)), str(round(SOURCE_H / scale)), "60", "60"]
         # 上一轮残留的同名窗口先记下：按 pid 认不出我们自己的窗口（子进程会 re-exec，
@@ -347,12 +366,12 @@ class Broadcast:
         client = await self.fit_source_window(scale, stale)
         if self.source_proc.poll() is not None or client == (0, 0):
             err = "源画面原生窗口启动失败，请查看本机窗口或共享内存是否可用"
-            await self.stop_source()
+            await self.stop_source(destroy=True)
             self.app.push("log", {"level": "warn", "msg": err})
             return {"ok": False, "error": err}
         self.app.push("log", {"level": "info",
                               "msg": f"源画面窗口已开启：在直播姬里添加「窗口采集」选择「{SOURCE_TITLE}」，"
-                                     f"音频选系统声音（游戏声和千音配音都从这里走）"})
+                                     f"音频选系统声音（游戏声和千音配音都从这里走）；选一次后关掉再开会沿用同一窗口"})
         if client != (SOURCE_W, SOURCE_H):
             self.app.push("log", {"level": "warn",
                                   "msg": f"源画面窗口客户区是 {client[0]}x{client[1]}，"
@@ -385,7 +404,23 @@ class Broadcast:
                 return got
             await asyncio.sleep(0.25)
 
-    async def stop_source(self) -> dict:
+    async def stop_source(self, destroy: bool = False) -> dict:
+        # 直播姬按窗口句柄记采集目标。普通关闭只隐藏窗口、保留进程和共享内存，
+        # 下次开启复用同一个句柄；退出软件或窗口失效时才真正销毁。
+        if (not destroy and self.source_proc is not None and self.source_proc.poll() is None
+                and self.source_hwnd):
+            await asyncio.to_thread(hide_window, self.source_hwnd)
+            self.source_hidden = True
+            owns, self.source_owns_preview = self.source_owns_preview, False
+            self.app.push("log", {"level": "info", "msg":
+                "源画面已隐藏（窗口句柄保留）；下次开启沿用同一个窗口，直播姬里不用重新选"})
+            if not owns:
+                return {"ok": True, "hidden": True}
+            result = await self.stop_preview()
+            if isinstance(result, dict):
+                result.setdefault("hidden", True)
+            return result
+        self.source_hidden = False
         self.capture.stop_source_frames()
         proc, self.source_proc = self.source_proc, None
         hwnd, self.source_hwnd = self.source_hwnd, 0
@@ -496,7 +531,7 @@ class Broadcast:
 
     async def close(self):
         result = await self.stop()
-        await self.stop_source()
+        await self.stop_source(destroy=True)
         await asyncio.to_thread(self.capture.stop_preview)
         await asyncio.to_thread(self.stop_overlay)
         return result

@@ -318,7 +318,7 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
       <li>直播姬的画布/直播设置改成 <b>1920×1080</b>，和源画面窗口一样大；缩放选「适配」，别选「拉伸填满」，否则画面会再糊一次。</li>
       <li>直播姬的音频选<b>系统声音</b>，只采一次：源画面窗口本身无声，游戏声和千音配音由系统声音采集；不要再对这两个进程重复采音。</li>
       <li>在直播姬点「开始直播」。这时千音的「开始直播」会被挡住，避免重复推流。</li>
-      <li>源画面窗口<b>没有标题条</b>（留着会被直播姬一起播进画面），要关它在千音里点「关闭源画面」。</li>
+      <li>源画面窗口<b>没有标题条</b>（留着会被直播姬一起播进画面），要关它在千音里点「关闭源画面」。关闭只是隐藏窗口，下次开启会沿用同一个窗口，直播姬里<b>不需要重新选采集窗口</b>。</li>
     </ol>
   </div>
   <div class="card">
@@ -2201,12 +2201,12 @@ $('#srcStart').onclick = () => broadcastAction(async () => {
   $('#srcState').textContent = '正在开启源画面…';
   const r = await api('/api/broadcast/source', selection);
   if (!r.ok) throw new Error(r.error);
-  toast('源画面已开启：去直播姬添加「窗口采集」，选「千音源画面」');
+  toast(r.reused ? '源画面已重新显示，沿用同一窗口，直播姬不用重新选' : '源画面已开启：去直播姬添加「窗口采集」，选「千音源画面」');
 });
 $('#srcStop').onclick = () => broadcastAction(async () => {
   const r = await api('/api/broadcast/source/stop', {});
   if (!r.ok) throw new Error(r.error);
-  toast('源画面已关闭');
+  toast('源画面已隐藏（窗口保留），下次开启不用在直播姬重选');
 });
 $('#broadcastStart').onclick = () => broadcastAction(async () => {
   await flushConfig();

@@ -54,6 +54,7 @@ _signature(_u, "DestroyWindow", wt.BOOL, wt.HWND)
 _signature(_u, "InvalidateRect", wt.BOOL, wt.HWND, ctypes.c_void_p, wt.BOOL)
 _signature(_u, "UpdateWindow", wt.BOOL, wt.HWND)
 _signature(_u, "ShowWindow", wt.BOOL, wt.HWND, ctypes.c_int)
+_signature(_u, "IsWindowVisible", wt.BOOL, wt.HWND)
 _signature(_u, "PostQuitMessage", None, ctypes.c_int)
 _signature(_u, "PeekMessageW", wt.BOOL, ctypes.POINTER(wt.MSG), wt.HWND, wt.UINT, wt.UINT, wt.UINT)
 _signature(_u, "TranslateMessage", wt.BOOL, ctypes.POINTER(wt.MSG))
@@ -134,13 +135,15 @@ def run(name, title, width, height, x, y, frame_width=1920, frame_height=1080):
         handles = (wt.HANDLE * 2)(frames.event, parent)
         msg = wt.MSG()
         while True:
-            sequence_now, closed = frames.copy_into(bits.value, sequence)
-            if closed:
-                break
-            if sequence_now > sequence:
-                sequence = sequence_now
-                _u.InvalidateRect(hwnd, None, False)
-                _u.UpdateWindow(hwnd)  # paint even when covered by the game
+            # 隐藏时直播姬已经不在采它，没必要每帧再拷 8 MB；重新显示后下一帧会补上。
+            if _u.IsWindowVisible(hwnd):
+                sequence_now, closed = frames.copy_into(bits.value, sequence)
+                if closed:
+                    break
+                if sequence_now > sequence:
+                    sequence = sequence_now
+                    _u.InvalidateRect(hwnd, None, False)
+                    _u.UpdateWindow(hwnd)  # paint even when covered by the game
             while _u.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1):
                 if msg.message == 0x0012:  # WM_QUIT
                     return 0
