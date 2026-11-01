@@ -75,6 +75,7 @@ class PersonaFlowTests(unittest.IsolatedAsyncioTestCase):
         app = object.__new__(App)
         app.cfg = copy.deepcopy(config.DEFAULTS)
         app.bili = SimpleNamespace(client=None)
+        app.game = Mock()
         app.brain = Brain()
         app.brain.openai.history.append({"role": "assistant", "content": "旧语气"})
         app.dt = Player(app._dt_ai(), Mock())

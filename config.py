@@ -99,6 +99,7 @@ DEFAULTS = {
     },
     "interaction": {
         "enabled": True, "idle_seconds": 20, "interval_seconds": 60,
+        "emotional_value": True,
         "follow_enabled": True, "follow_interval_seconds": 180,
         "follow_templates": FOLLOW_REMINDER_TEMPLATES,
         "follow_ai_prompt": FOLLOW_REMINDER_PROMPT,
@@ -175,6 +176,7 @@ DEFAULTS = {
         "title": "恶魔之塔 ZERO｜AI 游戏直播", "area_id": 283,
         "auto_stop_minutes": 0,
         "auto_stop_line": "下了下了，吃白饭去了，拜拜～",
+        "livehime": {"path": "", "hotkey": "", "click_x": 0.0, "click_y": 0.0},
         "schedule": {"enabled": False, "mode": "managed", "start_time": "20:00", "stop_time": "23:00",
                      "window_title": "", "audio_name": "", "last_start": "", "last_stop": ""},
     },

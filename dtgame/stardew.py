@@ -23,6 +23,7 @@ import aiohttp
 
 from brain import QoderSession
 from config import DEFAULT_PERSONA, LOG_DIR
+from emotional_value import EMOTIONAL_VALUE_PROMPT
 from live_context import mentions_rice, rice_question
 
 log = logging.getLogger("stardew")
@@ -553,6 +554,8 @@ class StardewPlayer:
 {PERSONA}
 """
         prompt = prompt.replace("{CATALOG}", self._catalog).replace("{PERSONA}", persona)
+        if self.cfg.get("emotional_value", True):
+            prompt += EMOTIONAL_VALUE_PROMPT
         options = [{"name": e["name"], "motion": e.get("motion", ""), "keywords": e.get("keywords", "")}
                    for e in self.emotions() if e.get("name")]
         if options:

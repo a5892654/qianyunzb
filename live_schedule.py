@@ -3,6 +3,7 @@ import re
 from datetime import datetime, timedelta
 
 import config
+from live_livehime import LivehimeError, parse_hotkey, resolve_path
 
 _CLOCK = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d\Z")
 
@@ -15,6 +16,11 @@ class DailyBroadcastSchedule:
     FAREWELL_LEAD_SECONDS = 30
     TIMER_SECONDS_PER_MINUTE = 60
     AUTO_CHECK_SECONDS = 15
+    LIVEHIME_READY_TIMEOUT = 45
+    LIVE_STATUS_TRIES = 20
+    LIVE_STATUS_INTERVAL = 1.5
+    LIVEHIME_STOP_TRIES = 10
+    LIVEHIME_STOP_INTERVAL = 1.0
 
     def __init__(self, app, clock=datetime.now):
         self.app = app
@@ -57,15 +63,17 @@ class DailyBroadcastSchedule:
         if not isinstance(data, dict) or type(data.get("enabled")) is not bool:
             raise ValueError("请设置是否启用每日直播计划")
         mode = data.get("mode", self.settings.get("mode", "managed"))
-        if mode not in ("managed", "stop_only"):
-            raise ValueError("请选择自动开停播或直播姬仅定时停播")
+        if mode not in ("managed", "stop_only", "livehime"):
+            raise ValueError("请选择自动开停播、直播姬自动开停播或直播姬仅定时停播")
         start = data.get("start_time", self.settings["start_time"])
         stop = data.get("stop_time")
         if not isinstance(start, str) or not _CLOCK.fullmatch(start) or not isinstance(stop, str) or not _CLOCK.fullmatch(stop):
             raise ValueError("开播和停播时间必须为 HH:MM 格式")
-        if start == stop and mode == "managed":
+        if start == stop and mode in ("managed", "livehime"):
             raise ValueError("开播和停播时间不能相同")
-        updated = {**self.settings, "enabled": data["enabled"], "mode": mode, "start_time": start, "stop_time": stop}
+        updated = {k: v for k, v in self.settings.items() if k != "livehime"}
+        updated.update(enabled=data["enabled"], mode=mode, start_time=start, stop_time=stop)
+        livehime = self._livehime_settings(data)
         title, area = self.app.cfg["broadcast"]["title"], self.app.cfg["broadcast"]["area_id"]
         if data["enabled"]:
             if data.get("authorized") is not True:
@@ -77,34 +85,83 @@ class DailyBroadcastSchedule:
             if not info.get("ok") or not info.get("logged_in") or not info.get("room_id"):
                 raise ValueError(info.get("error") or "请先扫码登录正在直播的主播账号")
             updated["external_room_id"] = int(info["room_id"])
+        elif data["enabled"] and mode == "livehime":
+            self._validate_livehime(livehime)
+            info = await self.app.broadcast.account()
+            if not info.get("ok") or not info.get("logged_in") or not info.get("room_id"):
+                raise ValueError(info.get("error") or "请先扫码登录直播姬使用的主播账号")
+            updated["external_room_id"] = int(info["room_id"])
+            updated.update(await self._source_names(data))
         elif data["enabled"]:
             title, area = data.get("title"), data.get("area_id")
             if not isinstance(title, str) or not 1 <= len(title.strip()) <= 60 or type(area) is not int or area <= 0:
                 raise ValueError("请先填写直播标题并选择分区")
-            hwnd, audio = self.app.broadcast.selection(data)
-            capture = self.app.broadcast.capture
-            if not capture.previewing or capture.hwnd != hwnd or capture.audio_device != audio or capture.error:
-                raise ValueError("请先预览选中的游戏窗口与声音，再保存启用计划")
-            sources = await self.app.broadcast.sources()
-            if not sources.get("ok"):
-                raise ValueError(sources.get("error") or "无法读取直播采集源")
-            windows = [w for w in sources["windows"] if w["hwnd"] == hwnd]
-            devices = [a for a in sources["audio"] if a["id"] == audio]
-            if len(windows) != 1 or len(devices) != 1:
-                raise ValueError("选中的采集源已变化，请刷新并重新预览")
-            window_title, audio_name = windows[0]["title"], devices[0]["name"]
-            if sum(w["title"] == window_title for w in sources["windows"]) != 1 or sum(a["name"] == audio_name for a in sources["audio"]) != 1:
-                raise ValueError("窗口或声音设备存在重名，请关闭重复窗口后再保存计划")
-            updated.update(window_title=window_title, audio_name=audio_name)
+            updated.update(await self._source_names(data))
         if not data["enabled"] or mode == "stop_only":
             self.abort_start = True
         if self._cancel_daily_farewell():
             updated["last_stop"] = ""
-        self.app.cfg["broadcast"].update(schedule=updated, title=title.strip(), area_id=area)
+        self.app.cfg["broadcast"].update(schedule=updated, title=title.strip(), area_id=area, livehime=livehime)
         config.save(self.app.cfg)
         self.last_minute = self.clock().strftime("%Y-%m-%d %H:%M")
         self.last_result = None
         return self.status()
+
+    def _livehime_settings(self, data):
+        current = dict(self.app.cfg["broadcast"].get("livehime") or {})
+        incoming = data.get("livehime")
+        if isinstance(incoming, dict):
+            for key in ("path", "hotkey", "click_x", "click_y"):
+                if key in incoming:
+                    current[key] = incoming[key]
+        current["path"] = str(current.get("path") or "").strip()
+        current["hotkey"] = str(current.get("hotkey") or "").strip()
+        if isinstance(incoming, dict) and "hotkey" in incoming and current["hotkey"]:
+            try:
+                current["hotkey"] = parse_hotkey(current["hotkey"]).label
+            except LivehimeError as error:
+                raise ValueError(str(error)) from None
+        for key in ("click_x", "click_y"):
+            try:
+                current[key] = float(current.get(key) or 0)
+            except (TypeError, ValueError):
+                current[key] = 0.0
+        return current
+
+    def _validate_livehime(self, livehime):
+        if livehime.get("hotkey"):
+            try:
+                livehime["hotkey"] = parse_hotkey(livehime["hotkey"]).label
+            except LivehimeError as error:
+                raise ValueError(str(error)) from None
+        x, y = livehime.get("click_x", 0), livehime.get("click_y", 0)
+        click_ok = 0.01 <= x <= 0.99 and 0.01 <= y <= 0.99
+        if not livehime.get("hotkey") and not click_ok:
+            raise ValueError("请先在直播姬「设置 → 快捷键」给开始/停止直播绑定快捷键，并把键名填到定时计划")
+        path, source = resolve_path(livehime.get("path"))
+        if source == "config_missing":
+            raise ValueError("配置的直播姬路径不存在：" + str(livehime.get("path") or ""))
+        if not path:
+            raise ValueError("没有找到 livehime.exe，请填写直播姬安装目录里的 livehime.exe")
+        livehime["path"] = path
+
+    async def _source_names(self, data):
+        hwnd, audio = self.app.broadcast.selection(data)
+        capture = self.app.broadcast.capture
+        if not capture.previewing or capture.hwnd != hwnd or capture.audio_device != audio or capture.error:
+            raise ValueError("请先预览选中的游戏窗口与声音，再保存启用计划")
+        sources = await self.app.broadcast.sources()
+        if not sources.get("ok"):
+            raise ValueError(sources.get("error") or "无法读取直播采集源")
+        windows = [w for w in sources["windows"] if w["hwnd"] == hwnd]
+        devices = [a for a in sources["audio"] if a["id"] == audio]
+        if len(windows) != 1 or len(devices) != 1:
+            raise ValueError("选中的采集源已变化，请刷新并重新预览")
+        window_title, audio_name = windows[0]["title"], devices[0]["name"]
+        if (sum(w["title"] == window_title for w in sources["windows"]) != 1
+                or sum(a["name"] == audio_name for a in sources["audio"]) != 1):
+            raise ValueError("窗口或声音设备存在重名，请关闭重复窗口后再保存计划")
+        return {"window_title": window_title, "audio_name": audio_name}
 
     def status(self):
         now = self.clock()
@@ -117,7 +174,8 @@ class DailyBroadcastSchedule:
                 if next_time <= now or settings["last_" + action] == next_time.date().isoformat():
                     next_time += timedelta(days=1)
                 upcoming["next_" + action] = next_time.strftime("%Y-%m-%d %H:%M")
-        return {"ok": True, **settings, **upcoming, "last_result": self.last_result,
+        return {"ok": True, **settings, "livehime": dict(self.app.cfg["broadcast"].get("livehime") or {}),
+                **upcoming, "last_result": self.last_result,
                 "active_action": self.active_action, "local_time": now.strftime("%Y-%m-%d %H:%M"),
                 "external_timer": {"enabled": self.timer_deadline is not None,
                                    "auto_minutes": self.app.cfg["broadcast"].get("auto_stop_minutes", 0),
@@ -194,7 +252,7 @@ class DailyBroadcastSchedule:
                 if action == "stop":
                     self.cancel_external_timer()
                     self._cancel_local_timer()
-                    result = await self._stop_broadcast(external=self.settings.get("mode") == "stop_only",
+                    result = await self._stop_broadcast(external=self.settings.get("mode") in ("stop_only", "livehime"),
                                                         room_id=self.settings.get("external_room_id", 0),
                                                         farewell=self.farewell_line(), wait_seconds=wait_seconds,
                                                         stop_on_farewell_error=True)
@@ -236,6 +294,8 @@ class DailyBroadcastSchedule:
         if self.closing or self.abort_start or not self.settings["enabled"] or not self.within_broadcast_window():
             return {"ok": True, "message": "已取消本次定时开播"}
         selection = {"hwnd": windows[0]["hwnd"], "audio_device": devices[0]["id"]}
+        if self.settings.get("mode") == "livehime":
+            return await self._start_livehime(selection)
         preview = await self.app.broadcast.preview(selection)
         if not preview.get("ok"):
             return preview
@@ -257,6 +317,77 @@ class DailyBroadcastSchedule:
             asyncio.create_task(self.app.connect())
             self.arm_local_timer()
         return result
+
+    async def _start_livehime(self, selection):
+        info = await self.app.broadcast.account()
+        if not info.get("ok") or not info.get("logged_in"):
+            return {"ok": False, "error": info.get("error") or "定时开播未执行：无法确认主播登录状态，请重新扫码登录"}
+        if not int(info.get("room_id") or 0):
+            return {"ok": False, "error": info.get("error") or "定时开播未执行：该账号还没有个人直播间"}
+        if int(info.get("live_status") or 0) == 1:
+            return await self._adopt_live_room(info, "直播姬已在直播，跳过重复开播")
+        if self.closing or self.abort_start or not self.settings["enabled"] or not self.within_broadcast_window():
+            return {"ok": True, "message": "已取消本次定时开播"}
+        # 源画面先开，直播姬的场景才能采到；它保持开启，下一场直接复用同一窗口。
+        source = await self.app.broadcast.start_source(selection)
+        if not source.get("ok"):
+            return source
+        if self.closing or self.abort_start or not self.settings["enabled"] or not self.within_broadcast_window():
+            return {"ok": True, "message": "已取消本次定时开播"}
+        ready = await self.app.livehime.ensure_running(self.LIVEHIME_READY_TIMEOUT)
+        if not ready.get("ok"):
+            return ready
+        if self.closing or self.abort_start or not self.settings["enabled"] or not self.within_broadcast_window():
+            return {"ok": True, "message": "已取消本次定时开播"}
+        trigger = await asyncio.to_thread(self.app.livehime.trigger, "start")
+        if not trigger.get("ok"):
+            return trigger
+        self.app.push("log", {"level": "info", "msg": trigger.get("message") or "已通知直播姬开播"})
+        live = await self._wait_live_started()
+        if live is None:
+            return {"ok": False, "error": "已通知直播姬开播，但 B 站 30 秒内没有变成直播中。"
+                                          "请检查直播姬已登录同一账号、快捷键绑定为开始/停止直播、"
+                                          "场景里有「千音源画面」。源画面已保留，修复后可直接手动重试。"}
+        room_id = int(live.get("room_id") or 0)
+        if self.closing or self.stop_requested:
+            return {"ok": True, "message": "已请求取消本次定时开播，等待停止完成"}
+        if self.abort_start or not self.settings["enabled"] or not self.within_broadcast_window():
+            stopped = await self._stop_broadcast(external=True, room_id=room_id)
+            return {"ok": True, "message": "已取消本次定时开播并停止直播"} if stopped.get("ok") else stopped
+        return await self._adopt_live_room(live, f"直播姬已开播，直播间 {room_id}")
+
+    async def _wait_live_started(self):
+        for _ in range(self.LIVE_STATUS_TRIES):
+            if self.closing:
+                return None
+            try:
+                info = await self.app.broadcast.account()
+            except Exception:
+                info = {}
+            if info.get("ok") and info.get("logged_in") and int(info.get("live_status") or 0) == 1:
+                return info
+            await asyncio.sleep(self.LIVE_STATUS_INTERVAL)
+        return None
+
+    async def _wait_live_stopped(self):
+        for _ in range(self.LIVEHIME_STOP_TRIES):
+            try:
+                info = await self.app.broadcast.account()
+            except Exception:
+                info = {}
+            if info.get("ok") and info.get("logged_in") and int(info.get("live_status") or 0) == 0:
+                return True
+            await asyncio.sleep(self.LIVEHIME_STOP_INTERVAL)
+        return False
+
+    async def _adopt_live_room(self, info, message):
+        room_id = int(info.get("room_id") or 0)
+        if not room_id:
+            return {"ok": False, "error": "直播姬已开播，但读取不到直播间号，请刷新账号后重试"}
+        self.app.cfg["room_id"] = room_id
+        config.save(self.app.cfg)
+        asyncio.create_task(self.app.connect())
+        return {"ok": True, "room_id": room_id, "message": message}
 
     def farewell_line(self):
         line = str(self.app.cfg["broadcast"].get("auto_stop_line") or "").strip()
@@ -296,6 +427,16 @@ class DailyBroadcastSchedule:
             self.app.push("log", {"level": "warn", "msg": error + "；继续执行定时停播"})
         return None
 
+    async def _stop_autoplay(self):
+        if not (getattr(self.app, "dt", None) or getattr(self.app, "dt_task", None)):
+            return
+        try:
+            await self.app.stop_dt()
+        except Exception:
+            self.app.push("log", {"level": "warn", "msg": "停播时没能暂停代打，请手动点「暂停代打」"})
+            return
+        self.app.push("log", {"level": "info", "msg": "停播，代打已同步暂停"})
+
     async def _stop_broadcast(self, *, external=False, room_id=0, farewell="", wait_seconds=0,
                               stop_on_farewell_error=False):
         deadline = asyncio.get_running_loop().time() + wait_seconds
@@ -305,7 +446,7 @@ class DailyBroadcastSchedule:
             info = await self.app.broadcast.account()
             if not info.get("ok") or not info.get("logged_in"):
                 return {"ok": False, "error": info.get("error") or "无法确认主播直播状态，请重新登录"}
-            if external and int(info.get("room_id") or 0) != room_id:
+            if external and room_id and int(info.get("room_id") or 0) != room_id:
                 return {"ok": False, "error": "主播账号或直播间已变化，请重新设置停播倒计时"}
             room_id = int(info.get("room_id") or 0)
             live = int(info.get("live_status") or 0) == 1 and bool(room_id)
@@ -315,9 +456,22 @@ class DailyBroadcastSchedule:
                 return error
         # 提前告别，但保留原定停止时刻；合成较慢时优先让最后一句说完。
         await asyncio.sleep(max(0, deadline - asyncio.get_running_loop().time()))
+        if local or live:
+            await self._stop_autoplay()
         if local:
             return await self.app.broadcast.stop()
         if live or external:
+            if live and self.settings.get("mode") == "livehime":
+                # 先按直播姬自己的开关停推流，再用 B 站接口兜底结束直播间。
+                triggered = await asyncio.to_thread(self.app.livehime.trigger, "stop")
+                if triggered.get("ok"):
+                    self.app.push("log", {"level": "info",
+                                          "msg": triggered.get("message") or "已通知直播姬停播"})
+                    await self._wait_live_stopped()
+                else:
+                    self.app.push("log", {"level": "warn",
+                                          "msg": "直播姬停播快捷键没发出去：" + str(triggered.get("error") or "未知原因")
+                                                 + "；继续结束 B站直播间"})
             return await self.app.broadcast.stop_external(room_id)
         return {"ok": True, "message": "当前未在直播，无需定时停播"}
 
@@ -480,6 +634,7 @@ class DailyBroadcastSchedule:
 
     async def stop_now(self, *, farewell="", external=False, room_id=0, stop_on_farewell_error=False,
                        wait_seconds=0):
+        external = external or (self.settings.get("mode") == "livehime" and not self.app.broadcast.running)
         self.cancel_external_timer()
         self._cancel_local_timer()
         if not farewell:

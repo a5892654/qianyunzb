@@ -22,6 +22,8 @@ def make_app():
     app.engine_ready = asyncio.Event()
     app.game = Mock()
     app.game.running.return_value = False
+    app.rice = Mock()
+    app.rice_awarded = Mock()
     app.pipe = Mock()
     app.push = Mock()
     app._bridge_alive = Mock(return_value=True)

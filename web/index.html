@@ -292,8 +292,8 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
   <div class="card">
     <h3>用直播姬开播（千音出画面）</h3>
     <div class="row"><span class="hint" id="externalTimerStatus" role="status">设置停播分钟数后自动监测开播</span><button class="btn" id="externalTimerCancel" disabled>关闭自动停播</button></div>
-    <p class="hint">登录同一个主播账号，设置上方“播多久自动停播”，直播姬开播后会自动计时、到点自动结束B站直播间。能读取本场开播时间时，重启后继续按原时间计时；否则从首次检测到开播算起。每天固定时间下播可选下方“直播姬 / OBS：仅定时停播”。请保持本工具运行。</p>
-    <p class="hint">B站对千音这条网页开播通道要求人脸认证，直播姬那条通道不用。这个模式<b>不碰 B站开播接口</b>：千音把「游戏画面 + 皮套 + 字幕」合成好开成一个窗口，直播姬直接采集它，开播由直播姬点。</p>
+    <p class="hint">登录同一个主播账号，设置上方“播多久自动停播”，直播姬开播后会自动计时、到点自动结束B站直播间。能读取本场开播时间时，重启后继续按原时间计时；否则从首次检测到开播算起。每天固定时间下播可选下方“直播姬 / OBS：仅定时停播”；要连开播也自动，选“直播姬：自动开播和停播”。请保持本工具运行。</p>
+    <p class="hint">B站对千音这条网页开播通道要求人脸认证，直播姬那条通道不用。这个模式<b>不碰 B站开播接口</b>：千音把「游戏画面 + 皮套 + 字幕」合成好开成一个窗口，直播姬直接采集它。开播可手动点，也可在下方「每日定时直播」选「直播姬：自动开播和停播」，由千音发送直播姬的开始/停止快捷键。</p>
     <div class="row">
       <button class="btn b" id="srcStart">开启源画面</button>
       <button class="btn" id="srcStop">关闭源画面</button>
@@ -328,12 +328,20 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
   </div>
   <div class="card">
     <h3>每日定时直播</h3>
-    <div class="row"><label class="c"><input type="checkbox" id="scheduleEnabled">启用每日直播计划</label><label class="f" style="max-width:300px">计划模式<select id="scheduleMode"><option value="managed">本工具：自动开播和停播</option><option value="stop_only">直播姬 / OBS：仅定时停播</option></select></label><span style="flex:1"></span><span class="hint" id="scheduleLocalTime"></span></div>
+    <div class="row"><label class="c"><input type="checkbox" id="scheduleEnabled">启用每日直播计划</label><label class="f" style="max-width:300px">计划模式<select id="scheduleMode"><option value="managed">本工具：自动开播和停播</option><option value="livehime">直播姬：自动开播和停播</option><option value="stop_only">直播姬 / OBS：仅定时停播</option></select></label><span style="flex:1"></span><span class="hint" id="scheduleLocalTime"></span></div>
     <div class="row"><label class="f">每天开播时间<input type="time" id="scheduleStartTime" value="20:00" step="60"></label><label class="f">每天停播时间<input type="time" id="scheduleStopTime" value="23:00" step="60"></label><button class="btn p" id="scheduleSave" style="margin-top:18px">保存计划</button><button class="btn" id="scheduleDisable" style="margin-top:18px">关闭定时</button></div>
+    <div class="row" id="livehimeRow" style="display:none">
+      <label class="f" style="max-width:420px">直播姬程序路径<input id="livehimePath" placeholder="留空自动查找 livehime.exe"></label>
+      <label class="f" style="max-width:220px">开始/停止直播快捷键<input id="livehimeHotkey" placeholder="例如 F9"></label>
+      <button class="btn" id="livehimeCheck" style="margin-top:18px">检测直播姬</button>
+      <button class="btn" id="livehimeCalibrate" style="margin-top:18px">校准开始按钮</button>
+      <span class="hint" id="livehimeState" style="margin-top:18px" role="status"></span>
+    </div>
+    <div class="hint" id="livehimeHint" style="display:none">先在直播姬「设置 → 快捷键」给「开始/停止直播」绑定一个键（例如 F9）填到左边，到点由千音发送该键；版本不支持快捷键时，可点「校准开始按钮」，然后在 3 秒内把鼠标移到直播姬的「开始直播」按钮上，并清空快捷键（留空）改用点击。直播姬需登录同一主播账号，场景已添加「千音源画面」窗口采集，画布 1920×1080，音频选系统声音。</div>
     <div class="hint" id="scheduleStatus">定时直播未启用。</div>
     <div class="hint" id="scheduleSource" style="margin-top:6px"></div>
     <div class="hint" id="scheduleResult" role="status" style="margin-top:6px"></div>
-    <p class="hint">按电脑本地时间每天重复。本工具开停播模式需先登录、选择采集源并预览，停播时间早于开播时间则跨到次日。直播姬 / OBS 模式只需登录主播账号并设置停播时间，无需预览，也不会自动开播；到点会通过B站结束该账号的直播间。</p>
+    <p class="hint">按电脑本地时间每天重复。本工具和直播姬自动开停播模式需先登录、选择采集源并预览，停播时间早于开播时间则跨到次日；直播姬模式到点会自动拉起游戏、代打和千音源画面，再发送直播姬的开播/停播快捷键，并由千音核对 B站直播间状态。直播姬 / OBS 仅定时停播模式只需登录主播账号并设置停播时间，无需预览，也不会自动开播；到点会通过B站结束该账号的直播间。</p>
     <p class="hint">软件需保持运行，游戏窗口需提前打开且不要最小化；关机、睡眠或退出软件时不触发，也不会补开错过的直播。关闭定时不会立刻停止当前直播；退出或切换 B站账号会关闭定时，需要重新确认启用。</p>
   </div>
   <div class="card">
@@ -562,6 +570,8 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
     <h3>人设与说话风格</h3>
     <textarea data-k="ai.persona" style="min-height:220px"></textarea>
     <p class="hint">弹幕聊天、主动互动和游戏解说共用这份人设，保存后下次生成生效。默认嘴硬心软、傲娇可爱，偶尔顺着现场说个抽象梗；认真回应时也会自然收住。</p>
+    <div class="row"><label class="c"><input type="checkbox" data-k="interaction.emotional_value">加强陪伴感与情绪回应</label></div>
+    <p class="hint">分享烦心事时温和接住，好消息一起庆祝，被夸时自然开心；游戏关键时刻也更有情绪起伏。关心不催回应，安静看直播也欢迎。</p>
     <div class="row" style="margin-top:10px">
       <label class="f">每次回复最多字数<input type="number" data-k="ai.max_chars"></label>
       <label class="f">超时秒数<input type="number" data-k="ai.timeout"></label>
@@ -2213,22 +2223,33 @@ async function pollBroadcast() {
     updateBroadcastButtons();
   } catch (e) { $('#broadcastError').textContent = '直播服务连接失败，请检查软件是否仍在运行。'; }
 }
+function syncScheduleMode() {
+  const mode = $('#scheduleMode').value || 'managed';
+  $('#scheduleStartTime').disabled = mode === 'stop_only';
+  const show = mode === 'livehime';
+  $('#livehimeRow').style.display = show ? '' : 'none';
+  $('#livehimeHint').style.display = show ? '' : 'none';
+}
 async function pollSchedule(fill = false) {
   try {
     const r = await api('/api/broadcast/schedule');
     if (!r.ok) throw new Error(r.error || '定时计划读取失败');
     scheduleInfo = r;
+    const mode = r.mode || 'managed';
     if (fill || !scheduleDirty) {
       $('#scheduleEnabled').checked = r.enabled;
       $('#scheduleStartTime').value = r.start_time;
       $('#scheduleStopTime').value = r.stop_time;
-      $('#scheduleMode').value = r.mode || 'managed';
+      $('#scheduleMode').value = mode;
+      $('#livehimePath').value = r.livehime?.path || '';
+      $('#livehimeHotkey').value = r.livehime?.hotkey || '';
     }
-    const stopOnly = (r.mode || 'managed') === 'stop_only';
-    $('#scheduleStartTime').disabled = $('#scheduleMode').value === 'stop_only';
+    const stopOnly = mode === 'stop_only';
+    const livehimeMode = mode === 'livehime';
+    syncScheduleMode();
     $('#scheduleLocalTime').textContent = '本机时间 ' + r.local_time;
-    $('#scheduleStatus').textContent = r.enabled ? (stopOnly ? `直播姬 / OBS 每日 ${r.stop_time} 停播；下次停播 ${r.next_stop}。` : `每日 ${r.start_time} 开播、${r.stop_time} 停播${r.stop_time < r.start_time ? '（次日）' : ''}；下次开播 ${r.next_start}，下次停播 ${r.next_stop}。`) : '定时直播未启用。';
-    $('#scheduleSource').textContent = stopOnly ? `仅停止已登录主播的直播间${r.external_room_id ? ' ' + r.external_room_id : ''}，无需采集源预览。` : r.window_title ? `已保存窗口：${r.window_title}；声音：${r.audio_name}` : '启用前请先预览上方选中的窗口和声音。';
+    $('#scheduleStatus').textContent = r.enabled ? (stopOnly ? `直播姬 / OBS 每日 ${r.stop_time} 停播；下次停播 ${r.next_stop}。` : livehimeMode ? `直播姬每日 ${r.start_time} 开播、${r.stop_time} 停播${r.stop_time < r.start_time ? '（次日）' : ''}；下次开播 ${r.next_start}，下次停播 ${r.next_stop}。` : `每日 ${r.start_time} 开播、${r.stop_time} 停播${r.stop_time < r.start_time ? '（次日）' : ''}；下次开播 ${r.next_start}，下次停播 ${r.next_stop}。`) : '定时直播未启用。';
+    $('#scheduleSource').textContent = stopOnly ? `仅停止已登录主播的直播间${r.external_room_id ? ' ' + r.external_room_id : ''}，无需采集源预览。` : livehimeMode ? `${r.window_title ? `已保存窗口：${r.window_title}；声音：${r.audio_name}。` : '启用前请先预览上方选中的窗口和声音。'}直播姬：${r.livehime?.path || '自动查找 livehime.exe'}；快捷键 ${r.livehime?.hotkey || '未设置'}。` : r.window_title ? `已保存窗口：${r.window_title}；声音：${r.audio_name}` : '启用前请先预览上方选中的窗口和声音。';
     const timer = r.external_timer || {};
     const autoMinutes = Number(timer.auto_minutes ?? CFG.broadcast?.auto_stop_minutes ?? 0);
     $('#externalTimerStatus').textContent = timer.enabled ? `房间 ${timer.room_id} · ${timer.deadline} 自动结束直播间 · 剩余 ${Math.ceil(timer.remaining_seconds / 60)} 分钟` : timer.message || (autoMinutes > 0 ? '已开启自动停播，等待检测直播姬开播' : '自动停播已关闭，设置分钟数即可启用');
@@ -2241,19 +2262,30 @@ async function pollSchedule(fill = false) {
 }
 ['scheduleEnabled', 'scheduleStartTime', 'scheduleStopTime', 'scheduleMode'].forEach(id => $('#' + id).addEventListener('change', () => {
   scheduleDirty = true;
-  $('#scheduleStartTime').disabled = $('#scheduleMode').value === 'stop_only';
+  syncScheduleMode();
 }));
+['livehimePath', 'livehimeHotkey'].forEach(id => $('#' + id).addEventListener('input', () => { scheduleDirty = true; }));
 async function saveSchedule(disable = false) {
   if (scheduleBusy) return;
   const enabled = !disable && $('#scheduleEnabled').checked;
   const start = disable ? scheduleInfo.start_time : $('#scheduleStartTime').value;
   const stop = disable ? scheduleInfo.stop_time : $('#scheduleStopTime').value;
   const mode = (disable ? scheduleInfo.mode : $('#scheduleMode').value) || 'managed';
-  if (enabled && !confirm(mode === 'stop_only' ? `允许每天 ${stop} 自动结束已登录主播账号的B站直播间？适用于直播姬 / OBS 开播，不会自动开播。` : `允许每天 ${start} 自动公开开播、${stop} 自动停播？将使用上方标题、分区和已预览的窗口与声音，不再弹出开播确认。`)) return;
+  const confirmText = mode === 'stop_only'
+    ? `允许每天 ${stop} 自动结束已登录主播账号的B站直播间？适用于直播姬 / OBS 开播，不会自动开播。`
+    : mode === 'livehime'
+      ? `允许每天 ${start} 自动拉起游戏、代打和千音源画面，并用直播姬的开始/停止快捷键开播、${stop} 停播？直播姬会使用它自己记住的标题和分区。`
+      : `允许每天 ${start} 自动公开开播、${stop} 自动停播？将使用上方标题、分区和已预览的窗口与声音，不再弹出开播确认。`;
+  if (enabled && !confirm(confirmText)) return;
   scheduleBusy = true; $('#scheduleSave').disabled = $('#scheduleDisable').disabled = true;
   try {
     const selection = mode === 'stop_only' ? {} : {...broadcastSelection(), title: $('#broadcastTitle').value.trim(), area_id: Number($('#broadcastArea').value)};
-    const r = await api('/api/broadcast/schedule', {enabled, mode, start_time: start, stop_time: stop, authorized: enabled, ...selection});
+    const savedLivehime = scheduleInfo.livehime || {};
+    const livehime = mode === 'livehime' ? {
+      path: disable ? (savedLivehime.path || '') : $('#livehimePath').value.trim(),
+      hotkey: disable ? (savedLivehime.hotkey || '') : $('#livehimeHotkey').value.trim()
+    } : undefined;
+    const r = await api('/api/broadcast/schedule', {enabled, mode, start_time: start, stop_time: stop, authorized: enabled, ...selection, ...(livehime ? {livehime} : {})});
     if (!r.ok) throw new Error(r.error || '保存定时计划失败');
     scheduleDirty = false;
     $('#scheduleResult').textContent = '';
@@ -2284,6 +2316,29 @@ async function cancelExternalTimer() {
   }
 }
 $('#externalTimerCancel').onclick = cancelExternalTimer;
+$('#livehimeCheck').onclick = async () => {
+  const state = $('#livehimeState');
+  state.style.color = ''; state.textContent = '检测中…';
+  try {
+    const query = new URLSearchParams({path: $('#livehimePath').value.trim(), hotkey: $('#livehimeHotkey').value.trim()});
+    const r = await api('/api/broadcast/livehime/check?' + query.toString());
+    if (!r.ok) throw new Error(r.error || '没有找到直播姬');
+    const hotkey = r.hotkey ? (r.hotkey_ok ? r.hotkey : '快捷键格式有误：' + r.hotkey_error) : '快捷键未设置';
+    state.textContent = `${r.running ? '直播姬正在运行' : '直播姬未运行（到点会自动启动）'} · ${r.path || '未找到 livehime.exe'} · ${hotkey}`;
+    state.style.color = r.hotkey_ok ? '' : 'var(--red)';
+  } catch (e) { state.style.color = 'var(--red)'; state.textContent = e.message || String(e); }
+};
+$('#livehimeCalibrate').onclick = async () => {
+  if (!confirm('点确定后 3 秒内，把鼠标移到直播姬的「开始直播」按钮上（不要点击），千音会记录位置。')) return;
+  const state = $('#livehimeState');
+  state.style.color = ''; state.textContent = '3 秒内把鼠标移到直播姬的「开始直播」按钮上…';
+  try {
+    const r = await api('/api/broadcast/livehime/calibrate', {delay: 3});
+    if (!r.ok) throw new Error(r.error || '校准失败');
+    state.textContent = `已记录按钮位置：窗口内 ${(r.x * 100).toFixed(1)}% / ${(r.y * 100).toFixed(1)}%；快捷键优先，校准只在快捷键不可用时使用。`;
+    toast('已记录直播姬开始按钮位置');
+  } catch (e) { state.style.color = 'var(--red)'; state.textContent = e.message || String(e); toast(state.textContent); }
+};
 setInterval(pollSchedule, 5000); pollSchedule();
 function syncPreviewStream(show) {
   for (const [id, section] of [['broadcastPreviewImage', 'broadcast'], ['layoutPreviewImage', 'layout'], ['themeLiveImage', 'themes']]) {

@@ -10,6 +10,7 @@ from config import FOLLOW_REMINDER_PROMPT, FOLLOW_REMINDER_TEMPLATES
 from brain import similar_reply, varied_line
 from conversation import Conversation
 from live_context import mentions_rice, rice_question
+from emotional_value import CARE_CLOSINGS, enabled as emotional_value_enabled, viewer_cue
 
 log = logging.getLogger("interaction")
 
@@ -116,8 +117,17 @@ class AudienceInteraction:
             return
         if rice_question(ev.get("text", "")) or mentions_rice(text):
             return
-        self.dialogue.append({"at": self.clock(), "name": ev.get("name", ""),
+        private = self.personal_reply(ev)
+        self.dialogue.append({"at": self.clock(), "name": ev.get("name", ""), "private": private,
                               "text": str(ev.get("text", ""))[:300], "reply": text[:200]})
+
+    def personal_reply(self, ev):
+        if not emotional_value_enabled(self.app.cfg):
+            return False
+        cue = viewer_cue(ev.get("text", ""))
+        topic = self.conversation.current()
+        return bool(cue and cue.private) or bool(
+            topic and topic.get("private") and topic.get("viewer") == self.conversation.viewer(ev))
 
     def ready(self, *, follow=False):
         self.sync_room()
@@ -130,6 +140,7 @@ class AudienceInteraction:
         audience = bool(self.viewers) or (follow and getattr(broadcast, "phase", "") == "live")
         activity = self.last_activity if self.last_activity is not None else self.room_started
         return (enabled and self.room is not None and audience
+                and not (follow and emotional_value_enabled(self.app.cfg) and now < self.conversation.care_until)
                 and not self.pipe.paused and not self.pipe.pending_replies and not self.pipe.merging
                 and getattr(schedule, "active_action", "") != "farewell"
                 and getattr(broadcast, "phase", "") != "stopping"
@@ -160,7 +171,13 @@ class AudienceInteraction:
         self.sync_room()
         if (ev.get("_interaction_epoch") == self.epoch
                 and not rice_question(ev.get("text", "")) and not mentions_rice(text)):
-            self.conversation.replied(ev, text)
+            self.conversation.replied(ev, text, emotional_value=emotional_value_enabled(self.app.cfg))
+
+    def topic_options(self, plan):
+        topic = self.conversation.current()
+        if plan == "close" and topic and topic.get("private"):
+            return CARE_CLOSINGS
+        return CLOSINGS if plan == "close" else CONTINUATIONS if plan == "continue" else TOPICS
 
     def tick(self):
         follow_ready = self.ready(follow=True)
@@ -184,7 +201,7 @@ class AudienceInteraction:
             fallback = lines[self.follow_topic % len(lines)]
             self.follow_topic += 1
         else:
-            options = CLOSINGS if plan == "close" else CONTINUATIONS if plan == "continue" else TOPICS
+            options = self.topic_options(plan)
             fallback = options[self.topic % len(options)]
             self.topic += 1
         self.last_prompt = now
@@ -202,6 +219,7 @@ class AudienceInteraction:
         now = self.clock()
         recent = [{k: v for k, v in item.items() if k != "at"}
                   for item in self.dialogue if now - item["at"] < self.PRESENCE_SECONDS
+                  and not item.get("private")
                   and not rice_question(item.get("text", "")) and not mentions_rice(item.get("reply", ""))]
         # 普通解说另记，避免频繁的游戏台词挤掉先前主动问过的话题。
         spoken = [line for line in dict.fromkeys([*self.recent_lines, *self.recent_speech]) if not mentions_rice(line)]
@@ -245,7 +263,7 @@ class AudienceInteraction:
                 or (not follow and plan == "close" and Conversation.is_question(text))):
             templates = self.settings.get("follow_templates") or FOLLOW_REMINDER_TEMPLATES
             options = ([line.strip() for line in templates.splitlines() if line.strip()] if follow
-                       else list(CLOSINGS if plan == "close" else CONTINUATIONS if plan == "continue" else TOPICS))
+                       else list(self.topic_options(plan)))
             options = [ev["text"], *(line for line in options if line != ev["text"])]
             text, emotion = varied_line(options, spoken), ""
         # 等模型时有新弹幕、切房间、暂停或开始下播，就把这句让给观众。

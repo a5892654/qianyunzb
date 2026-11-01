@@ -4,6 +4,8 @@ import json
 import re
 import time
 
+from emotional_value import viewer_cue
+
 
 class Conversation:
     TTL = 300
@@ -16,6 +18,7 @@ class Conversation:
     def reset(self):
         self.turns = collections.deque(maxlen=16)
         self.topic = None
+        self.care_until = 0
 
     @staticmethod
     def viewer(ev):
@@ -33,6 +36,8 @@ class Conversation:
         now, viewer = self.clock(), self.viewer(ev)
         turns = [t for t in self.turns if t["viewer"] == viewer and now - t["at"] < self.TTL][-4:]
         topic = self.current()
+        if topic and topic.get("private") and topic.get("viewer") != viewer:
+            topic = None
         if not turns and not topic:
             return ""
         reference = {"这位观众此前的对话": [{k: t[k] for k in ("name", "text", "reply")} for t in turns]}
@@ -43,7 +48,7 @@ class Conversation:
                 "不同观众的偏好不能张冠李戴。相关时顺着同一话题聊两到四轮，"
                 "已经回答过的问题不要再问，不相关的新留言就自然换话题，不要强拉回旧话题。")
 
-    def replied(self, ev, text):
+    def replied(self, ev, text, *, emotional_value=True):
         if ev.get("test") or ev["type"] not in ("danmaku", "superchat"):
             return
         now, viewer = self.clock(), self.viewer(ev)
@@ -51,13 +56,23 @@ class Conversation:
                            "text": str(ev.get("text", ""))[:300], "reply": text[:200]})
         topic = self.current()
         change = re.search(r"换个?话题|不聊这个|先不聊|说点别的", str(ev.get("text", "")))
-        if not topic or change or topic["turns"] >= self.MAX_TURNS or topic["closed"]:
+        cue = viewer_cue(ev.get("text", "")) if emotional_value else None
+        private = bool(cue and cue.private) or bool(
+            emotional_value and topic and topic.get("private") and topic.get("viewer") == viewer
+            and not change and len(str(ev.get("text", ""))) <= 16)
+        if cue and cue.private:
+            # 只在这条回复真正进入播放后生效，短时间把关注提醒留到关心之后。
+            self.care_until = now + 90
+        if (not topic or change or topic["turns"] >= self.MAX_TURNS or topic["closed"]
+                or bool(topic.get("private")) != private
+                or (topic.get("private") and topic.get("viewer") != viewer)):
             self.topic = {"opening": str(ev.get("text", ""))[:200], "at": now, "turns": 0,
                           "last_reply": "", "question": "", "answered": True, "closed": False,
                           "continued": False}
         topic = self.topic
         topic.update(at=now, last_reply=text[:200], question=text[:200] if self.is_question(text) else "",
-                     answered=not self.is_question(text), turns=topic["turns"] + 1, continued=False)
+                     answered=not self.is_question(text), turns=topic["turns"] + 1, continued=False,
+                     private=private, viewer=viewer)
 
     @staticmethod
     def is_question(text):
@@ -67,6 +82,8 @@ class Conversation:
         topic = self.current()
         if not topic or topic["closed"]:
             return "new"
+        if topic.get("private"):
+            return "close"
         if topic["turns"] >= self.MAX_TURNS or (topic["question"] and not topic["answered"]):
             return "close"
         if topic["answered"] and not topic["continued"]:
@@ -77,6 +94,10 @@ class Conversation:
         topic = self.current()
         if not topic or plan == "new":
             return ""
+        if topic.get("private"):
+            return ("【这段聊天的收尾】刚才接住了一位观众的个人感受，这次温和留一点空间。"
+                    "不再点名、追问或复述对方的私人困扰，不评价对方的状态，不催回复，"
+                    "也不要接关注、点赞或礼物话术。可以说想聊再聊、安静看也欢迎。")
         instruction = ("顺着刚才观众实际聊过的内容补充一句，不另起无关话题；最多问一个相关的小问题。"
                        if plan == "continue" else
                        "这段话题先自然收个尾。这次不要再提问、重复催回答或点名安静的观众；"

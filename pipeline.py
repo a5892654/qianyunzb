@@ -373,6 +373,7 @@ class Pipeline:
                     context = dt.commentary_context() if dt and job["type"] in ("danmaku", "superchat") else ""
                     cfg, conversation = self.cfg, ""
                     if job["type"] in ("danmaku", "superchat"):
+                        job["ev"]["_personal_reply"] = self.interaction.personal_reply(job["ev"])
                         cfg = self.interaction.reply_config(job["ev"])
                         conversation = self.interaction.conversation_context(job["ev"])
                     text, src, emotion = await self.app.brain.reply(
@@ -387,7 +388,8 @@ class Pipeline:
                 self._mark_done(job["id"])
                 continue
             self.interaction.remember_reply(job["ev"], text)
-            if dt and dt is getattr(self.app, "dt", None) and dt.running and job["type"] in ("danmaku", "superchat"):
+            if (dt and dt is getattr(self.app, "dt", None) and dt.running
+                    and job["type"] in ("danmaku", "superchat") and not self.interaction.personal_reply(job["ev"])):
                 dt.remember_interaction(job["ev"], text)
             emotion = emotion or self.detect_emotion(text)
             item = {"id": job["id"], "type": job["type"], "text": text, "src": src, "emotion": emotion,
@@ -519,7 +521,8 @@ class Pipeline:
                     continue
                 self.interaction.spoken(item["text"], item["interaction_event"])
             else:
-                if not rice_question(item.get("conversation_event", {}).get("text", "")):
+                ev = item.get("conversation_event", {})
+                if not rice_question(ev.get("text", "")) and not self.interaction.personal_reply(ev):
                     self.interaction.remember_spoken(item["text"])
             if item.get("conversation_event"):
                 self.interaction.remember_spoken_reply(item["conversation_event"], item["text"])

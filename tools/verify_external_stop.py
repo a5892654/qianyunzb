@@ -90,7 +90,9 @@ class ExternalPlatformTests(unittest.IsolatedAsyncioTestCase):
 class ExternalScheduleTestCase(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.now = [datetime(2026, 10, 30, 19, 0)]
-        self.app = SimpleNamespace(cfg=copy.deepcopy(config.DEFAULTS), pushes=[], auto_stop_task=None)
+        self.app = SimpleNamespace(cfg=copy.deepcopy(config.DEFAULTS), pushes=[], auto_stop_task=None,
+                                   dt=SimpleNamespace(running=True), stop_dt=AsyncMock(),
+                                   game=SimpleNamespace(sync=Mock()))
         self.app.cfg["bili_cookie"] = COOKIE
         self.app.push = lambda kind, data: self.app.pushes.append((kind, data))
         self.app.broadcast = SimpleNamespace(
@@ -138,6 +140,7 @@ class ExternalScheduleTests(ExternalScheduleTestCase):
         self.app.broadcast.stop_external.assert_awaited_once_with(42)
         self.app.pipe.say_job_id.assert_called_once_with(
             config.DEFAULTS["broadcast"]["auto_stop_line"], "", farewell=True)
+        self.app.stop_dt.assert_awaited_once_with()
         self.app.broadcast.stop.assert_not_awaited()
         self.assertTrue(self.schedule.last_result["ok"])
         self.schedule.tick()

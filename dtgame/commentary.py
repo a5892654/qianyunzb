@@ -44,6 +44,16 @@ LINES = {
 }
 PRIORITY = {"death": 100, "clutch_win": 95, "win": 90, "low_health": 80,
             "hurt": 60, "relic": 50, "boss": 40, "heal": 30}
+MOMENT_TONES = {
+    "low_health": "紧张可以说出来，随后稳住，不朝观众发火或要求安慰。",
+    "hurt": "吃亏时短短反应一下，再认真想下一步，不甩锅。",
+    "heal": "缓过来时自然松口气，让大家跟得上情绪变化。",
+    "boss": "认真迎战，带一点期待，让观众感到一起进入关键时刻。",
+    "win": "把这份确定的胜利与大家分享，开心、小得意都可以，不要求喝彩。",
+    "clutch_win": "先松一口气，再分享险胜的开心，别只机械报告赢了。",
+    "death": "先认自己的失误，再留一点再试的劲头，不责怪观众或贬低自己。",
+    "relic": "对已经获得的新东西表达好奇和期待，不编造效果已生效。",
+}
 
 
 class GameCommentary:
@@ -125,7 +135,7 @@ class GameCommentary:
             self.pending = None
         return self.pending
 
-    def prompt(self, state):
+    def prompt(self, state, *, emotional_value=True):
         situation = scene(state)
         prompt = ("\n【直播说话节奏】" + situation["label"]
                   + f"。本次 say 请说一句约{min(situation['max_chars'], 30)}字的自然口语，保持边玩边聊，"
@@ -134,6 +144,8 @@ class GameCommentary:
         if moment:
             prompt += ("\n【刚发生的真实变化】" + json.dumps(moment["facts"], ensure_ascii=False)
                        + "。这次优先自然反应这件事，先有感受再考虑一句想法，不要复述数值或编造原因。")
+            if emotional_value:
+                prompt += "\n【这一刻的情绪】" + MOMENT_TONES[moment["kind"]]
         return prompt
 
     def fallback(self):

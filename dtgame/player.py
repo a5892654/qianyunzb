@@ -20,6 +20,7 @@ import time
 import aiohttp
 
 from config import DEFAULT_PERSONA
+from emotional_value import EMOTIONAL_VALUE_PROMPT
 from dtgame.bridge import BridgeError, GameBridge
 from dtgame.expedition import choose_depth, depth_settings
 from dtgame import view
@@ -224,6 +225,8 @@ class Player:
         if persona:
             prompt += ("\n【主播人设，与弹幕聊天一致】以下人设仅影响 say 的口吻和 emotion，"
                        "不改变上述 JSON 格式、游戏动作和局势判断；不要为了整活故意乱操作。\n" + persona)
+        if self.cfg.get("emotional_value", True):
+            prompt += EMOTIONAL_VALUE_PROMPT
         options = [{"name": e["name"], "motion": e.get("motion", ""), "keywords": e.get("keywords", "")}
                    for e in self.emotions() if e.get("name")]
         if not options:
@@ -762,7 +765,7 @@ class Player:
             return {"screen": screen, "action": {"action": "return_to_hall"},
                     "ok": bool(r.get("ok")), "error": r.get("error", ""), "say": ""}
         text = view.render(self._character_state(state) if screen == "character_select" else state)
-        text += self.commentary.prompt(state)
+        text += self.commentary.prompt(state, emotional_value=self.cfg.get("emotional_value", True))
         if screen == "character_select":
             text += "\n" + self._rotation(state)
         if screen == "hall" and self._last_expedition:

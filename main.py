@@ -28,6 +28,7 @@ from live_rice import RiceCounter, ai_context as rice_ai_context, validate_setti
 from live_broadcast import Broadcast
 from live_theme import preview_jpeg as theme_preview_jpeg, validate_settings as validate_theme_settings
 from live_schedule import DailyBroadcastSchedule
+from live_livehime import LivehimeController
 from live_context import rice_question
 from pipeline import Pipeline
 from songs import SongManager
@@ -88,6 +89,7 @@ class App:
         self.game = GameLauncher(self.cfg)
         self.rice = RiceCounter()
         self.broadcast = Broadcast(self)
+        self.livehime = LivehimeController(self)
         self.status = {}
         logging.getLogger().addHandler(UiLogHandler(self))
 
@@ -199,6 +201,7 @@ class App:
     def _dt_ai(self) -> dict:
         c = self.cfg.get("dtgame", {})
         ai = dict(self.cfg.get("ai", {}))
+        ai["emotional_value"] = bool(self.cfg.get("interaction", {}).get("emotional_value", True))
         for key in ("openai_base", "openai_key", "openai_model"):
             if c.get(key):
                 ai[key] = c[key]
@@ -207,6 +210,7 @@ class App:
     def _stardew_ai(self) -> dict:
         c = self.cfg.get("stardew", {})
         ai = dict(self.cfg.get("ai", {}))
+        ai["emotional_value"] = bool(self.cfg.get("interaction", {}).get("emotional_value", True))
         if str(c.get("openai_base") or "").strip() and str(c.get("openai_model") or "").strip():
             ai["backend"] = "openai"
         for key in ("openai_base", "openai_key", "openai_model"):
@@ -744,6 +748,7 @@ def build_web(app: App):
                 return web.json_response({"ok": False, "error": str(error)}, status=400)
         old_room = app.cfg.get("room_id")
         old_persona = app.cfg.get("ai", {}).get("persona")
+        old_emotional_value = app.cfg.get("interaction", {}).get("emotional_value", True)
         old_game = (app.cfg.get("game") or {}).get("active")
         app.cfg = config.merge(app.cfg, patch)
         config.save(app.cfg)
@@ -751,12 +756,14 @@ def build_web(app: App):
         if (app.cfg.get("game") or {}).get("active") != old_game:
             await app.stop_dt()
             app.push("log", {"level": "info", "msg": f"已切换为{app._game_name()}，请重新启动托管"})
-        if app.cfg.get("ai", {}).get("persona") != old_persona:
+        if (app.cfg.get("ai", {}).get("persona") != old_persona
+                or app.cfg.get("interaction", {}).get("emotional_value", True) != old_emotional_value):
             # 聊天的 Qoder 会按系统提示自动换会话；游戏保持本局决策记忆，只更新口吻。
             if getattr(app, "brain", None) is not None:
                 app.brain.openai.history.clear()
             if getattr(app, "dt", None) is not None:
                 app.dt.cfg["persona"] = app.cfg["ai"]["persona"]
+                app.dt.cfg["emotional_value"] = app.cfg.get("interaction", {}).get("emotional_value", True)
         if "overlay" in patch:
             app.push("overlay_config", app.cfg["overlay"])
         if isinstance(patch.get("broadcast"), dict) and "auto_stop_minutes" in patch["broadcast"]:
@@ -927,6 +934,29 @@ def build_web(app: App):
     @routes.get("/api/broadcast/schedule")
     async def broadcast_schedule(_):
         return web.json_response(app.schedule.status())
+
+    @routes.get("/api/broadcast/livehime/check")
+    async def broadcast_livehime_check(request):
+        settings = dict(app.cfg["broadcast"].get("livehime") or {})
+        for key in ("path", "hotkey"):
+            if key in request.query:
+                settings[key] = request.query[key]
+        return web.json_response(await asyncio.to_thread(app.livehime.check, settings))
+
+    @routes.post("/api/broadcast/livehime/calibrate")
+    async def broadcast_livehime_calibrate(request):
+        data = await request.json()
+        try:
+            delay = float((data or {}).get("delay", 3))
+        except (TypeError, ValueError):
+            delay = 3.0
+        result = await asyncio.to_thread(app.livehime.cursor_ratio, min(max(delay, 1.0), 10.0))
+        if result.get("ok"):
+            livehime = app.cfg["broadcast"].setdefault("livehime", {})
+            livehime["click_x"] = result["x"]
+            livehime["click_y"] = result["y"]
+            config.save(app.cfg)
+        return web.json_response(result)
 
     @routes.post("/api/broadcast/schedule")
     async def broadcast_schedule_save(request):
