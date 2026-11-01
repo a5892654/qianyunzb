@@ -37,6 +37,10 @@ class SongManager:
         self.loop_playlist = None
         self._playlist_version = 0
         self._refilling_playlist = False
+        self._auto_task = None
+        self._auto_failed_at = 0.0
+
+    AUTO_RETRY_SECONDS = 60
 
     @property
     def cfg(self):
@@ -254,6 +258,36 @@ class SongManager:
         self.wake.set()
         self.push()
         return self.state()["playlist"]
+
+    def notify_live_started(self):
+        """开播后恢复上次「播放全部」的歌单；已在循环或正在启动时不重复。"""
+        if not self.cfg.get("enabled") or not self.cfg.get("auto_play_on_live", True):
+            return False
+        reference = str(self.cfg.get("auto_playlist_ref") or "").strip()
+        if not reference or self.loop_playlist:
+            return False
+        if self._auto_task is not None and not self._auto_task.done():
+            return False
+        if time.monotonic() - self._auto_failed_at < self.AUTO_RETRY_SECONDS:
+            return False
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+        self._auto_task = loop.create_task(self._auto_start_playlist(reference))
+        return True
+
+    async def _auto_start_playlist(self, reference):
+        try:
+            playlist = await self.play_playlist(reference)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self._auto_failed_at = time.monotonic()
+            self.app.push("log", {"level": "warn", "msg": f"开播自动播放歌单失败：{error}"})
+            return
+        self.app.push("log", {"level": "info",
+                              "msg": f"开播自动循环歌单：{playlist.get('name') or reference}"})
 
     async def _fill_playlist(self, context):
         ids, checked = context["ids"], 0

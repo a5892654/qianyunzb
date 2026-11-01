@@ -792,6 +792,10 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
       <label class="f">歌曲最长几分钟<input type="number" data-k="songs.max_minutes"></label>
     </div>
     <div class="row">
+      <label class="c"><input type="checkbox" data-k="songs.auto_play_on_live">每次开播自动循环播放上次的歌单</label>
+      <span class="hint" id="sgAutoPlaylist" style="flex:1;min-width:220px"></span>
+    </div>
+    <div class="row">
       <label class="f">音乐音量 <b data-show="songs.volume"></b><input type="range" min="0" max="120" step="5" data-k="songs.volume"></label>
       <label class="f">说话时音乐压低到 <b data-show="songs.duck"></b>%<input type="range" min="0" max="100" step="5" data-k="songs.duck"></label>
     </div>
@@ -1039,6 +1043,7 @@ function queueConfig(p, delay = 500) {
   });
   $$('[data-show]').forEach(el => el.textContent = getPath(CFG, el.dataset.show));
   if (p.game) renderGameSettings();
+  if (p.songs) renderAutoPlaylist();
   if (p.live2d) { renderLayout(); syncL2dTestPreview(); $('#layoutSaveState').textContent = '正在保存调整…'; }
   if (p.rice_counter) { renderLayout(); $('#layoutSaveState').textContent = '正在保存调整…'; }
   if (p.stream_theme) { renderLayout(); renderTheme(); $('#themeSaveState').textContent = '正在保存主题…'; }
@@ -1094,7 +1099,7 @@ async function loadDevices() {
   $('#devSel').innerHTML = '<option value="">（系统默认）</option>' + d.map(x => `<option value="${esc(x)}">${esc(x)}</option>`).join('');
   fillForm();
 }
-async function loadConfig() { CFG = await api('/api/config'); fillForm(); }
+async function loadConfig() { CFG = await api('/api/config'); fillForm(); renderAutoPlaylist(); }
 
 $$('[data-pick]').forEach(b => b.onclick = async () => {
   const k = b.dataset.pick, r = await api('/api/pick', {kind: b.dataset.kind, initial: getPath(CFG, k) || ''});
@@ -1557,6 +1562,16 @@ const SG_TPL = [['add', '点歌成功'], ['similar', '找到相似版本'], ['pi
 $('#sgTpl').innerHTML = SG_TPL.map(([k, l]) => `<div class="row"><label class="c" style="width:130px"><input type="checkbox" data-k="songs.announce_${k}">${l}</label><input data-k="songs.tpl_${k}" style="flex:1"></div>`).join('');
 const fmtT = s => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 let sgAccountKey = null, sgSearchVersion = 0, sgLibraryVersion = 0, sgLibraryOffset = 0, sgPlaylistVersion = 0, sgPlaylist = null;
+function renderAutoPlaylist() {
+  const c = CFG.songs || {};
+  const ref = String(c.auto_playlist_ref || '').trim();
+  const name = String(c.auto_playlist_name || '').trim();
+  const el = $('#sgAutoPlaylist');
+  if (!el) return;
+  el.textContent = ref
+    ? `记住的歌单：${name || ref}；开播后自动静默循环（观众点歌优先）`
+    : '还没记住歌单：先点一次「播放全部」，之后每次开播会自动播放它。';
+}
 function renderSongs(st) {
   const c = st.current;
   $('#sgNow').innerHTML = c ? `${c.paused ? '⏸' : '🎵'} ${esc(c.name)} - ${esc(c.artist)} <span class="dim">${c.loading ? '正在加载…　' : ''}${c.source === 'autoplay' ? '歌单自动播放' : '点歌：' + esc(c.by)}　${fmtT(c.pos)} / ${fmtT(c.total)}</span>` : '<span class="dim">现在没有在放歌</span>';
@@ -1672,7 +1687,11 @@ $('#sgPlayPlaylist').onclick = async e => {
   button.disabled = true;
   try {
     const r = await neApi('/api/songs/playlist/play', {id: sgPlaylist.id});
-    toast(`已开启循环播放《${r.playlist.name}》（共 ${r.playlist.total} 首，静默播放，观众点歌优先）`);
+    queueConfig({songs: {auto_playlist_ref: String(sgPlaylist.id),
+                         auto_playlist_name: sgPlaylist.name || '',
+                         auto_play_on_live: true}}, 0);
+    renderAutoPlaylist();
+    toast(`已开启循环播放《${r.playlist.name}》，以后每次开播也会自动播放它`);
   } catch (error) { toast(error.message); }
   finally { button.disabled = !sgPlaylist?.total; }
 };

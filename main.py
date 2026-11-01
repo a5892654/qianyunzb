@@ -505,6 +505,16 @@ class App:
             self.push("log", {"level": "warn", "msg": "自动托管没有开起来，先照常开播：" + str(r.get("error"))})
         return {"ok": True, "launched": launched}
 
+    def notify_live_started(self):
+        """开播成功后触发一次（手动/定时/直播姬），由点歌模块决定是否自动放歌单。"""
+        songs = getattr(self, "songs", None)
+        if songs is None:
+            return
+        try:
+            songs.notify_live_started()
+        except Exception:
+            log.warning("开播自动播放歌单触发失败", exc_info=True)
+
     async def shutdown(self):
         await self.schedule.close()
         await self.wishlist.close()
@@ -1066,6 +1076,9 @@ def build_web(app: App):
             config.save(app.cfg)
             asyncio.create_task(app.connect())
             app.schedule.arm_local_timer()
+            notify = getattr(app, "notify_live_started", None)
+            if callable(notify):
+                notify()
         return web.json_response(result)
 
     @routes.post("/api/broadcast/stop")

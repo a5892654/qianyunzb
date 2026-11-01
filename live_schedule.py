@@ -46,6 +46,7 @@ class DailyBroadcastSchedule:
     LIVE_STATUS_INTERVAL = 1.5
     LIVEHIME_STOP_TRIES = 10
     LIVEHIME_STOP_INTERVAL = 1.0
+    MUSIC_CHECK_SECONDS = 15
 
     def __init__(self, app, clock=datetime.now):
         self.app = app
@@ -73,6 +74,9 @@ class DailyBroadcastSchedule:
         self.auto_handled = None
         self.auto_message = ""
         self.active_plan_id = ""
+        self.music_check_task = None
+        self.music_last_check = None
+        self.music_session = None
 
     @property
     def settings(self):
@@ -343,6 +347,7 @@ class DailyBroadcastSchedule:
 
     def tick(self):
         self.refresh_auto_timer()
+        self.refresh_music_watch()
         now = self.clock()
         minute = now.strftime("%Y-%m-%d %H:%M")
         # tick 每五秒运行一次，不能只在分钟变化时检查，否则会错过提前告别。
@@ -463,6 +468,8 @@ class DailyBroadcastSchedule:
                 self.last_result = {"action": action, "time": self.clock().strftime("%Y-%m-%d %H:%M"),
                                     "ok": bool(result.get("ok")), "message": message}
                 self.app.push("log", {"level": "info" if result.get("ok") else "warn", "msg": message})
+                if action == "start" and result.get("ok"):
+                    self._notify_music_started()
             except Exception:
                 self.last_result = {"action": action, "time": self.clock().strftime("%Y-%m-%d %H:%M"),
                                     "ok": False, "message": "定时直播执行失败，请检查账号与采集源"}
@@ -820,6 +827,7 @@ class DailyBroadcastSchedule:
                 self.auto_session = session
                 self.auto_session_started = started or self.clock()
                 self.auto_handled = None
+                self._notify_music_started()
             if self.external_timer_task is not None and not self.external_timer_task.done():
                 return
             if self.auto_handled == session:
@@ -835,6 +843,65 @@ class DailyBroadcastSchedule:
             raise
         except Exception:
             self.auto_message = "暂时无法读取直播状态，将自动重试；请检查主播登录与网络"
+
+    def _notify_music_started(self):
+        notify = getattr(self.app, "notify_live_started", None)
+        if callable(notify):
+            try:
+                notify()
+            except Exception:
+                pass
+
+    def _music_watch_enabled(self) -> bool:
+        songs = getattr(self.app, "songs", None)
+        cfg = getattr(songs, "cfg", None)
+        if not isinstance(cfg, dict) or not cfg.get("enabled") or not cfg.get("auto_play_on_live", True):
+            return False
+        if not str(cfg.get("auto_playlist_ref") or "").strip():
+            return False
+        broadcast = getattr(self.app, "broadcast", None)
+        return bool(getattr(broadcast, "running", False) or getattr(broadcast, "source_open", False))
+
+    def refresh_music_watch(self):
+        """自动停播未开启时，也要在直播姬开播后恢复歌单；只查状态，不动停播计时。"""
+        if self.closing or not self._music_watch_enabled():
+            return
+        if getattr(self.app.broadcast, "running", False):
+            return  # 本工具推流时开播已经直接触发
+        minutes = self.app.cfg["broadcast"].get("auto_stop_minutes", 0)
+        if type(minutes) is int and minutes > 0:
+            return  # 自动停播监测本来就会查状态，并在发现开播时触发歌单
+        if self.music_check_task and not self.music_check_task.done():
+            return
+        now = self.clock()
+        if (self.music_last_check is not None
+                and 0 <= (now - self.music_last_check).total_seconds() < self.MUSIC_CHECK_SECONDS):
+            return
+        self.music_last_check = now
+        self.music_check_task = asyncio.create_task(
+            self._check_music_live(self.timer_revision, self.app.cfg.get("bili_cookie")))
+
+    async def _check_music_live(self, revision, cookie):
+        try:
+            info = await self.app.broadcast.account()
+            if (self.closing or revision != self.timer_revision
+                    or cookie != self.app.cfg.get("bili_cookie")
+                    or not self._music_watch_enabled()):
+                return
+            live = bool(info.get("ok") and info.get("logged_in")
+                        and int(info.get("live_status") or 0) == 1)
+            if not live:
+                self.music_session = None
+                return
+            session = (int(info.get("room_id") or 0), float(info.get("live_started_at") or 0) or None)
+            if session == self.music_session:
+                return
+            self.music_session = session
+            self._notify_music_started()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
 
     def _set_external_timer(self, room_id, deadline, seconds, *, automatic=False):
         self.cancel_external_timer()
@@ -935,6 +1002,9 @@ class DailyBroadcastSchedule:
         if self.auto_check_task:
             self.auto_check_task.cancel()
             await asyncio.gather(self.auto_check_task, return_exceptions=True)
+        if self.music_check_task:
+            self.music_check_task.cancel()
+            await asyncio.gather(self.music_check_task, return_exceptions=True)
         timer = self.external_timer_task
         self.cancel_external_timer()
         if timer:

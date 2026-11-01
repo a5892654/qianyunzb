@@ -252,6 +252,10 @@ DEFAULTS = {
         "max_minutes": 8,
         "volume": 45,
         "duck": 30,
+        # 开播自动循环上次点「播放全部」的歌单（ref 是网易云歌单 ID）
+        "auto_play_on_live": True,
+        "auto_playlist_ref": "",
+        "auto_playlist_name": "",
         "netease_cookie": "",
         "announce_add": True,
         "announce_similar": True,
