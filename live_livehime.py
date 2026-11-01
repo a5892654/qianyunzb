@@ -455,6 +455,8 @@ class LivehimeController:
                   "windows": windows, "window": window, "hotkey": hotkey,
                   "hotkey_ok": hotkey_ok, "hotkey_error": hotkey_error}
         if source == "config_missing":
+            # 已经跑着的窗口能控制，但配置的路径是错的，到点自动启动会失败，界面必须报出来。
+            result["ok"] = False
             result["error"] = f"配置的直播姬路径不存在：{configured}"
         elif not procs and not path:
             result["error"] = "没有找到 livehime.exe，请填写直播姬安装目录里的 livehime.exe"

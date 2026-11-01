@@ -304,6 +304,7 @@ class ThemeRouteTests(unittest.IsolatedAsyncioTestCase):
         self.app.cfg = copy.deepcopy(config.DEFAULTS)
         self.app.bili = SimpleNamespace(client=None)
         self.app.broadcast = Broadcast(self.app)
+        self.app.game = SimpleNamespace(sync=Mock())
         self.app.push = Mock()
         self.client = TestClient(TestServer(main.build_web(self.app)))
         await self.client.start_server()

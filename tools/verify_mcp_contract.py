@@ -264,7 +264,7 @@ class ContractTests(unittest.TestCase):
 
     def test_system_prompt_uses_current_skin_emotions(self):
         emotions = [{"name": "开心", "motion": "idle", "keywords": "拿下"}]
-        player = Player({"persona": ""}, Mock(), emotions=lambda: emotions)
+        player = Player({"persona": "", "emotional_value": False}, Mock(), emotions=lambda: emotions)
         prompt = player._system_prompt()
         self.assertIn('"emotion"', prompt)
         self.assertIn('"name": "开心"', prompt)
@@ -601,6 +601,9 @@ class StatusTests(unittest.IsolatedAsyncioTestCase):
         app.cfg = {"dtgame": {}}
         app.dt = None
         app.game.running.return_value = False
+        app._active_game.return_value = "demontower"
+        app._game_cfg.return_value = {}
+        app._game_name.return_value = "恶魔之塔 Zero"
         app._config_problem.return_value = ""
         started, release = threading.Event(), threading.Event()
         def slow_screen():

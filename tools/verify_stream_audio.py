@@ -162,7 +162,8 @@ class BufferSettingsRouteTests(unittest.IsolatedAsyncioTestCase):
         import config
         import main
         from aiohttp.test_utils import TestClient, TestServer
-        app = SimpleNamespace(cfg=copy.deepcopy(config.DEFAULTS), bili=SimpleNamespace(client=None), push=Mock())
+        app = SimpleNamespace(cfg=copy.deepcopy(config.DEFAULTS), bili=SimpleNamespace(client=None), push=Mock(),
+                              game=SimpleNamespace(sync=Mock()))
         client = TestClient(TestServer(main.build_web(app)))
         await client.start_server()
         self.addAsyncCleanup(client.close)

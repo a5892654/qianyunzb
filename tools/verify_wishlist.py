@@ -26,7 +26,8 @@ NOW = datetime(2026, 10, 29, 12, tzinfo=CHINA).timestamp()
 
 def app_stub():
     app = types.SimpleNamespace(cfg=copy.deepcopy(config.DEFAULTS), pushes=[], dt=None,
-                                bili=types.SimpleNamespace(client=types.SimpleNamespace(room_id=42), room_id=42, owner_uid=1))
+                                bili=types.SimpleNamespace(client=types.SimpleNamespace(room_id=42), room_id=42, owner_uid=1),
+                                game=types.SimpleNamespace(sync=Mock()))
     app.cfg["room_id"] = 42
     app.cfg["wishlist"].update(enabled=True, action="say", text="{wish}达成，谢谢直播间{room}的大家！")
     app.push = lambda kind, data: app.pushes.append((kind, copy.deepcopy(data)))

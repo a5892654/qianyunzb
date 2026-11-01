@@ -301,6 +301,7 @@ class RiceRouteTests(unittest.IsolatedAsyncioTestCase):
         self.app.cfg = copy.deepcopy(config.DEFAULTS)
         self.app.dt = None
         self.app.push = Mock()
+        self.app.game = SimpleNamespace(sync=Mock())
         self.app.rice = RiceCounter(Path(self.tmp.name) / "rice.json")
         self.app.broadcast = SimpleNamespace(capture=SimpleNamespace())
         self.app.bili = SimpleNamespace(client=None)
