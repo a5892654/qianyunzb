@@ -107,6 +107,14 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
 .theme-settings{margin-top:18px}.theme-settings input:focus,.theme-settings textarea:focus{border-color:#75d9f3}.theme-settings input[type=checkbox]{accent-color:#75d9f3}
 .theme-settings .hint{margin:6px 0 0}.theme-card-head{display:flex;gap:10px;align-items:center;margin-bottom:12px}.theme-card-head h3{margin:0;flex:1}
 @media(max-width:850px){.theme-options{grid-template-columns:1fr}.theme-intro{align-items:flex-start;flex-direction:column}.theme-thumb{width:90px}.theme-caption{align-items:flex-start;flex-direction:column}}
+.modal{position:fixed;inset:0;z-index:80;display:none;align-items:flex-start;justify-content:center;padding:6vh 16px;background:rgba(5,7,12,.68);overflow:auto}
+.modal.on{display:flex}
+.modal-card{width:min(780px,100%);background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px 18px;box-shadow:0 24px 70px #000a}
+.plan-row{display:grid;grid-template-columns:1fr 1fr 1.15fr auto;gap:10px;align-items:end;padding:10px 0;border-bottom:1px dashed var(--line)}
+.plan-row:last-of-type{border-bottom:0}
+.plan-row .btn{margin-bottom:1px}
+.plan-empty{padding:20px 0;text-align:center;color:var(--dim);font-size:13px}
+@media(max-width:640px){.plan-row{grid-template-columns:1fr 1fr}.plan-row .plan-del{grid-column:2/3;justify-self:start}}
 </style>
 </head>
 <body>
@@ -267,6 +275,10 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
     <div class="hint">星露谷请用「窗口 / 无边框窗口」运行：独占全屏没有独立窗口，窗口采集抓不到。如果切到别的窗口游戏会暂停，可在游戏 Options 里关掉 Pause When Out of Focus。</div>
   </div>
   <div class="card">
+    <div class="row" style="margin-bottom:6px"><h3 style="margin:0">播放计划</h3><span style="flex:1"></span><button class="btn b" id="planOpen">配置播放计划</button></div>
+    <div class="hint" id="planSummary">未设置。可以安排每天几点开播、几点结束、播哪款游戏。</div>
+  </div>
+  <div class="card">
     <h3>皮套上镜</h3>
     <div class="row">
       <label class="c"><input type="checkbox" data-k="live2d.overlay_in_broadcast">把 Live2D 皮套叠加到直播画面</label>
@@ -339,6 +351,7 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
     </div>
     <div class="hint" id="livehimeHint" style="display:none">先在直播姬「设置 → 快捷键」给「开始/停止直播」绑定一个键（例如 F9）填到左边，到点由千音发送该键；版本不支持快捷键时，可点「校准开始按钮」，然后在 3 秒内把鼠标移到直播姬的「开始直播」按钮上，并清空快捷键（留空）改用点击。直播姬需登录同一主播账号，场景已添加「千音源画面」窗口采集，画布 1920×1080，音频选系统声音。</div>
     <div class="hint" id="scheduleStatus">定时直播未启用。</div>
+    <div class="hint" id="schedulePlanNote" style="display:none"></div>
     <div class="hint" id="scheduleSource" style="margin-top:6px"></div>
     <div class="hint" id="scheduleResult" role="status" style="margin-top:6px"></div>
     <p class="hint">按电脑本地时间每天重复。本工具和直播姬自动开停播模式需先登录、选择采集源并预览，停播时间早于开播时间则跨到次日；直播姬模式到点会自动拉起游戏、代打和千音源画面，再发送直播姬的开播/停播快捷键，并由千音核对 B站直播间状态。直播姬 / OBS 仅定时停播模式只需登录主播账号并设置停播时间，无需预览，也不会自动开播；到点会通过B站结束该账号的直播间。</p>
@@ -896,6 +909,24 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
   </div>
 </section>
 </main>
+</div>
+<div class="modal" id="planModal" role="dialog" aria-modal="true" aria-labelledby="planModalTitle">
+  <div class="modal-card">
+    <div class="row" style="align-items:flex-start;margin-bottom:10px">
+      <div><h3 id="planModalTitle" style="margin:0">播放计划</h3><div class="hint" style="margin-top:4px">到点先切到这一段选的游戏并启动托管，再开播；结束时间早于开始时间表示播到次日。相邻两段可以首尾相接。</div></div>
+      <span style="flex:1"></span>
+      <button class="btn sm" id="planClose" aria-label="关闭播放计划">关闭</button>
+    </div>
+    <div class="row">
+      <label class="c"><input type="checkbox" id="planEnabled">启用播放计划</label>
+      <label class="f" style="max-width:320px">开停播方式<select id="planMode"><option value="managed">本工具：自动开播和停播</option><option value="livehime">直播姬：自动开播和停播</option><option value="stop_only">直播姬 / OBS：仅定时停播</option></select></label>
+    </div>
+    <div id="planRows"></div>
+    <div class="row" style="margin-top:10px"><button class="btn" id="planAdd" type="button">＋ 加一段</button><span class="hint">每一段单独选开始时间、结束时间和要播的游戏</span></div>
+    <div class="hint" id="planHint">启用前请确认已登录主播账号。本工具模式会用上方直播标题、分区，并自动选中当前游戏窗口和默认声音设备；直播姬模式会先拉起游戏、代打和千音源画面，再发送开/停快捷键。</div>
+    <div class="hint" id="planResult" role="status" style="margin-top:8px;color:var(--red)"></div>
+    <div class="row" style="justify-content:flex-end;margin-top:12px"><button class="btn" id="planCancel">取消</button><button class="btn p" id="planSave">保存播放计划</button></div>
+  </div>
 </div>
 <div class="toast" id="toast"></div>
 
@@ -1990,7 +2021,7 @@ $('#layoutRiceBox').onkeydown = e => {
   if (e.target.id === 'layoutRiceResize') moveRiceLayout({overlay_size: clamp(r.h + (['ArrowRight', 'ArrowDown'].includes(e.key) ? step : -step), 0.04, 0.6)});
   else moveRiceLayout({overlay_x: clamp(r.x + (e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0), 0, 1), overlay_y: clamp(r.y + (e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0), 0, 1)});
 };
-let scheduleInfo = {}, scheduleDirty = false, scheduleBusy = false;
+let scheduleInfo = {}, scheduleDirty = false, scheduleBusy = false, planBusy = false;
 let externalTimerBusy = false;
 $('#openBroadcast').onclick = () => document.querySelector('nav button[data-tab="broadcast"]').click();
 $('#broadcastLogin').onclick = () => { broadcastLoginRequested = true; document.querySelector('nav button[data-tab="room"]').click(); $('#qrBtn').click(); };
@@ -2246,9 +2277,13 @@ async function pollSchedule(fill = false) {
     }
     const stopOnly = mode === 'stop_only';
     const livehimeMode = mode === 'livehime';
+    const plansActive = !!(r.plans_enabled && (r.plans || []).length);
     syncScheduleMode();
+    renderPlanSummary(r);
     $('#scheduleLocalTime').textContent = '本机时间 ' + r.local_time;
-    $('#scheduleStatus').textContent = r.enabled ? (stopOnly ? `直播姬 / OBS 每日 ${r.stop_time} 停播；下次停播 ${r.next_stop}。` : livehimeMode ? `直播姬每日 ${r.start_time} 开播、${r.stop_time} 停播${r.stop_time < r.start_time ? '（次日）' : ''}；下次开播 ${r.next_start}，下次停播 ${r.next_stop}。` : `每日 ${r.start_time} 开播、${r.stop_time} 停播${r.stop_time < r.start_time ? '（次日）' : ''}；下次开播 ${r.next_start}，下次停播 ${r.next_stop}。`) : '定时直播未启用。';
+    $('#scheduleStatus').textContent = plansActive
+      ? `播放计划已接管：每天 ${r.plans.length} 段${r.enabled ? `；下次开播 ${r.next_start || '—'}，下次停播 ${r.next_stop || '—'}` : '；当前已暂停'}。下方单段设置暂不生效。`
+      : r.enabled ? (stopOnly ? `直播姬 / OBS 每日 ${r.stop_time} 停播；下次停播 ${r.next_stop}。` : livehimeMode ? `直播姬每日 ${r.start_time} 开播、${r.stop_time} 停播${r.stop_time < r.start_time ? '（次日）' : ''}；下次开播 ${r.next_start}，下次停播 ${r.next_stop}。` : `每日 ${r.start_time} 开播、${r.stop_time} 停播${r.stop_time < r.start_time ? '（次日）' : ''}；下次开播 ${r.next_start}，下次停播 ${r.next_stop}。`) : '定时直播未启用。';
     $('#scheduleSource').textContent = stopOnly ? `仅停止已登录主播的直播间${r.external_room_id ? ' ' + r.external_room_id : ''}，无需采集源预览。` : livehimeMode ? `${r.window_title ? `已保存窗口：${r.window_title}；声音：${r.audio_name}。` : '启用前请先预览上方选中的窗口和声音。'}直播姬：${r.livehime?.path || '自动查找 livehime.exe'}；快捷键 ${r.livehime?.hotkey || '未设置'}。` : r.window_title ? `已保存窗口：${r.window_title}；声音：${r.audio_name}` : '启用前请先预览上方选中的窗口和声音。';
     const timer = r.external_timer || {};
     const autoMinutes = Number(timer.auto_minutes ?? CFG.broadcast?.auto_stop_minutes ?? 0);
@@ -2267,6 +2302,8 @@ async function pollSchedule(fill = false) {
 ['livehimePath', 'livehimeHotkey'].forEach(id => $('#' + id).addEventListener('input', () => { scheduleDirty = true; }));
 async function saveSchedule(disable = false) {
   if (scheduleBusy) return;
+  if (!disable && scheduleInfo.plans_enabled && (scheduleInfo.plans || []).length
+      && !confirm('保存下方单段计划会关闭正在使用的播放计划，继续？')) return;
   const enabled = !disable && $('#scheduleEnabled').checked;
   const start = disable ? scheduleInfo.start_time : $('#scheduleStartTime').value;
   const stop = disable ? scheduleInfo.stop_time : $('#scheduleStopTime').value;
@@ -2296,6 +2333,116 @@ async function saveSchedule(disable = false) {
 }
 $('#scheduleSave').onclick = () => saveSchedule();
 $('#scheduleDisable').onclick = () => saveSchedule(true);
+
+// ---------- 播放计划 ----------
+const PLAN_GAMES = {demontower: '恶魔之塔', stardew: '星露谷'};
+function renderPlanSummary(r) {
+  const plans = Array.isArray(r.plans) ? r.plans : [];
+  const active = !!(r.plans_enabled && plans.length);
+  if (!plans.length) {
+    $('#planSummary').textContent = '未设置。可以安排每天几点开播、几点结束、播哪款游戏。';
+  } else {
+    const parts = plans.map(p => `${p.start}–${p.stop} ${PLAN_GAMES[p.game] || p.game}`).join('；');
+    let text = `${active ? (r.enabled ? '生效中' : '已暂停') : '未启用'} · 每天 ${parts}`;
+    if (active && r.enabled) {
+      if (r.next_start) text += ` · 下次开播 ${r.next_start}`;
+      if (r.next_stop) text += ` · 下次停播 ${r.next_stop}`;
+    }
+    $('#planSummary').textContent = text;
+  }
+  const note = $('#schedulePlanNote');
+  if (note) {
+    note.style.display = active ? '' : 'none';
+    note.textContent = active ? '当前生效的是「播放计划」；修改请点上方卡片里的「配置播放计划」。' : '';
+  }
+}
+function refreshPlanEmpty() {
+  const box = $('#planRows');
+  let empty = box.querySelector('.plan-empty');
+  const has = box.querySelector('.plan-row');
+  if (!has && !empty) {
+    empty = document.createElement('div');
+    empty.className = 'plan-empty';
+    empty.textContent = '还没有时段，点下面「＋ 加一段」添加。';
+    box.appendChild(empty);
+  } else if (has && empty) {
+    empty.remove();
+  }
+}
+function planRow(plan = {}) {
+  const row = document.createElement('div');
+  row.className = 'plan-row';
+  row.dataset.id = plan.id || `plan-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  row.innerHTML = '<label class="f">开始时间<input type="time" class="plan-start" step="60"></label>'
+    + '<label class="f">结束时间<input type="time" class="plan-stop" step="60"></label>'
+    + '<label class="f">播的游戏<select class="plan-game"><option value="demontower">恶魔之塔 Zero</option><option value="stardew">星露谷物语</option></select></label>'
+    + '<button class="btn r sm plan-del" type="button">删除</button>';
+  row.querySelector('.plan-start').value = plan.start || '20:00';
+  row.querySelector('.plan-stop').value = plan.stop || '23:00';
+  row.querySelector('.plan-game').value = plan.game || 'demontower';
+  row.querySelector('.plan-del').onclick = () => { row.remove(); refreshPlanEmpty(); };
+  return row;
+}
+function setPlanRows(plans) {
+  const box = $('#planRows');
+  box.innerHTML = '';
+  (plans || []).forEach(p => box.appendChild(planRow(p)));
+  refreshPlanEmpty();
+}
+function addPlanRow(plan) {
+  const box = $('#planRows');
+  box.appendChild(planRow(plan || {}));
+  refreshPlanEmpty();
+  box.lastElementChild?.scrollIntoView({block: 'nearest'});
+}
+function collectPlans() {
+  return [...$$('#planRows .plan-row')].map((row, index) => ({
+    id: row.dataset.id || `plan${index + 1}`,
+    start: row.querySelector('.plan-start').value,
+    stop: row.querySelector('.plan-stop').value,
+    game: row.querySelector('.plan-game').value,
+  }));
+}
+function closePlanModal() {
+  $('#planModal').classList.remove('on');
+  document.body.style.overflow = '';
+}
+$('#planOpen').onclick = () => {
+  const plans = (scheduleInfo.plans || []).slice();
+  setPlanRows(plans);
+  if (!plans.length) addPlanRow({start: '20:00', stop: '23:00', game: (CFG.game && CFG.game.active) || 'demontower'});
+  $('#planEnabled').checked = !!scheduleInfo.plans_enabled;
+  $('#planMode').value = scheduleInfo.mode || 'managed';
+  $('#planResult').textContent = '';
+  $('#planModal').classList.add('on');
+  document.body.style.overflow = 'hidden';
+};
+$('#planClose').onclick = closePlanModal;
+$('#planCancel').onclick = closePlanModal;
+$('#planAdd').onclick = () => addPlanRow({start: '20:00', stop: '23:00', game: 'demontower'});
+$('#planModal').addEventListener('click', e => { if (e.target === $('#planModal')) closePlanModal(); });
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('#planModal').classList.contains('on')) closePlanModal(); });
+$('#planSave').onclick = async () => {
+  if (planBusy) return;
+  const plans = collectPlans();
+  const enabled = $('#planEnabled').checked;
+  const mode = $('#planMode').value;
+  if (plans.some(p => !p.start || !p.stop)) { $('#planResult').textContent = '每一段都要填写开始和结束时间。'; return; }
+  if (enabled && !plans.length) { $('#planResult').textContent = '请至少添加一段播放计划。'; return; }
+  if (enabled && !confirm(`启用后每天会按 ${plans.length} 段计划自动公开开播和停播，继续？`)) return;
+  planBusy = true; $('#planSave').disabled = true; $('#planResult').textContent = '';
+  try {
+    await flushConfig();
+    const r = await api('/api/broadcast/plans', {enabled, mode, plans, authorized: enabled});
+    if (!r.ok) throw new Error(r.error || '保存播放计划失败');
+    scheduleInfo = r;
+    renderPlanSummary(r);
+    await pollSchedule(true);
+    toast(enabled ? '播放计划已启用' : '播放计划已保存（未启用）');
+    closePlanModal();
+  } catch (e) { $('#planResult').textContent = e.message || String(e); }
+  finally { planBusy = false; $('#planSave').disabled = false; }
+};
 async function cancelExternalTimer() {
   if (externalTimerBusy) return;
   externalTimerBusy = true;

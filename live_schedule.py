@@ -7,6 +7,31 @@ from live_livehime import LivehimeError, parse_hotkey, resolve_path
 
 _CLOCK = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d\Z")
 
+GAME_NAMES = {"demontower": "恶魔之塔 Zero", "stardew": "星露谷物语"}
+GAME_TITLES = {"demontower": "恶魔之塔 ZERO｜AI 游戏直播", "stardew": "星露谷物语｜AI 游戏直播"}
+
+
+def _minutes(hhmm: str) -> int:
+    hour, minute = map(int, hhmm.split(":"))
+    return hour * 60 + minute
+
+
+def _in_window(start: str, stop: str, current: str) -> bool:
+    return start <= current < stop if start < stop else current >= start or current < stop
+
+
+def _segments(start: str, stop: str) -> list[tuple[int, int]]:
+    begin, end = _minutes(start), _minutes(stop)
+    return [(begin, end)] if begin < end else [(begin, 1440), (0, end)]
+
+
+def _game_window(game: str, title: str) -> bool:
+    text = title.lower()
+    if game == "stardew":
+        return "stardew" in text or "星露谷" in text
+    return "demontower" in text or ("godot" in text and "debug" in text)
+
+
 
 class DailyBroadcastSchedule:
     # 刚启动的游戏窗口要一两秒才出现在枚举里，重试这么多秒（测试里会调小）
@@ -47,17 +72,29 @@ class DailyBroadcastSchedule:
         self.auto_session_started = None
         self.auto_handled = None
         self.auto_message = ""
+        self.active_plan_id = ""
 
     @property
     def settings(self):
         return self.app.cfg["broadcast"]["schedule"]
 
+    @property
+    def plans(self) -> list[dict]:
+        plans = self.settings.get("plans")
+        return plans if isinstance(plans, list) else []
+
+    @property
+    def plans_active(self) -> bool:
+        return bool(self.settings.get("plans_enabled")) and bool(self.plans)
+
     def within_broadcast_window(self):
         if self.settings.get("mode", "managed") == "stop_only":
             return False
         current = self.clock().strftime("%H:%M")
+        if self.plans_active:
+            return any(_in_window(plan["start"], plan["stop"], current) for plan in self.plans)
         start, stop = self.settings["start_time"], self.settings["stop_time"]
-        return start <= current < stop if start < stop else current >= start or current < stop
+        return _in_window(start, stop, current)
 
     async def save(self, data):
         if not isinstance(data, dict) or type(data.get("enabled")) is not bool:
@@ -72,7 +109,8 @@ class DailyBroadcastSchedule:
         if start == stop and mode in ("managed", "livehime"):
             raise ValueError("开播和停播时间不能相同")
         updated = {k: v for k, v in self.settings.items() if k != "livehime"}
-        updated.update(enabled=data["enabled"], mode=mode, start_time=start, stop_time=stop)
+        updated.update(enabled=data["enabled"], mode=mode, start_time=start, stop_time=stop,
+                       plans_enabled=False)
         livehime = self._livehime_settings(data)
         title, area = self.app.cfg["broadcast"]["title"], self.app.cfg["broadcast"]["area_id"]
         if data["enabled"]:
@@ -106,6 +144,92 @@ class DailyBroadcastSchedule:
         self.last_minute = self.clock().strftime("%Y-%m-%d %H:%M")
         self.last_result = None
         return self.status()
+
+    async def save_plans(self, data):
+        """保存播放计划：多段「开始-结束-游戏」，每天重复；启用后优先于单段设置。"""
+        if not isinstance(data, dict) or type(data.get("enabled")) is not bool:
+            raise ValueError("请设置是否启用播放计划")
+        mode = data.get("mode", self.settings.get("mode", "managed"))
+        if mode not in ("managed", "stop_only", "livehime"):
+            raise ValueError("请选择自动开停播、直播姬自动开停播或直播姬仅定时停播")
+        rows = data.get("plans")
+        if not isinstance(rows, list):
+            raise ValueError("播放计划格式不正确")
+        plans = self._clean_plans(rows)
+        enabled = data["enabled"]
+        if enabled and not plans:
+            raise ValueError("请至少添加一段播放计划")
+        livehime = self._livehime_settings(data)
+        if enabled:
+            if data.get("authorized") is not True:
+                raise ValueError("启用前需要确认允许每天按时段自动公开开播")
+            if not self.app.cfg.get("bili_cookie"):
+                raise ValueError("请先扫码登录B站主播账号")
+            if mode == "livehime":
+                self._validate_livehime(livehime)
+            if mode in ("livehime", "stop_only"):
+                info = await self.app.broadcast.account()
+                if not info.get("ok") or not info.get("logged_in") or not info.get("room_id"):
+                    raise ValueError(info.get("error") or "请先扫码登录正在直播的主播账号")
+                external_room_id = int(info["room_id"])
+            else:
+                title, area = self.app.cfg["broadcast"].get("title"), self.app.cfg["broadcast"].get("area_id")
+                if not isinstance(title, str) or not 1 <= len(title.strip()) <= 60:
+                    raise ValueError("请先填写直播标题再启用播放计划")
+                if type(area) is not int or area <= 0:
+                    raise ValueError("请选择直播分区再启用播放计划")
+        updated = {k: v for k, v in self.settings.items() if k != "livehime"}
+        updated.update(enabled=enabled, mode=mode, plans=plans,
+                       plans_enabled=bool(enabled and plans))
+        if enabled and mode in ("livehime", "stop_only"):
+            updated["external_room_id"] = external_room_id
+        if not enabled:
+            self.abort_start = True
+        self.app.cfg["broadcast"].update(schedule=updated, livehime=livehime)
+        config.save(self.app.cfg)
+        self.last_minute = self.clock().strftime("%Y-%m-%d %H:%M")
+        self.last_result = None
+        return self.status()
+
+    @staticmethod
+    def _clean_plans(rows):
+        cleaned, seen = [], set()
+        for index, row in enumerate(rows):
+            if not isinstance(row, dict):
+                raise ValueError("播放计划的每一段必须是时间、游戏组合")
+            start, stop = row.get("start"), row.get("stop")
+            if (not isinstance(start, str) or not _CLOCK.fullmatch(start)
+                    or not isinstance(stop, str) or not _CLOCK.fullmatch(stop)):
+                raise ValueError("播放计划的开始和结束时间必须为 HH:MM 格式")
+            if start == stop:
+                raise ValueError("同一段播放计划的开始和结束时间不能相同")
+            game = str(row.get("game") or "")
+            if game not in GAME_NAMES:
+                raise ValueError("播放计划里的游戏无效")
+            plan_id = str(row.get("id") or "").strip()[:64] or f"plan{index + 1}"
+            base, suffix = plan_id, 2
+            while plan_id in seen:
+                plan_id = f"{base}-{suffix}"
+                suffix += 1
+            seen.add(plan_id)
+            cleaned.append({"id": plan_id, "start": start, "stop": stop, "game": game})
+        for index, plan in enumerate(cleaned):
+            for other in cleaned[index + 1:]:
+                if any(a0 < b1 and b0 < a1
+                       for a0, a1 in _segments(plan["start"], plan["stop"])
+                       for b0, b1 in _segments(other["start"], other["stop"])):
+                    raise ValueError(
+                        f"播放计划时段重叠：{plan['start']}–{plan['stop']} 与 "
+                        f"{other['start']}–{other['stop']}")
+        return cleaned
+
+    def _next_occurrence(self, hhmm, now, ledger=None, key=None):
+        hour, minute = map(int, hhmm.split(":"))
+        candidate = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        done = (ledger or {}).get(key, "") if key else ""
+        if candidate <= now or done == candidate.date().isoformat():
+            candidate += timedelta(days=1)
+        return candidate
 
     def _livehime_settings(self, data):
         current = dict(self.app.cfg["broadcast"].get("livehime") or {})
@@ -166,15 +290,29 @@ class DailyBroadcastSchedule:
     def status(self):
         now = self.clock()
         settings = dict(self.settings)
+        plans = self.plans
+        plans_active = self.plans_active
         upcoming = {}
-        if settings["enabled"]:
+        if settings["enabled"] and plans_active:
+            starts = [self._next_occurrence(plan["start"], now,
+                                            self.settings.get("last_starts") or {}, plan["id"])
+                      for plan in plans]
+            stops = [self._next_occurrence(plan["stop"], now,
+                                           self.settings.get("last_stops") or {}, plan["id"])
+                     for plan in plans]
+            if starts and settings.get("mode") != "stop_only":
+                upcoming["next_start"] = min(starts).strftime("%Y-%m-%d %H:%M")
+            if stops:
+                upcoming["next_stop"] = min(stops).strftime("%Y-%m-%d %H:%M")
+        elif settings["enabled"]:
             for action in (("stop",) if settings.get("mode") == "stop_only" else ("start", "stop")):
                 hour, minute = map(int, settings[action + "_time"].split(":"))
                 next_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
                 if next_time <= now or settings["last_" + action] == next_time.date().isoformat():
                     next_time += timedelta(days=1)
                 upcoming["next_" + action] = next_time.strftime("%Y-%m-%d %H:%M")
-        return {"ok": True, **settings, "livehime": dict(self.app.cfg["broadcast"].get("livehime") or {}),
+        return {"ok": True, **settings, "plans": plans, "plans_enabled": plans_active,
+                "livehime": dict(self.app.cfg["broadcast"].get("livehime") or {}),
                 **upcoming, "last_result": self.last_result,
                 "active_action": self.active_action, "local_time": now.strftime("%Y-%m-%d %H:%M"),
                 "external_timer": {"enabled": self.timer_deadline is not None,
@@ -207,24 +345,30 @@ class DailyBroadcastSchedule:
         minute = now.strftime("%Y-%m-%d %H:%M")
         # tick 每五秒运行一次，不能只在分钟变化时检查，否则会错过提前告别。
         if not self.closing and self.settings["enabled"]:
-            hour, stop_minute = map(int, self.settings["stop_time"].split(":"))
-            deadline = now.replace(hour=hour, minute=stop_minute, second=0, microsecond=0)
-            if deadline < now:
-                deadline += timedelta(days=1)
-            remaining = (deadline - now).total_seconds()
-            day = deadline.date().isoformat()
-            if 0 < remaining <= self.FAREWELL_LEAD_SECONDS and self.settings["last_stop"] != day:
-                self.settings["last_stop"] = day
-                config.save(self.app.cfg)
-                self.abort_start = self.stop_requested = True
-                job = asyncio.create_task(self.execute("stop", wait_seconds=remaining))
-                self.daily_stop_task = job
-                self.jobs.add(job)
-                job.add_done_callback(self.jobs.discard)
+            if self.plans_active:
+                self._tick_plan_farewell(now)
+            else:
+                hour, stop_minute = map(int, self.settings["stop_time"].split(":"))
+                deadline = now.replace(hour=hour, minute=stop_minute, second=0, microsecond=0)
+                if deadline < now:
+                    deadline += timedelta(days=1)
+                remaining = (deadline - now).total_seconds()
+                day = deadline.date().isoformat()
+                if 0 < remaining <= self.FAREWELL_LEAD_SECONDS and self.settings["last_stop"] != day:
+                    self.settings["last_stop"] = day
+                    config.save(self.app.cfg)
+                    self.abort_start = self.stop_requested = True
+                    job = asyncio.create_task(self.execute("stop", wait_seconds=remaining))
+                    self.daily_stop_task = job
+                    self.jobs.add(job)
+                    job.add_done_callback(self.jobs.discard)
         if self.closing or minute == self.last_minute:
             return
         self.last_minute = minute
         if not self.settings["enabled"]:
+            return
+        if self.plans_active:
+            self._fire_plans(now)
             return
         for action in (("stop",) if self.settings.get("mode") == "stop_only" else ("start", "stop")):
             if now.strftime("%H:%M") != self.settings[action + "_time"]:
@@ -241,7 +385,54 @@ class DailyBroadcastSchedule:
             self.jobs.add(job)
             job.add_done_callback(self.jobs.discard)
 
-    async def execute(self, action, *, wait_seconds=0):
+    def _tick_plan_farewell(self, now):
+        stops = dict(self.settings.get("last_stops") or {})
+        changed = False
+        for plan in self.plans:
+            deadline = self._next_occurrence(plan["stop"], now)
+            remaining = (deadline - now).total_seconds()
+            day = deadline.date().isoformat()
+            if 0 < remaining <= self.FAREWELL_LEAD_SECONDS and stops.get(plan["id"]) != day:
+                stops[plan["id"]] = day
+                changed = True
+                self.abort_start = self.stop_requested = True
+                job = asyncio.create_task(self.execute("stop", plan=plan, wait_seconds=remaining))
+                self.daily_stop_task = job
+                self.jobs.add(job)
+                job.add_done_callback(self.jobs.discard)
+        if changed:
+            self.settings["last_stops"] = stops
+            config.save(self.app.cfg)
+
+    def _fire_plans(self, now):
+        current = now.strftime("%H:%M")
+        today = now.date().isoformat()
+        starts = dict(self.settings.get("last_starts") or {})
+        stops = dict(self.settings.get("last_stops") or {})
+        changed = False
+        fired = []
+        # 先停后开，首尾相接的下一段不会因为上一段的停止标记被拦掉。
+        for plan in self.plans:
+            if current == plan["stop"] and stops.get(plan["id"]) != today:
+                stops[plan["id"]] = today
+                changed = True
+                self.abort_start = self.stop_requested = True
+                fired.append(asyncio.create_task(self.execute("stop", plan=plan)))
+        for plan in self.plans:
+            if current == plan["start"] and starts.get(plan["id"]) != today:
+                starts[plan["id"]] = today
+                changed = True
+                self.abort_start = self.stop_requested = False
+                fired.append(asyncio.create_task(self.execute("start", plan=plan)))
+        if changed:
+            self.settings["last_starts"] = starts
+            self.settings["last_stops"] = stops
+            config.save(self.app.cfg)
+        for job in fired:
+            self.jobs.add(job)
+            job.add_done_callback(self.jobs.discard)
+
+    async def execute(self, action, *, plan=None, wait_seconds=0):
         async with self.execution_lock:
             if self.closing or not self.settings["enabled"]:
                 return
@@ -256,10 +447,13 @@ class DailyBroadcastSchedule:
                                                         room_id=self.settings.get("external_room_id", 0),
                                                         farewell=self.farewell_line(), wait_seconds=wait_seconds,
                                                         stop_on_farewell_error=True)
+                    self.active_plan_id = ""
                 elif self.app.broadcast.running or self.app.broadcast.phase == "starting":
                     result = {"ok": True, "message": "已在直播，跳过重复开播"}
                 else:
-                    result = await self.start_broadcast()
+                    if plan is not None:
+                        await self._switch_game(plan["game"])
+                    result = await self.start_broadcast(plan)
                 if result.get("ok"):
                     message = result.get("message") or ("定时开播已完成" if action == "start" else "定时停播已完成")
                 else:
@@ -274,48 +468,119 @@ class DailyBroadcastSchedule:
             finally:
                 self.active_action = ""
 
-    async def start_broadcast(self):
+    async def _switch_game(self, game: str):
+        """播放计划换游戏：先停掉上一款游戏的托管，再切配置并通知启动器。"""
+        current = str((self.app.cfg.get("game") or {}).get("active", "demontower"))
+        if game == current:
+            return False
+        if getattr(self.app, "dt", None) is not None and getattr(self.app.dt, "running", False):
+            await self.app.stop_dt()
+        self.app.cfg.setdefault("game", {})["active"] = game
+        broadcast = self.app.cfg.setdefault("broadcast", {})
+        title = str(broadcast.get("title") or "").strip()
+        if not title or title in GAME_TITLES.values():
+            broadcast["title"] = GAME_TITLES[game]
+        config.save(self.app.cfg)
+        sync = getattr(getattr(self.app, "game", None), "sync", None)
+        if callable(sync):
+            try:
+                sync(self.app.cfg)
+            except Exception:
+                pass
+        self.app.push("log", {"level": "info", "msg": f"播放计划切换到{GAME_NAMES[game]}"})
+        return True
+
+    async def _plan_selection(self, plan):
+        """按计划里的游戏找窗口和声音；窗口刚启动时等它出现。"""
+        game = plan["game"]
+        tries = self.WINDOW_TRIES if plan.get("launched") else 1
+        last_error = f"没找到{GAME_NAMES[game]}的游戏窗口"
+        for attempt in range(tries):
+            data = await self.app.broadcast.sources()
+            windows = [w for w in (data.get("windows") or [])
+                       if not w.get("minimized") and _game_window(game, str(w.get("title", "")))]
+            audio = self._plan_audio(data)
+            if data.get("ok") and windows and audio is not None:
+                default = int(data.get("default_window") or 0)
+                chosen = next((w for w in windows if w.get("hwnd") == default), windows[0])
+                return {"hwnd": int(chosen["hwnd"]), "audio_device": audio}
+            if not data.get("ok"):
+                last_error = data.get("error") or "无法枚举游戏窗口"
+            elif not windows:
+                last_error = f"没找到{GAME_NAMES[game]}的游戏窗口，请确认游戏已打开且没有最小化"
+            else:
+                last_error = "没有可用的系统声音输出设备"
+            if self.closing or self.abort_start or not self.settings["enabled"] or not self.within_broadcast_window():
+                return {"cancelled": True}
+            if attempt + 1 < tries:
+                await asyncio.sleep(1)
+        return {"error": last_error}
+
+    def _plan_audio(self, data):
+        audios = data.get("audio") or []
+        name = str(self.settings.get("audio_name") or "")
+        matches = [a for a in audios if a.get("name") == name] if name else []
+        if len(matches) == 1:
+            return int(matches[0]["id"])
+        default = data.get("default_audio")
+        if type(default) is int and any(a.get("id") == default for a in audios):
+            return default
+        return int(audios[0]["id"]) if audios else None
+
+    async def start_broadcast(self, plan=None):
         prep = await self.app.ensure_game_and_dt()
         if not prep.get("ok"):
             return {"ok": False, "error": prep.get("error") or "定时开播未执行：游戏没能启动"}
-        # 刚把游戏拉起来时窗口要一两秒才出现在枚举里；本来就在跑就不用白等
-        for attempt in range(self.WINDOW_TRIES if prep.get("launched") else 1):
-            sources = await self.app.broadcast.sources()
-            windows = [w for w in sources.get("windows", []) if w["title"] == self.settings["window_title"]]
-            devices = [a for a in sources.get("audio", []) if a["name"] == self.settings["audio_name"]]
-            if sources.get("ok") and len(windows) == 1 and len(devices) == 1:
-                break
-            if self.closing or self.abort_start or not self.settings["enabled"]:
+        if plan is not None:
+            selection = await self._plan_selection({**plan, "launched": bool(prep.get("launched"))})
+            if selection.get("cancelled"):
                 return {"ok": True, "message": "已取消本次定时开播"}
-            if attempt + 1 < self.WINDOW_TRIES:
-                await asyncio.sleep(1)
+            if selection.get("error"):
+                return {"ok": False, "error": selection["error"]}
         else:
-            return {"ok": False, "error": "定时开播未执行：游戏窗口或声音设备不存在、已最小化或存在重名"}
+            # 刚把游戏拉起来时窗口要一两秒才出现在枚举里；本来就在跑就不用白等
+            for attempt in range(self.WINDOW_TRIES if prep.get("launched") else 1):
+                sources = await self.app.broadcast.sources()
+                windows = [w for w in sources.get("windows", []) if w["title"] == self.settings["window_title"]]
+                devices = [a for a in sources.get("audio", []) if a["name"] == self.settings["audio_name"]]
+                if sources.get("ok") and len(windows) == 1 and len(devices) == 1:
+                    break
+                if self.closing or self.abort_start or not self.settings["enabled"]:
+                    return {"ok": True, "message": "已取消本次定时开播"}
+                if attempt + 1 < self.WINDOW_TRIES:
+                    await asyncio.sleep(1)
+            else:
+                return {"ok": False, "error": "定时开播未执行：游戏窗口或声音设备不存在、已最小化或存在重名"}
+            selection = {"hwnd": windows[0]["hwnd"], "audio_device": devices[0]["id"]}
         if self.closing or self.abort_start or not self.settings["enabled"] or not self.within_broadcast_window():
             return {"ok": True, "message": "已取消本次定时开播"}
-        selection = {"hwnd": windows[0]["hwnd"], "audio_device": devices[0]["id"]}
         if self.settings.get("mode") == "livehime":
-            return await self._start_livehime(selection)
-        preview = await self.app.broadcast.preview(selection)
-        if not preview.get("ok"):
-            return preview
-        if self.closing or self.abort_start or not self.settings["enabled"] or not self.within_broadcast_window():
-            await self.app.broadcast.stop_preview()
-            return {"ok": True, "message": "已取消本次定时开播"}
-        result = await self.app.broadcast.start({**selection, "title": self.app.cfg["broadcast"]["title"],
-                                                  "area_id": self.app.cfg["broadcast"]["area_id"], "confirm": True})
-        if result.get("ok"):
-            if self.closing or self.stop_requested:
-                return {"ok": True, "message": "已请求取消本次定时开播，等待停止完成"}
-            if self.abort_start or not self.settings["enabled"] or not self.within_broadcast_window():
-                self.settings["last_stop"] = self.clock().date().isoformat()
+            result = await self._start_livehime(selection)
+        else:
+            preview = await self.app.broadcast.preview(selection)
+            if not preview.get("ok"):
+                return preview
+            if self.closing or self.abort_start or not self.settings["enabled"] or not self.within_broadcast_window():
+                await self.app.broadcast.stop_preview()
+                return {"ok": True, "message": "已取消本次定时开播"}
+            result = await self.app.broadcast.start({**selection, "title": self.app.cfg["broadcast"]["title"],
+                                                      "area_id": self.app.cfg["broadcast"]["area_id"], "confirm": True})
+            if result.get("ok"):
+                if self.closing or self.stop_requested:
+                    return {"ok": True, "message": "已请求取消本次定时开播，等待停止完成"}
+                if self.abort_start or not self.settings["enabled"] or not self.within_broadcast_window():
+                    self.settings["last_stop"] = self.clock().date().isoformat()
+                    config.save(self.app.cfg)
+                    stopped = await self.app.broadcast.stop()
+                    return {"ok": True, "message": "已取消本次定时开播并停止推流"} if stopped.get("ok") else stopped
+                self.app.cfg["room_id"] = result["room_id"]
                 config.save(self.app.cfg)
-                stopped = await self.app.broadcast.stop()
-                return {"ok": True, "message": "已取消本次定时开播并停止推流"} if stopped.get("ok") else stopped
-            self.app.cfg["room_id"] = result["room_id"]
-            config.save(self.app.cfg)
-            asyncio.create_task(self.app.connect())
-            self.arm_local_timer()
+                asyncio.create_task(self.app.connect())
+                self.arm_local_timer()
+        if result.get("ok") and plan is not None:
+            self.active_plan_id = plan["id"]
+            if not result.get("message"):
+                result["message"] = f"已按播放计划开播：{GAME_NAMES[plan['game']]}"
         return result
 
     async def _start_livehime(self, selection):
@@ -642,6 +907,7 @@ class DailyBroadcastSchedule:
         self.abort_start = self.stop_requested = True
         now = self.clock()
         self.last_minute = now.strftime("%Y-%m-%d %H:%M")
+        self.active_plan_id = ""
         if self.settings["enabled"] and now.strftime("%H:%M") == self.settings["start_time"]:
             self.settings["last_start"] = now.date().isoformat()
             config.save(self.app.cfg)

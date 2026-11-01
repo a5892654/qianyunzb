@@ -178,7 +178,10 @@ DEFAULTS = {
         "auto_stop_line": "下了下了，吃白饭去了，拜拜～",
         "livehime": {"path": "", "hotkey": "", "click_x": 0.0, "click_y": 0.0},
         "schedule": {"enabled": False, "mode": "managed", "start_time": "20:00", "stop_time": "23:00",
-                     "window_title": "", "audio_name": "", "last_start": "", "last_stop": ""},
+                     "window_title": "", "audio_name": "", "last_start": "", "last_stop": "",
+                     # 播放计划：每天按多段「开始-结束-游戏」执行，启用时优先于上面的单段设置
+                     "plans": [], "plans_enabled": False,
+                     "last_starts": {}, "last_stops": {}},
     },
     "stream_theme": {
         "preset": "classic", "title": "深蓝放映室", "subtitle": "和你一起，潜入今天的冒险",

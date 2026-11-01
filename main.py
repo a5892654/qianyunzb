@@ -967,6 +967,13 @@ def build_web(app: App):
         except ValueError as error:
             return web.json_response({"ok": False, "error": str(error)}, status=400)
 
+    @routes.post("/api/broadcast/plans")
+    async def broadcast_plans_save(request):
+        try:
+            return web.json_response(await app.schedule.save_plans(await request.json()))
+        except ValueError as error:
+            return web.json_response({"ok": False, "error": str(error)}, status=400)
+
     @routes.post("/api/broadcast/timer/start")
     async def broadcast_timer_start(request):
         try:
