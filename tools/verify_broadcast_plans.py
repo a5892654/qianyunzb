@@ -121,6 +121,8 @@ class ValidationTests(Harness):
             ({"enabled": True, "plans": []}, "至少添加"),
             ({"enabled": True, "plans": [{"start": "20:00", "stop": "23:00", "game": "demontower"}],
               "authorized": False}, "确认"),
+            ({"enabled": True, "mode": "stop_only", "authorized": True,
+              "plans": [{"start": "20:00", "stop": "23:00", "game": "demontower"}]}, "开播时间"),
         ]
         for payload, want in cases:
             with self.subTest(want=want), self.assertRaises(ValueError) as ctx:

@@ -919,11 +919,19 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
     </div>
     <div class="row">
       <label class="c"><input type="checkbox" id="planEnabled">启用播放计划</label>
-      <label class="f" style="max-width:320px">开停播方式<select id="planMode"><option value="managed">本工具：自动开播和停播</option><option value="livehime">直播姬：自动开播和停播</option><option value="stop_only">直播姬 / OBS：仅定时停播</option></select></label>
+      <label class="f" style="max-width:320px">开停播方式<select id="planMode"><option value="managed">本工具：自动开播和停播</option><option value="livehime">直播姬：自动开播和停播</option></select></label>
     </div>
     <div id="planRows"></div>
     <div class="row" style="margin-top:10px"><button class="btn" id="planAdd" type="button">＋ 加一段</button><span class="hint">每一段单独选开始时间、结束时间和要播的游戏</span></div>
-    <div class="hint" id="planHint">启用前请确认已登录主播账号。本工具模式会用上方直播标题、分区，并自动选中当前游戏窗口和默认声音设备；直播姬模式会先拉起游戏、代打和千音源画面，再发送开/停快捷键。</div>
+    <div class="row" id="planLivehimeRow" style="display:none">
+      <label class="f" style="max-width:360px">直播姬程序路径<input id="planLivehimePath" placeholder="留空自动查找 livehime.exe"></label>
+      <label class="f" style="max-width:220px">开始/停止直播快捷键<input id="planLivehimeHotkey" placeholder="例如 F9"></label>
+      <button class="btn" id="planLivehimeCheck" style="margin-top:18px" type="button">检测直播姬</button>
+      <button class="btn" id="planLivehimeCalibrate" style="margin-top:18px" type="button">校准开始按钮</button>
+      <span class="hint" id="planLivehimeState" style="margin-top:18px" role="status"></span>
+    </div>
+    <div class="hint" id="planLivehimeHint" style="display:none">先在直播姬「设置 → 快捷键」给「开始/停止直播」绑定一个键（例如 F9）填到左边；版本不支持快捷键时，可清空快捷键并用「校准开始按钮」，3 秒内把鼠标移到直播姬的「开始直播」按钮上。直播姬需登录同一主播账号，场景已添加「千音源画面」窗口采集，画布 1920×1080，音频选系统声音。</div>
+    <div class="hint" id="planHint">启用前请确认已登录主播账号。本工具模式会用上方直播标题、分区，并自动选中当前游戏窗口和默认声音设备；直播姬模式会先拉起游戏、代打和千音源画面，再发送开/停快捷键。只想按点停播、不需要自动开播时，请用下方「每日定时直播」的单段计划。</div>
     <div class="hint" id="planResult" role="status" style="margin-top:8px;color:var(--red)"></div>
     <div class="row" style="justify-content:flex-end;margin-top:12px"><button class="btn" id="planCancel">取消</button><button class="btn p" id="planSave">保存播放计划</button></div>
   </div>
@@ -2407,12 +2415,24 @@ function closePlanModal() {
   $('#planModal').classList.remove('on');
   document.body.style.overflow = '';
 }
+function syncPlanMode() {
+  const livehime = $('#planMode').value === 'livehime';
+  $('#planLivehimeRow').style.display = livehime ? '' : 'none';
+  $('#planLivehimeHint').style.display = livehime ? '' : 'none';
+}
+$('#planMode').onchange = syncPlanMode;
 $('#planOpen').onclick = () => {
   const plans = (scheduleInfo.plans || []).slice();
   setPlanRows(plans);
   if (!plans.length) addPlanRow({start: '20:00', stop: '23:00', game: (CFG.game && CFG.game.active) || 'demontower'});
   $('#planEnabled').checked = !!scheduleInfo.plans_enabled;
-  $('#planMode').value = scheduleInfo.mode || 'managed';
+  $('#planMode').value = (scheduleInfo.mode === 'managed' || scheduleInfo.mode === 'livehime')
+    ? scheduleInfo.mode : 'livehime';
+  const live = scheduleInfo.livehime || {};
+  $('#planLivehimePath').value = live.path || '';
+  $('#planLivehimeHotkey').value = live.hotkey || '';
+  $('#planLivehimeState').textContent = '';
+  syncPlanMode();
   $('#planResult').textContent = '';
   $('#planModal').classList.add('on');
   document.body.style.overflow = 'hidden';
@@ -2420,6 +2440,29 @@ $('#planOpen').onclick = () => {
 $('#planClose').onclick = closePlanModal;
 $('#planCancel').onclick = closePlanModal;
 $('#planAdd').onclick = () => addPlanRow({start: '20:00', stop: '23:00', game: 'demontower'});
+$('#planLivehimeCheck').onclick = async () => {
+  const state = $('#planLivehimeState');
+  state.style.color = ''; state.textContent = '检测中…';
+  try {
+    const query = new URLSearchParams({path: $('#planLivehimePath').value.trim(),
+                                       hotkey: $('#planLivehimeHotkey').value.trim()});
+    const r = await api('/api/broadcast/livehime/check?' + query.toString());
+    if (!r.ok) throw new Error(r.error || '没有找到直播姬');
+    state.textContent = `${r.running ? '直播姬正在运行' : '直播姬未运行（到点会自动启动）'} · ${r.path || '未找到 livehime.exe'} · ${r.hotkey || '快捷键未设置'}`;
+    state.style.color = r.hotkey_ok ? '' : 'var(--red)';
+  } catch (e) { state.style.color = 'var(--red)'; state.textContent = e.message || String(e); }
+};
+$('#planLivehimeCalibrate').onclick = async () => {
+  if (!confirm('点确定后 3 秒内，把鼠标移到直播姬的「开始直播」按钮上（不要点击），千音会记录位置。')) return;
+  const state = $('#planLivehimeState');
+  state.style.color = ''; state.textContent = '3 秒内把鼠标移到直播姬的「开始直播」按钮上…';
+  try {
+    const r = await api('/api/broadcast/livehime/calibrate', {delay: 3});
+    if (!r.ok) throw new Error(r.error || '校准失败');
+    state.textContent = `已记录按钮位置 ${(r.x * 100).toFixed(1)}% / ${(r.y * 100).toFixed(1)}%，快捷键留空时到点改用点击。`;
+    scheduleInfo.livehime = {...(scheduleInfo.livehime || {}), click_x: r.x, click_y: r.y};
+  } catch (e) { state.style.color = 'var(--red)'; state.textContent = e.message || String(e); }
+};
 $('#planModal').addEventListener('click', e => { if (e.target === $('#planModal')) closePlanModal(); });
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && $('#planModal').classList.contains('on')) closePlanModal(); });
 $('#planSave').onclick = async () => {
@@ -2433,7 +2476,12 @@ $('#planSave').onclick = async () => {
   planBusy = true; $('#planSave').disabled = true; $('#planResult').textContent = '';
   try {
     await flushConfig();
-    const r = await api('/api/broadcast/plans', {enabled, mode, plans, authorized: enabled});
+    const payload = {enabled, mode, plans, authorized: enabled};
+    if (mode === 'livehime') {
+      payload.livehime = {path: $('#planLivehimePath').value.trim(),
+                          hotkey: $('#planLivehimeHotkey').value.trim()};
+    }
+    const r = await api('/api/broadcast/plans', payload);
     if (!r.ok) throw new Error(r.error || '保存播放计划失败');
     scheduleInfo = r;
     renderPlanSummary(r);

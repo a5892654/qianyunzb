@@ -152,6 +152,8 @@ class DailyBroadcastSchedule:
         mode = data.get("mode", self.settings.get("mode", "managed"))
         if mode not in ("managed", "stop_only", "livehime"):
             raise ValueError("请选择自动开停播、直播姬自动开停播或直播姬仅定时停播")
+        if mode == "stop_only":
+            raise ValueError("播放计划包含开播时间，请选择「本工具」或「直播姬」的开停播方式")
         rows = data.get("plans")
         if not isinstance(rows, list):
             raise ValueError("播放计划格式不正确")
