@@ -11,7 +11,8 @@ import aiohttp
 
 import procutil
 from live_context import mentions_rice, rice_question
-from config import BASE_DIR, SUPPORTER_WELCOME_PROMPT, SUPPORTER_WELCOME_TEMPLATES
+from emotional_value import EMOTIONAL_VALUE_PROMPT, enabled as emotional_value_enabled, viewer_cue
+from config import BASE_DIR, DEFAULT_PERSONA, SUPPORTER_WELCOME_PROMPT, SUPPORTER_WELCOME_TEMPLATES
 
 log = logging.getLogger("ai")
 
@@ -264,7 +265,9 @@ class Brain:
 
     def system_prompt(self, cfg):
         cfg_ai = cfg["ai"]
-        sp = cfg_ai.get("persona", "") + RULES.format(max_chars=cfg_ai.get("max_chars", 40))
+        sp = cfg_ai.get("persona", DEFAULT_PERSONA) + RULES.format(max_chars=cfg_ai.get("max_chars", 40))
+        if emotional_value_enabled(cfg):
+            sp += EMOTIONAL_VALUE_PROMPT
         names = self.emotion_names(cfg)
         if names:
             sp += ("\n【表情】在回复的最开头用【】标出你说这句话时的表情，只能从这些里选一个："
@@ -313,15 +316,27 @@ class Brain:
             return await self._gift_reply(cfg, ev_cfg, ev)
         lines = [l.strip() for l in ev_cfg.get("templates", "").splitlines() if l.strip()]
         question = ev.get("text", "") if ev["type"] in ("danmaku", "superchat") else ""
+        cue = viewer_cue(question) if question and emotional_value_enabled(cfg) else None
+        personal = emotional_value_enabled(cfg) and (bool(cue and cue.private) or ev.get("_personal_reply", False))
         key = (cfg.get("room_id"), ev["type"], bool(ev.get("_gift_supporter")), rice_question(question))
         history = self.recent_replies[key]
         recent = [text.replace(name, "观众") if name else text for text, name in history]
         name = ev.get("name", "")
+        def remember(text):
+            if not personal:
+                history.append((text, name))
+
         normalize_name = lambda text: text.replace(name, "观众") if name else text
         random.shuffle(lines)
         template_text = varied_line([fill(line, ev) for line in lines],
                                    [text.replace(old_name, name) if old_name else text for text, old_name in history])
         if ev_cfg.get("mode") == "ai":
+            if cue:
+                # 模型离线或返回空文本时，也要接住这条留言，而不是只复读原弹幕。
+                template_text = (cue.fallbacks[self.reply_turns[key] % len(cue.fallbacks)] if personal
+                                 else varied_line(cue.fallbacks, [text for text, _ in history]))
+                if ev["type"] == "superchat":
+                    template_text = f"谢谢{name}的留言。" + template_text
             try:
                 prompt = fill(ev_cfg.get("ai_prompt", ""), ev)
                 prompt += ("\n本次表达方式：" + REPLY_STYLES[self.reply_turns[key] % len(REPLY_STYLES)]
@@ -338,21 +353,23 @@ class Brain:
                                "聊到游戏时结合当前局势，普通闲聊就自然接话，不要只继续解说游戏。")
                 if conversation:
                     prompt += "\n" + conversation
+                if cue:
+                    prompt += cue.prompt()
                 # 每条事件只调用一次模型，避免为了换措辞再等一轮。
                 text, emotion = await self.ai(cfg, prompt, question=question)
                 if text and (ev["type"] in ("danmaku", "superchat")
                              or not similar_reply(normalize_name(text), recent)):
-                    history.append((text, name))
+                    remember(text)
                     if ev["type"] == "danmaku" and ev_cfg.get("read_original"):
                         text = f"{ev['name']}说：{ev['text']}。{text}"
-                    return text, "AI", emotion
+                    return text, "AI", emotion or (cue.emotion(self.emotion_names(cfg)) if cue else "")
             except Exception as e:
                 log.warning("AI 生成失败，改用模板：%s", e)
-                history.append((template_text, name))
-                return template_text, f"模板(AI失败:{str(e)[:80]})", ""
+                remember(template_text)
+                return template_text, f"模板(AI失败:{str(e)[:80]})", cue.emotion(self.emotion_names(cfg)) if cue else ""
         if template_text:
-            history.append((template_text, name))
-        return template_text, "模板", ""
+            remember(template_text)
+        return template_text, "模板", cue.emotion(self.emotion_names(cfg)) if cue and ev_cfg.get("mode") == "ai" else ""
 
     async def _gift_reply(self, cfg, ev_cfg, ev):
         intro, extra = gift_thanks(ev)

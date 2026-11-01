@@ -10,28 +10,29 @@ from config import FOLLOW_REMINDER_PROMPT, FOLLOW_REMINDER_TEMPLATES
 from brain import similar_reply, varied_line
 from conversation import Conversation
 from live_context import mentions_rice, rice_question
+from emotional_value import CARE_CLOSINGS, enabled as emotional_value_enabled, viewer_cue
 
 log = logging.getLogger("interaction")
 
 TOPICS = (
-    "你们玩卡牌游戏，更喜欢稳扎稳打，还是整点刺激的打法？",
-    "说到补充体力，今天有没有吃到什么好吃的？给我报个菜名呗。",
-    "刚刚一直盯着屏幕，记得活动一下肩膀，我也缓口气。",
-    "大家平时最喜欢玩哪种游戏？我想听听你们的口味。",
-    "你们玩游戏时会放什么音乐？我想给这段休息配个背景音。",
-    "玩游戏遇到难关，你们会先研究打法，还是直接再来一把？",
-    "如果今天的心情是一种天气，你们那边会是晴天还是下雨？",
-    "你们有没有哪款游戏，隔一段时间就想回去再玩一次？",
-    "有时候最开心的不是赢，是突然看懂了之前没想通的地方。",
-    "刚来的朋友可以一起聊聊，你们是怎么发现这个游戏的呀？",
-    "要给这场直播起个有趣的名字，你们的第一反应是什么？",
-    "要是选一个游戏角色当队友，你们最看重实力还是性格？",
-    "你们更享受一个人慢慢探索，还是和朋友一起热闹地玩？",
-    "小时候玩过的游戏里，有没有一段音乐你现在还记得？",
-    "这会儿可以歇歇眼睛，喝口水，游戏和聊天咱们都慢慢来。",
-    "如果能设计一张离谱但好玩的卡牌，你们想给它什么效果？",
-    "最近有没有哪件小事让你特别开心？我想听点快乐的消息。",
-    "有些游戏输了也想再开一局，这种不服气你们懂吧。",
+    "我对奇怪但有用的打法毫无抵抗力，你们有私藏的吗？",
+    "今天吃到什么好吃的没？报个菜名，让我开开眼。",
+    "肩膀放松一下。盯屏幕这么认真，眼睛也得放个小假。",
+    "你们最近在玩什么？我先听听，万一发现宝藏呢。",
+    "要给休息时间配首歌，你们会选哪首？",
+    "遇到难关我就想再试一次，这股不服气你们懂吧。",
+    "如果今天的心情有天气预报，你们那边是什么天气？",
+    "有没有一款游戏，隔段时间就能把你重新勾回去？",
+    "突然想通一个打法的时候，脑袋里像有个小灯亮了。",
+    "刚来的可以聊聊怎么发现这游戏的，我有点好奇。",
+    "给今天的直播起个离谱标题？先说好，不许全是我的黑历史。",
+    "选游戏队友时，你们会被什么奇怪的小优点打动？",
+    "一个人研究有意思，凑在一起瞎聊也挺好，各有各的快乐。",
+    "哪段游戏音乐一响，你们就知道是谁的童年回来了？",
+    "记得喝口水，水杯别只负责在旁边当摆设。",
+    "让你设计一张怪牌，什么效果能让对面看完愣住？",
+    "今天有什么开心的小事？我也想分一点快乐。",
+    "好看的配合就像拼图扣上最后一块，想想就舒服。",
 )
 
 CHAT_STYLES = (
@@ -42,9 +43,9 @@ CHAT_STYLES = (
     "从日常生活或游戏体验切入，邀请随意接话，不要复述上一轮问题。",
 )
 
-CLOSINGS = ("刚才那个话题先聊到这儿，咱们慢慢玩。", "不急着接话，轻轻松松看一会儿就好。",
-            "咱们边玩边聊，想到什么再随时接上。")
-CONTINUATIONS = ("刚才的想法挺有意思，咱们边玩边聊。", "这段聊得挺开心，咱们慢慢接着聊。")
+CLOSINGS = ("这个话题先放口袋里，想到再接着聊。", "不急着接话，舒服地待着就好。",
+            "行，先陪你们玩着，有话随时插进来。")
+CONTINUATIONS = ("刚才那个想法还挺有意思，我再琢磨一下。", "和你们聊着还挺开心的，咱们接着来。")
 
 
 class AudienceInteraction:
@@ -116,8 +117,17 @@ class AudienceInteraction:
             return
         if rice_question(ev.get("text", "")) or mentions_rice(text):
             return
-        self.dialogue.append({"at": self.clock(), "name": ev.get("name", ""),
+        private = self.personal_reply(ev)
+        self.dialogue.append({"at": self.clock(), "name": ev.get("name", ""), "private": private,
                               "text": str(ev.get("text", ""))[:300], "reply": text[:200]})
+
+    def personal_reply(self, ev):
+        if not emotional_value_enabled(self.app.cfg):
+            return False
+        cue = viewer_cue(ev.get("text", ""))
+        topic = self.conversation.current()
+        return bool(cue and cue.private) or bool(
+            topic and topic.get("private") and topic.get("viewer") == self.conversation.viewer(ev))
 
     def ready(self, *, follow=False):
         self.sync_room()
@@ -130,6 +140,7 @@ class AudienceInteraction:
         audience = bool(self.viewers) or (follow and getattr(broadcast, "phase", "") == "live")
         activity = self.last_activity if self.last_activity is not None else self.room_started
         return (enabled and self.room is not None and audience
+                and not (follow and emotional_value_enabled(self.app.cfg) and now < self.conversation.care_until)
                 and not self.pipe.paused and not self.pipe.pending_replies and not self.pipe.merging
                 and getattr(schedule, "active_action", "") != "farewell"
                 and getattr(broadcast, "phase", "") != "stopping"
@@ -160,7 +171,13 @@ class AudienceInteraction:
         self.sync_room()
         if (ev.get("_interaction_epoch") == self.epoch
                 and not rice_question(ev.get("text", "")) and not mentions_rice(text)):
-            self.conversation.replied(ev, text)
+            self.conversation.replied(ev, text, emotional_value=emotional_value_enabled(self.app.cfg))
+
+    def topic_options(self, plan):
+        topic = self.conversation.current()
+        if plan == "close" and topic and topic.get("private"):
+            return CARE_CLOSINGS
+        return CLOSINGS if plan == "close" else CONTINUATIONS if plan == "continue" else TOPICS
 
     def tick(self):
         follow_ready = self.ready(follow=True)
@@ -184,7 +201,7 @@ class AudienceInteraction:
             fallback = lines[self.follow_topic % len(lines)]
             self.follow_topic += 1
         else:
-            options = CLOSINGS if plan == "close" else CONTINUATIONS if plan == "continue" else TOPICS
+            options = self.topic_options(plan)
             fallback = options[self.topic % len(options)]
             self.topic += 1
         self.last_prompt = now
@@ -202,6 +219,7 @@ class AudienceInteraction:
         now = self.clock()
         recent = [{k: v for k, v in item.items() if k != "at"}
                   for item in self.dialogue if now - item["at"] < self.PRESENCE_SECONDS
+                  and not item.get("private")
                   and not rice_question(item.get("text", "")) and not mentions_rice(item.get("reply", ""))]
         # 普通解说另记，避免频繁的游戏台词挤掉先前主动问过的话题。
         spoken = [line for line in dict.fromkeys([*self.recent_lines, *self.recent_speech]) if not mentions_rice(line)]
@@ -245,7 +263,7 @@ class AudienceInteraction:
                 or (not follow and plan == "close" and Conversation.is_question(text))):
             templates = self.settings.get("follow_templates") or FOLLOW_REMINDER_TEMPLATES
             options = ([line.strip() for line in templates.splitlines() if line.strip()] if follow
-                       else list(CLOSINGS if plan == "close" else CONTINUATIONS if plan == "continue" else TOPICS))
+                       else list(self.topic_options(plan)))
             options = [ev["text"], *(line for line in options if line != ev["text"])]
             text, emotion = varied_line(options, spoken), ""
         # 等模型时有新弹幕、切房间、暂停或开始下播，就把这句让给观众。

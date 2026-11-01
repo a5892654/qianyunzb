@@ -22,8 +22,9 @@ RADIO_RECT = (660, 978, 1858, 1040)
 RADIO_HINT_W = 240
 RADIO_SWITCH_SECONDS = 6.0
 CHAT_TTL = 120
-CHAT_SLOTS = 4
-CHAT_SLOT_H = 111
+CHAT_SLOTS = 5
+CHAT_SLOT_H = 96
+CHAT_CARD_H = 88
 CHAT_ANIM_SECONDS = 0.38
 # 舰队身份在弹幕卡片上的配色；粉丝牌用直播间自己的勋章色。
 GUARD_NAMES = {1: "总督", 2: "提督", 3: "舰长"}
@@ -198,9 +199,8 @@ class StreamTheme:
     def _chat_panel(self, settings, now):
         show = settings.get("show_chat", True)
         with self._lock:
-            messages = [m for m in self._messages if now - m[1] < CHAT_TTL]
+            messages = [m for m in self._messages if now - m[1] < CHAT_TTL][-CHAT_SLOTS:]
             version = self._version
-        messages = messages[-CHAT_SLOTS:]
         token = (version, tuple(m[0] for m in messages), show)
         if token != self._chat_token:
             if show:
@@ -230,7 +230,7 @@ class StreamTheme:
                     if end < 0 and progress >= 1:
                         continue
                     y = int(round((start + (end - start) * ease) * CHAT_SLOT_H))
-                    if y + 99 <= 0 or y >= image.height:
+                    if y + CHAT_CARD_H <= 0 or y >= image.height:
                         continue
                     if entering:
                         alpha = ease
@@ -261,8 +261,8 @@ class StreamTheme:
             fill, edge = (255, 238, 243, a(232)), (251, 114, 153, a(255))
         else:
             fill, edge = (233, 249, 255, a(227)), (167, 222, 243, a(255))
-        d.rounded_rectangle((0, y, 371, y + 99), 14, fill=fill, outline=edge, width=1)
-        d.ellipse((16, y + 17, 24, y + 25), fill=(36, 165, 202, a(255)))
+        d.rounded_rectangle((0, y, 371, y + CHAT_CARD_H), 14, fill=fill, outline=edge, width=1)
+        d.ellipse((16, y + 14, 24, y + 22), fill=(36, 165, 202, a(255)))
         x = 34
         if medal.get("name"):
             level = int(medal.get("level") or 0)
@@ -270,14 +270,14 @@ class StreamTheme:
             color = int(medal.get("color") or 0)
             rgb = ((color >> 16) & 255, (color >> 8) & 255, color & 255) if color else (43, 125, 166)
             fg = (255, 255, 255) if 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2] < 150 else (31, 69, 88)
-            x = self._chip(d, x, y + 8, label, rgb, fg, alpha) + 4
+            x = self._chip(d, x, y + 6, label, rgb, fg, alpha) + 4
         if guard in GUARD_COLORS:
-            x = self._chip(d, x, y + 8, GUARD_NAMES[guard], GUARD_COLORS[guard], (255, 255, 255), alpha) + 4
+            x = self._chip(d, x, y + 6, GUARD_NAMES[guard], GUARD_COLORS[guard], (255, 255, 255), alpha) + 4
         if admin:
-            x = self._chip(d, x, y + 8, "房管", (251, 114, 153), (255, 255, 255), alpha) + 4
+            x = self._chip(d, x, y + 6, "房管", (251, 114, 153), (255, 255, 255), alpha) + 4
         if price:
-            x = self._chip(d, x, y + 8, f"¥{price:g}", (240, 166, 60), (255, 255, 255), alpha) + 4
-        self._text(d, (x, y + 9), name, self.font(16, True), (54, 114, 141, a(255)), 363 - x)
+            x = self._chip(d, x, y + 6, f"¥{price:g}", (240, 166, 60), (255, 255, 255), alpha) + 4
+        self._text(d, (x, y + 7), name, self.font(16, True), (54, 114, 141, a(255)), 363 - x)
         # Wrap to two lines using measured glyph widths (CJK + emoji).
         line, lines = "", []
         for char in text:
@@ -292,7 +292,7 @@ class StreamTheme:
         elif len(lines) == 2:
             lines[-1] = lines[-1][:-1] + "…"
         for j, line in enumerate(lines):
-            d.text((17, y + 36 + j * 27), line, font=self.font(20), fill=(25, 74, 102, a(255)))
+            d.text((17, y + 31 + j * 25), line, font=self.font(20), fill=(25, 74, 102, a(255)))
 
     def _chip(self, d, x, y, text, bg, fg, alpha):
         font = self.font(12, True)

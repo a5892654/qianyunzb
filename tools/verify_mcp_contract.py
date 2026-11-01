@@ -264,7 +264,7 @@ class ContractTests(unittest.TestCase):
 
     def test_system_prompt_uses_current_skin_emotions(self):
         emotions = [{"name": "开心", "motion": "idle", "keywords": "拿下"}]
-        player = Player({}, Mock(), emotions=lambda: emotions)
+        player = Player({"persona": ""}, Mock(), emotions=lambda: emotions)
         prompt = player._system_prompt()
         self.assertIn('"emotion"', prompt)
         self.assertIn('"name": "开心"', prompt)

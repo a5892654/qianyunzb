@@ -65,6 +65,7 @@ class Broadcast:
         self.capture.theme_compositor = self.theme
         if getattr(app, "rice", None) is not None:
             self.capture.rice_compositor = RiceCompositor(app.rice, lambda: app.cfg.get("rice_counter", {}))
+        self.capture.banner_compositor = getattr(app, "gift_banner", None)
         self.platform = None
         self.lock = asyncio.Lock()
         self.phase = "idle"

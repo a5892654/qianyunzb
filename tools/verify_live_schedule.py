@@ -16,6 +16,9 @@ config.save = lambda cfg: SAVED.append(json.loads(json.dumps(cfg)))
 config.load = lambda: {}
 from live_schedule import DailyBroadcastSchedule  # noqa: E402
 
+TMP_EXE = Path(tempfile.mkdtemp(prefix="wt_livehime_")) / "livehime.exe"
+TMP_EXE.write_bytes(b"")
+
 _lines, _results = [], []
 def emit(x=""):
     _lines.append(x); print(x, file=sys.stderr, flush=True)
@@ -32,6 +35,17 @@ def src(h=1111, a=2222, dup=False, miss=False, ok=True, err=""):
         [{"hwnd": h + 1, "title": "DemoTower"}] if dup else [])
     return {"ok": ok, "error": err, "windows": ws, "audio": [{"id": a, "name": "loop-x"}]}
 
+def account_seq(*states):
+    calls = {"i": 0}
+    async def answer():
+        index = min(calls["i"], len(states) - 1)
+        calls["i"] += 1
+        state = states[index]
+        if isinstance(state, Exception):
+            raise state
+        return {"ok": True, "logged_in": True, "room_id": 42, "live_status": state}
+    return answer
+
 def make(iso="2026-10-01 07:00", **st):
     SAVED.clear()
     sch = {"enabled": False, "start_time": "08:00", "stop_time": "18:00", "window_title": "DemoTower",
@@ -43,17 +57,30 @@ def make(iso="2026-10-01 07:00", **st):
     br.sources, br.preview = AsyncMock(return_value=src()), AsyncMock(return_value={"ok": True})
     br.stop_preview = AsyncMock(return_value={"ok": True})
     br.start, br.stop = AsyncMock(return_value={"ok": True, "room_id": 42}), AsyncMock(return_value={"ok": True})
+    br.start_source = AsyncMock(return_value={"ok": True})
+    br.stop_source = AsyncMock(return_value={"ok": True})
+    br.stop_external = AsyncMock(return_value={"ok": True, "stopped": True, "room_id": 42})
     br.account = AsyncMock(return_value={"ok": True, "logged_in": True, "room_id": 42, "live_status": 0})
-    app = types.SimpleNamespace(broadcast=br, pipe=Mock(say_job_id=Mock(return_value=1),
+    lh = Mock(ensure_running=AsyncMock(return_value={"ok": True, "launched": True,
+                                                     "window": {"hwnd": 1, "title": "哔哩哔哩直播姬"}}),
+              trigger=Mock(return_value={"ok": True, "method": "hotkey", "message": "已向直播姬发送开播快捷键"}),
+              check=Mock(return_value={"ok": True, "path": str(TMP_EXE)}),
+              cursor_ratio=Mock(return_value={"ok": True, "x": 0.5, "y": 0.9}))
+    app = types.SimpleNamespace(broadcast=br, livehime=lh, pipe=Mock(say_job_id=Mock(return_value=1),
                                                       spoken_done=Mock(return_value=True)),
                                 pushes=[], connect=AsyncMock(),
                                 ensure_game_and_dt=AsyncMock(return_value={"ok": True}),
+                                dt=Mock(running=True), stop_dt=AsyncMock(),
+                                game=types.SimpleNamespace(sync=Mock()),
                                 cfg={"bili_cookie": "FAKE-SESSDATA", "room_id": 0, "audio": {},
-                                     "broadcast": {"title": "千音", "area_id": 591, "schedule": sch}})
+                                     "broadcast": {"title": "千音", "area_id": 591, "schedule": sch,
+                                                   "livehime": {"path": "", "hotkey": "", "click_x": 0.0, "click_y": 0.0}}})
     app.push = lambda k, d: app.pushes.append((k, dict(d)))
     now = [dt(iso)]
     schedule = DailyBroadcastSchedule(app, clock=lambda: now[0])
     schedule.FAREWELL_TAIL = 0
+    schedule.LIVE_STATUS_INTERVAL = 0.01
+    schedule.LIVEHIME_STOP_INTERVAL = 0.01
     return schedule, app, now
 
 async def drain(s):
@@ -310,6 +337,12 @@ async def phase_api():
         req(r.status == 403 and len(SAVED) == n0, "POST /broadcast/schedule 缺 X-BVB 应 403 零写入")
         g = await (await client.get("/api/broadcast/schedule")).json()
         req(g["ok"] and g["enabled"] and g["start_time"] == "08:00" and g["next_start"], "GET schedule 契约: " + str(g))
+        lh = await (await client.get("/api/broadcast/livehime/check")).json()
+        req(lh["ok"] and lh["path"] == str(TMP_EXE), "GET livehime/check: " + str(lh))
+        a.livehime.cursor_ratio.return_value = {"ok": True, "x": 0.42, "y": 0.88}
+        cal = await (await client.post("/api/broadcast/livehime/calibrate", json={"delay": 1}, headers=hdr)).json()
+        req(cal["ok"] and a.cfg["broadcast"]["livehime"]["click_x"] == 0.42
+            and a.cfg["broadcast"]["livehime"]["click_y"] == 0.88, "POST livehime/calibrate: " + str(cal))
         p = await (await client.post("/api/broadcast/schedule", json=payload(start_time="25:00"), headers=hdr)).json()
         req(not p["ok"] and "HH:MM" in p["error"], "POST schedule 非法时间应拒绝")
         st = await (await client.post("/api/broadcast/stop", headers=hdr)).json()
@@ -383,8 +416,144 @@ async def s21_scheduled_start_arms_duration_and_farewell():
     req(result["ok"] and a.auto_stop_task is not None, "定时开播没有启用时长倒计时")
     a.broadcast.running = True
     await asyncio.wait_for(a.auto_stop_task, 1)
-    req(a.broadcast.stop.await_count == 1 and a.pipe.say_job_id.call_count == 1,
-        "定时开播的时长倒计时必须先告别再停播")
+    req(a.broadcast.stop.await_count == 1 and a.pipe.say_job_id.call_count == 1
+        and a.stop_dt.await_count == 1,
+        "定时开播的时长倒计时必须先告别再停播，并同步暂停代打")
+
+
+async def s22_livehime_start():
+    s, a, now = make(enabled=True, mode="livehime")
+    a.broadcast.account = AsyncMock(side_effect=account_seq(0, 1))
+    await fire(s, now, "2026-10-01 08:00")
+    await asyncio.sleep(0.02)
+    req(a.broadcast.start_source.await_count == 1 and a.broadcast.preview.await_count == 0,
+        "直播姬模式应先开源画面，且不重复 preview")
+    req(a.livehime.ensure_running.await_count == 1 and a.livehime.trigger.call_count == 1
+        and a.livehime.trigger.call_args.args[0] == "start", "没拉起或触发直播姬")
+    req(a.broadcast.start.await_count == 0, "直播姬模式不应调用千音推流开播")
+    req(a.cfg["room_id"] == 42 and s.last_result["ok"] and "直播姬已开播" in s.last_result["message"],
+        "直播姬开播未落账: " + str(s.last_result))
+    req(a.connect.await_count == 1, "开播后未连接弹幕")
+
+
+async def s23_livehime_already_live():
+    s, a, now = make(enabled=True, mode="livehime")
+    a.broadcast.account = AsyncMock(side_effect=account_seq(1))
+    await fire(s, now, "2026-10-01 08:00")
+    await asyncio.sleep(0.02)
+    req(a.broadcast.start_source.await_count == 0 and a.livehime.ensure_running.await_count == 0
+        and a.livehime.trigger.call_count == 0, "已在直播仍拉起/触发直播姬")
+    req(a.cfg["room_id"] == 42 and s.last_result["ok"] and "跳过" in s.last_result["message"],
+        "已在直播未跳过: " + str(s.last_result))
+
+
+async def s24_livehime_trigger_fails():
+    s, a, now = make(enabled=True, mode="livehime")
+    a.broadcast.account = AsyncMock(side_effect=account_seq(0))
+    a.livehime.trigger = Mock(return_value={"ok": False, "error": "直播姬快捷键未绑定"})
+    await fire(s, now, "2026-10-01 08:00")
+    req(a.broadcast.start_source.await_count == 1 and a.broadcast.start.await_count == 0
+        and s.last_result["ok"] is False and "快捷键" in s.last_result["message"],
+        "快捷键失败未按失败处理: " + str(s.last_result))
+
+
+async def s25_livehime_not_confirmed():
+    s, a, now = make(enabled=True, mode="livehime")
+    s.LIVE_STATUS_TRIES = 2
+    a.broadcast.account = AsyncMock(side_effect=account_seq(0))
+    await fire(s, now, "2026-10-01 08:00")
+    req(a.broadcast.start_source.await_count == 1 and a.livehime.trigger.call_count == 1
+        and s.last_result["ok"] is False and "没有变成直播中" in s.last_result["message"]
+        and a.cfg["room_id"] == 0, "未确认开播却落账: " + str(s.last_result))
+
+
+async def s26_livehime_stop_uses_hotkey_and_api():
+    s, a, now = make(enabled=True, mode="livehime")
+    a.broadcast.account = AsyncMock(side_effect=account_seq(1, 0))
+    result = await s.stop_now()
+    req(a.livehime.trigger.call_count == 1 and a.livehime.trigger.call_args.args[0] == "stop",
+        "停播未发送直播姬停止键")
+    req(a.broadcast.stop_external.await_count == 1 and a.broadcast.stop_external.await_args.args[0] == 42,
+        "停播未用 API 兜底结束直播间: " + str(a.broadcast.stop_external.await_args))
+    req(result.get("ok") and a.broadcast.stop.await_count == 0, "直播姬停播不应走本工具停推流")
+
+
+async def s27_livehime_save_sets_global_settings():
+    s, a, now = make(enabled=True)
+    a.cfg["broadcast"]["livehime"].update(click_x=0.42, click_y=0.88)
+    st = await s.save(payload(mode="livehime", livehime={"path": str(TMP_EXE), "hotkey": "ctrl+alt+f9"}))
+    livehime = a.cfg["broadcast"]["livehime"]
+    req(livehime["path"] == str(TMP_EXE) and livehime["hotkey"] == "Ctrl+Alt+F9",
+        "未保存直播姬设置: " + str(livehime))
+    req(livehime["click_x"] == 0.42 and livehime["click_y"] == 0.88,
+        "保存计划丢失了已校准的点击坐标: " + str(livehime))
+    req(a.cfg["broadcast"]["schedule"]["mode"] == "livehime"
+        and a.cfg["broadcast"]["schedule"]["external_room_id"] == 42
+        and a.cfg["broadcast"]["schedule"]["window_title"] == "DemoTower",
+        "直播姬计划未落账: " + str(a.cfg["broadcast"]["schedule"]))
+    req(st["ok"] and st["livehime"]["hotkey"] == "Ctrl+Alt+F9", "status 未回显直播姬设置")
+
+
+async def s28_livehime_save_rejects():
+    cases = [
+        ({"path": str(TMP_EXE), "hotkey": ""}, "快捷键"),
+        ({"path": "C:/nope/livehime.exe", "hotkey": "F9"}, "不存在"),
+        ({"path": str(TMP_EXE), "hotkey": "Ctrl+Alt"}, "快捷键"),
+    ]
+    for livehime, want in cases:
+        s, a, _ = make(enabled=True)
+        n0 = len(SAVED)
+        error = None
+        try:
+            await s.save(payload(mode="livehime", livehime=livehime))
+        except ValueError as exc:
+            error = str(exc)
+        req(error is not None and want in error and len(SAVED) == n0,
+            "livehime save 应拒绝[%s] got=%r" % (want, error))
+
+
+async def s29_livehime_cancel_during_ready():
+    s, a, now = make(enabled=True, mode="livehime")
+    a.broadcast.account = AsyncMock(side_effect=account_seq(0))
+    ready, release = asyncio.Event(), asyncio.Event()
+    async def slow_ready(_timeout):
+        ready.set()
+        await release.wait()
+        return {"ok": True, "launched": True}
+    a.livehime.ensure_running.side_effect = slow_ready
+    now[0] = dt("2026-10-01 08:00"); s.tick(); await ready.wait()
+    s.abort_start = True; release.set(); await drain(s)
+    req(a.livehime.trigger.call_count == 0 and a.broadcast.start.await_count == 0,
+        "取消后仍触发了直播姬开播")
+    req(s.last_result["ok"] and "取消" in s.last_result["message"], "取消未记结果: " + str(s.last_result))
+
+
+async def s30_livehime_daily_stop():
+    s, a, now = make(enabled=True, mode="livehime")
+    a.broadcast.account = AsyncMock(side_effect=account_seq(1, 0))
+    await fire(s, now, "2026-10-01 18:00")
+    req(a.livehime.trigger.call_count == 1 and a.livehime.trigger.call_args.args[0] == "stop"
+        and a.broadcast.stop_external.await_count == 1 and s.settings["last_stop"] == "2026-10-01",
+        "每日停播未按直播姬+API 执行: " + str(s.last_result))
+
+
+async def s31_auto_stop_also_stops_autoplay():
+    # 自动停播必须连代打一起收，否则下播后 AI 还在替观众打游戏
+    s, a, now = make(enabled=True)
+    a.broadcast.running = True
+    await fire(s, now, "2026-10-01 18:00")
+    req(a.stop_dt.await_count == 1 and a.broadcast.stop.await_count == 1,
+        "本工具每日停播没有同步暂停代打")
+    # 直播姬每日停播（本地没有推流，靠 B站状态判断在直播）
+    s2, a2, now2 = make(enabled=True, mode="livehime")
+    a2.broadcast.account = AsyncMock(side_effect=account_seq(1, 0))
+    await fire(s2, now2, "2026-10-01 18:00")
+    req(a2.stop_dt.await_count == 1 and a2.broadcast.stop_external.await_count == 1,
+        "直播姬每日停播没有同步暂停代打")
+    # 直播间本来就没开播：停播无事发生，不该动代打
+    s3, a3, now3 = make(enabled=True, mode="stop_only", external_room_id=42)
+    await fire(s3, now3, "2026-10-01 18:00")
+    req(a3.stop_dt.await_count == 0, "没在直播却暂停了代打")
 
 
 SUITES = [s01_disabled, s02_day_start_stop, s03_cross_midnight, s04_minute_and_rollback, s05_restart_ledger,
@@ -392,7 +561,11 @@ SUITES = [s01_disabled, s02_day_start_stop, s03_cross_midnight, s04_minute_and_r
           s10_fail_once, s11_save_rejects, s12_save_enabled_ok, s13_disable_keeps_live,
           s14_stop_now_during_slow_preview, s15_abort_after_start_ok, s16_close_cancels_pending,
           s17_sleep_past_stop_cancels_start, s18_begin_overrun_stops_once, s19_account_change_disables_plan,
-          s20_auto_start_game_and_dt, s21_scheduled_start_arms_duration_and_farewell]
+          s20_auto_start_game_and_dt, s21_scheduled_start_arms_duration_and_farewell,
+          s22_livehime_start, s23_livehime_already_live, s24_livehime_trigger_fails,
+          s25_livehime_not_confirmed, s26_livehime_stop_uses_hotkey_and_api,
+          s27_livehime_save_sets_global_settings, s28_livehime_save_rejects,
+          s29_livehime_cancel_during_ready, s30_livehime_daily_stop, s31_auto_stop_also_stops_autoplay]
 
 async def amain():
     t0 = time.time()

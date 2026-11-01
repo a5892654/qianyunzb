@@ -33,17 +33,27 @@ def scene(state):
 
 
 LINES = {
-    "low_health": ("这下有点悬了，我先稳住！", "血线压下来了，得认真一点了。", "哎哟，这会儿可不能贪了。"),
-    "hurt": ("哎，这一下掉血有点疼！", "这波吃亏了，后面得更小心。", "嘶，这下真有点肉疼。"),
-    "heal": ("缓过来一点了，接着稳稳打。", "血补上来一些，心里踏实多了。", "这口补得舒服，继续慢慢来。"),
-    "boss": ("到头目这儿了，我先认真看一下。", "这场得留点神，先看清楚再出手。", "好，硬仗来了，慢慢拆招。"),
-    "win": ("拿下了！这会儿能松口气了。", "这场过了，缓一缓再继续！", "收工收工，看看接下来有什么。"),
-    "clutch_win": ("呼，撑过去了，刚才真有点悬！", "这也挺过来了！刚才心都提起来了。", "险归险，总算拿下了，喘口气。"),
-    "death": ("哎，还是倒了，这波得记一下教训。", "这次没撑住，缓一缓再说。", "这波吃亏了，得好好想想。"),
-    "relic": ("新的遗物到手了，看看能怎么搭。", "多了一件遗物，试试新的配合。", "欸，收下这件遗物，看看效果。"),
+    "low_health": ("别慌，我先认真看看。", "血线有点悬，先不贪了。", "嘴硬归嘴硬，这会儿得稳住。"),
+    "hurt": ("嘶，这下真疼，记住了。", "这波吃亏了，我得留神。", "刚才那一下，疼得很具体。"),
+    "heal": ("这口补上来，心里踏实了。", "缓过来一点，接着打。", "呼，血条总算有点精神了。"),
+    "boss": ("头目来了，我先看清楚。", "这场不闹了，认真拆招。", "好，硬仗来了，咱们稳住。"),
+    "win": ("拿下！我还是有两下子的嘛。", "过了过了，允许我得意一下。", "这场打完了，先松口气。"),
+    "clutch_win": ("呼，刚才真悬，给我紧张的。", "险胜也是胜，先让我缓口气。", "撑过来了，我的心终于坐下了。"),
+    "death": ("行，这波是我没打好，认了。", "嘴硬没救回来，下把得改。", "倒了，先看看哪儿出了问题。"),
+    "relic": ("新遗物到手，看看能玩什么花样。", "收下了，我有点期待这个配合。", "欸，多了件宝贝，我研究一下。"),
 }
 PRIORITY = {"death": 100, "clutch_win": 95, "win": 90, "low_health": 80,
             "hurt": 60, "relic": 50, "boss": 40, "heal": 30}
+MOMENT_TONES = {
+    "low_health": "紧张可以说出来，随后稳住，不朝观众发火或要求安慰。",
+    "hurt": "吃亏时短短反应一下，再认真想下一步，不甩锅。",
+    "heal": "缓过来时自然松口气，让大家跟得上情绪变化。",
+    "boss": "认真迎战，带一点期待，让观众感到一起进入关键时刻。",
+    "win": "把这份确定的胜利与大家分享，开心、小得意都可以，不要求喝彩。",
+    "clutch_win": "先松一口气，再分享险胜的开心，别只机械报告赢了。",
+    "death": "先认自己的失误，再留一点再试的劲头，不责怪观众或贬低自己。",
+    "relic": "对已经获得的新东西表达好奇和期待，不编造效果已生效。",
+}
 
 
 class GameCommentary:
@@ -125,7 +135,7 @@ class GameCommentary:
             self.pending = None
         return self.pending
 
-    def prompt(self, state):
+    def prompt(self, state, *, emotional_value=True):
         situation = scene(state)
         prompt = ("\n【直播说话节奏】" + situation["label"]
                   + f"。本次 say 请说一句约{min(situation['max_chars'], 30)}字的自然口语，保持边玩边聊，"
@@ -134,6 +144,8 @@ class GameCommentary:
         if moment:
             prompt += ("\n【刚发生的真实变化】" + json.dumps(moment["facts"], ensure_ascii=False)
                        + "。这次优先自然反应这件事，先有感受再考虑一句想法，不要复述数值或编造原因。")
+            if emotional_value:
+                prompt += "\n【这一刻的情绪】" + MOMENT_TONES[moment["kind"]]
         return prompt
 
     def fallback(self):
@@ -145,12 +157,14 @@ class GameCommentary:
 
     def filler(self, state):
         """模型漏写或跑题时，用一句贴合局面的短解说补上，不再多等一轮。"""
-        lines = (("这下得留点神，咱们稳住。", "先别慌，我认真看看。", "这场我得认真一点。")
+        lines = (("先别慌，我认真看看。", "这会儿先顾好眼前。", "这里得稳住，不能贪。", "我看清楚再动。")
                  if scene(state)["mode"] == "tense" else
-                 ("这手接着往下打。", "我看看接下来怎么接。", "先把眼前这步走好。")
+                 ("接着打，我还盯着呢。", "我看看这手怎么接。", "这步得动点小脑筋。", "先把眼前这步走好。", "这儿可得看仔细。")
                  if scene(state)["mode"] == "battle" else
-                 ("咱们接着来。", "我看看接下来怎么选。", "这里我稍微想一下。"))
-        return next(line for line in lines if not self.recent or line != self.recent[-1])
+                 ("好，咱们接着来。", "我看看有什么花样。", "这里让我琢磨一下。", "我还挺好奇后面会怎样。", "不急，我先看一眼。"))
+        # 优先选最近没说过的，避免模型持续漏写时只在两句话之间来回切换。
+        recent = list(self.recent)
+        return min(lines, key=lambda line: max((i + 1 for i, old in enumerate(recent) if old == line), default=0))
 
     def can_speak(self, state, text, important=False):
         return bool(text) and (not self.recent or text != self.recent[-1])

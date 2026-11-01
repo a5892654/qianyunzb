@@ -41,7 +41,7 @@ class ThemeTests(unittest.TestCase):
                 self.assertTrue(np.any(np.all(roi == (0, 0, 255, 255), axis=2)), "left HUD edge cropped")
                 self.assertTrue(np.any(np.all(roi == (0, 255, 0, 255), axis=2)), "right HUD edge cropped")
 
-    def test_chat_is_live_expires_and_stays_behind_avatar(self):
+    def test_chat_is_live_expires_after_two_minutes_and_stays_behind_avatar(self):
         empty = self.theme.compose(self.game)
         self.theme.add_event({"type": "danmaku", "desc": "观众：今天也一起去冒险吧"})
         with patch('live_theme.time.monotonic', return_value=time.monotonic() + 0.5):
@@ -60,6 +60,35 @@ class ThemeTests(unittest.TestCase):
         with patch('live_theme.time.monotonic', return_value=time.monotonic() + 121.5):
             expired = self.theme.compose(self.game)
         np.testing.assert_array_equal(expired[221:700, 42:414], empty[221:700, 42:414])
+
+    def test_chat_keeps_five_slots_and_expires_one_by_one(self):
+        base = time.monotonic() + 500
+        for i in range(5):
+            with patch('live_theme.time.monotonic', return_value=base - 100 + i * 10):
+                self.theme.add_event({"type": "danmaku", "desc": f"观众{i}：第 {i + 1} 条弹幕"})
+        with patch('live_theme.time.monotonic', return_value=base):
+            self.theme.compose(self.game)
+        self.assertEqual(len(self.theme._chat_prev), 5)
+        # 最早一条 2 分钟到期后自动清除，其余 4 条保留。
+        with patch('live_theme.time.monotonic', return_value=base + 21):
+            self.theme.compose(self.game)
+        names = [m[2] for m in self.theme._chat_prev]
+        self.assertEqual(names, [f"观众{i}" for i in range(1, 5)])
+
+    def test_new_chat_replaces_the_oldest_card(self):
+        for i in range(5):
+            self.theme.add_event({"type": "danmaku", "desc": f"观众{i}：第 {i + 1} 条弹幕"})
+        with patch('live_theme.time.monotonic', return_value=time.monotonic() + 0.5):
+            self.theme.compose(self.game)
+        shown = [m[0] for m in self.theme._chat_prev]
+        self.assertEqual(shown, [m[0] for m in list(self.theme._messages)[-5:]])
+        self.theme.add_event({"type": "danmaku", "desc": "新观众：第六条弹幕"})
+        with patch('live_theme.time.monotonic', return_value=time.monotonic() + 0.9):
+            self.theme.compose(self.game)
+        latest = [m[0] for m in list(self.theme._messages)[-5:]]
+        self.assertEqual([m[0] for m in self.theme._chat_prev], latest)
+        self.assertNotEqual(shown, latest)
+        self.assertNotIn(shown[0], latest)
 
     def test_chat_cards_slide_and_fade_on_new_messages(self):
         now = time.monotonic()
