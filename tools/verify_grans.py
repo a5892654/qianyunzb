@@ -192,7 +192,7 @@ class PlayerTests(unittest.IsolatedAsyncioTestCase):
             player = Player({}, bridge, speak=speak)
             player._ask = AsyncMock(return_value={"action": "play", "slot": 0, "target": 0, "release": release, "say": "这一剑接上"})
             self.assertTrue((await player.step())["ok"])
-            bridge.play_card.assert_called_once_with(0, "", 0, release=release)
+            bridge.play_card.assert_called_once_with(0, "grans_001__event_1", 0, release=release)
             speak.assert_called_once_with("这一剑接上", "")
 
     def test_non_grans_or_missing_interface_cannot_request_release(self):

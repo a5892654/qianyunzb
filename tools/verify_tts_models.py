@@ -20,6 +20,7 @@ from dtgame import ttsd
 from main import App, build_web
 from tools.tts_server import SpeechService
 import tts_models
+import tts_voices
 
 
 class SelectionTests(unittest.TestCase):
@@ -231,6 +232,114 @@ class ModelRouteTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(ttsd, "health", AsyncMock(return_value={"ok": True, "model": "Qwen/Qwen3-TTS-12Hz-1.7B-Base"})):
             result = await (await self.client.get("/api/tts/models")).json()
         self.assertFalse(result["ready"])
+
+
+class VoicePresetTests(unittest.TestCase):
+    def test_presets_resolve_against_comfy_input_and_unknown_ref_is_custom(self):
+        with tempfile.TemporaryDirectory() as folder:
+            input_dir = Path(folder) / "input"
+            input_dir.mkdir()
+            for preset in tts_voices.PRESETS:
+                (input_dir / preset["file"]).write_bytes(b"fixture")
+            settings = {**config.DEFAULTS["tts"], "comfy_dir": folder,
+                        "qwen_ref_audio": "feiyu_cute.wav"}
+            self.assertEqual(tts_voices.current_id(settings), "feiyu_cute")
+            self.assertEqual(tts_voices.current_name(settings), "肥鱼 · 可爱")
+            self.assertTrue(all(item["exists"] for item in tts_voices.choices(settings)))
+            settings["qwen_ref_audio"] = str(input_dir / "custom.wav")
+            self.assertEqual(tts_voices.current_id(settings), "custom")
+            self.assertEqual(tts_voices.current_name(settings), "自定义参考音")
+            with self.assertRaises(ValueError):
+                tts_voices.select("missing")
+
+
+class VoiceRouteTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.app = object.__new__(App)
+        self.app.cfg = copy.deepcopy(config.DEFAULTS)
+        self.app.tasks = []
+        self.app.pipe = SimpleNamespace(current=None, tts_ready=asyncio.Event())
+        self.app.pipe.tts_ready.set()
+        self.app.engine = SimpleNamespace(proc=None, comfy_proc=None, stop=Mock())
+        self.app.push = Mock()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.input_dir = Path(self.tmp.name) / "ComfyUI" / "input"
+        self.input_dir.mkdir(parents=True)
+        for preset in tts_voices.PRESETS:
+            (self.input_dir / preset["file"]).write_bytes(b"fixture")
+        self.app.cfg["tts"]["comfy_dir"] = str(Path(self.tmp.name) / "ComfyUI")
+        self.app.cfg["tts"]["qwen_ref_audio"] = "feiyu_cute.wav"
+        fake_runtime = str(self.input_dir / "feiyu_cute.wav")
+        self.patches = [patch("config.save"),
+                        patch.object(ttsd, "runtime_paths", return_value=(fake_runtime, fake_runtime)),
+                        patch.object(ttsd, "health", AsyncMock(return_value={}))]
+        for p in self.patches:
+            p.start()
+            self.addCleanup(p.stop)
+        self.client = TestClient(TestServer(build_web(self.app)))
+        await self.client.start_server()
+        self.addAsyncCleanup(self.client.close)
+
+    async def post(self, body):
+        return await self.client.post("/api/tts/model", json=body, headers={"X-BVB": "1"})
+
+    async def test_voice_list_reports_current_and_file_state(self):
+        result = await (await self.client.get("/api/tts/voices")).json()
+        self.assertEqual(result["current"], "feiyu_cute")
+        self.assertEqual(result["current_name"], "肥鱼 · 可爱")
+        self.assertTrue(result["choices"][0]["exists"])
+        (self.input_dir / "feiyu_gentle.wav").unlink()
+        result = await (await self.client.get("/api/tts/voices")).json()
+        gentle = next(item for item in result["choices"] if item["id"] == "feiyu_gentle")
+        self.assertFalse(gentle["exists"])
+
+    async def test_voice_switch_updates_reference_without_changing_size(self):
+        release = asyncio.Event()
+        seen = {}
+        async def ensure(settings, status):
+            seen.update(settings)
+            await release.wait()
+            return True
+        with patch.object(ttsd, "ensure", ensure):
+            response = await self.post({"voice": "feiyu_gentle"})
+            result = await response.json()
+            self.assertTrue(result["loading"])
+            self.assertEqual(result["voice"], "feiyu_gentle")
+            self.assertFalse(self.app.pipe.tts_ready.is_set())
+            release.set()
+            await self.app.tasks[-1]
+        self.assertEqual(self.app.cfg["tts"]["qwen_ref_audio"], "feiyu_gentle.wav")
+        self.assertEqual(seen["qwen_ref_audio"], "feiyu_gentle.wav")
+        self.assertEqual(self.app.cfg["tts"]["qwen_model_size"], "0.6B")
+        self.assertTrue(self.app.pipe.tts_ready.is_set())
+
+    async def test_voice_and_size_can_switch_together(self):
+        async def ensure(settings, status):
+            return True
+        with patch.object(ttsd, "ensure", ensure):
+            response = await self.post({"size": "1.7B", "voice": "dafeiyu_ep07"})
+            result = await response.json()
+            self.assertTrue(result["loading"])
+            await self.app.tasks[-1]
+        self.assertEqual(self.app.cfg["tts"]["qwen_model_size"], "1.7B")
+        self.assertEqual(self.app.cfg["tts"]["qwen_ref_audio"], "dafeiyu_voice_ref_ep07.wav")
+
+    async def test_unknown_voice_is_rejected_without_touching_settings(self):
+        before = copy.deepcopy(self.app.cfg)
+        response = await self.post({"voice": "missing"})
+        self.assertEqual(response.status, 400)
+        self.assertEqual(self.app.cfg, before)
+
+    async def test_missing_voice_file_is_saved_but_not_reported_ready(self):
+        (self.input_dir / "feiyu_gentle.wav").unlink()
+        with patch.object(ttsd, "ensure", AsyncMock()) as ensure:
+            response = await self.post({"voice": "feiyu_gentle"})
+            result = await response.json()
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["ready"])
+        self.assertIn("音色文件不存在", result["message"])
+        ensure.assert_not_called()
 
 
 class StreamingServiceTests(unittest.IsolatedAsyncioTestCase):

@@ -113,6 +113,7 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
 .plan-row{display:grid;grid-template-columns:1fr 1fr 1.15fr auto;gap:10px;align-items:end;padding:10px 0;border-bottom:1px dashed var(--line)}
 .plan-row:last-of-type{border-bottom:0}
 .plan-row .btn{margin-bottom:1px}
+.plan-row .plan-music{grid-column:1/-1}
 .plan-empty{padding:20px 0;text-align:center;color:var(--dim);font-size:13px}
 @media(max-width:640px){.plan-row{grid-template-columns:1fr 1fr}.plan-row .plan-del{grid-column:2/3;justify-self:start}}
 </style>
@@ -149,7 +150,7 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
   </div>
   <div class="card">
     <div class="row"><h3 style="margin:0;flex:1">B站直播</h3><span class="hint" id="broadcastDashState">尚未开播</span><button class="btn p" id="openBroadcast">登录并开播</button><button class="btn r" id="broadcastDashFinish" disabled>手动下播</button></div>
-    <div class="hint">在「一键开播」选择游戏窗口和分区，千音直接采集画面与声音，无需另开直播姬或 OBS。</div>
+    <div class="hint">在「一键开播」选择游戏窗口，千音直接采集画面与声音，无需另开直播姬或 OBS。</div>
   </div>
   <div class="card">
     <div class="row" style="margin-bottom:6px">
@@ -158,9 +159,18 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
         <select id="dtGameSelect" data-k="game.active">
           <option value="demontower">恶魔之塔 Zero</option>
           <option value="stardew">星露谷物语</option>
+          <option value="sts2">杀戮尖塔 2</option>
+        </select>
+      </label>
+      <label class="f" style="max-width:200px;margin:0">AI 直播风格
+        <select data-k="ai.style" id="dashAiStyle">
+          <option value="default">默认 · 嘴硬心软</option>
+          <option value="taffy">永雏塔菲风格</option>
+          <option value="custom">自定义人设</option>
         </select>
       </label>
     </div>
+    <div class="hint" style="margin-bottom:10px">切换风格后下一句生成生效，弹幕、主动互动和游戏解说同步；详细说明和自定义人设在「AI 设置」。</div>
     <div class="row" style="margin-bottom:10px">
       <button class="btn b" id="dtStart">启动 / 继续代打</button>
       <button class="btn" id="dtStop">暂停代打</button>
@@ -258,12 +268,12 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
   </div>
   <div class="card">
     <div class="row">
-      <label class="f" style="max-width:260px">要直播并托管的游戏<select id="broadcastGameSelect" data-k="game.active"><option value="demontower">恶魔之塔 Zero</option><option value="stardew">星露谷物语</option></select></label>
+      <label class="f" style="max-width:260px">要直播并托管的游戏<select id="broadcastGameSelect" data-k="game.active"><option value="demontower">恶魔之塔 Zero</option><option value="stardew">星露谷物语</option><option value="sts2">杀戮尖塔 2</option></select></label>
       <button class="btn b" id="broadcastDtStart" style="margin-top:18px">启动代打</button>
       <button class="btn" id="broadcastDtStop" style="margin-top:18px">暂停代打</button>
       <span class="hint" id="broadcastDtState" style="margin-top:18px">代打未启动</span>
     </div>
-    <div class="row"><label class="f">直播标题<input id="broadcastTitle" maxlength="60" data-k="broadcast.title"></label><label class="f">直播分区<select id="broadcastArea" data-k="broadcast.area_id"><option value="0">请选择直播分区</option></select></label></div>
+    <div class="hint">分区和封面请在直播姬里改；直播间标题会在开播时按当前游戏自动修改。</div>
     <div class="row"><label class="f">要直播的游戏窗口<select id="broadcastWindow"><option value="">请先启动游戏，再刷新窗口</option></select></label><button class="btn" id="broadcastLaunchGame" style="margin-top:18px">启动游戏</button><button class="btn" id="broadcastRefreshSources" style="margin-top:18px">刷新窗口</button></div>
     <div class="row"><label class="f">声音输出设备<select id="broadcastAudio"><option value="">系统默认输出</option></select></label><button class="btn b" id="broadcastPreview" style="margin-top:18px">预览画面和声音</button><button class="btn" id="broadcastPreviewStop" style="margin-top:18px">停止预览</button></div>
     <div class="row">
@@ -294,6 +304,14 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
     <p class="hint">控制千音源画面与 OBS 字幕浏览器源的底部台词，关闭后立即隐藏。皮套头顶气泡可在「Live2D 皮套」中单独开关。</p>
   </div>
   <div class="card">
+    <h3>底部滚动横幅</h3>
+    <div class="row">
+      <label class="c"><input type="checkbox" data-k="marquee.enabled">在直播画面最底部显示滚动横幅</label>
+      <label class="f">横幅内容<input data-k="marquee.text" maxlength="120" placeholder="今天挑战游戏最高难度"></label>
+    </div>
+    <p class="hint">常驻显示在源画面与直播画面的最底部：文字放得下就居中静止，超出画面才单条循环滚动。预览和开播实时生效，内容留空则隐藏；原始画面和蓝色海洋主题都适用。</p>
+  </div>
+  <div class="card">
     <h3>大碗白饭 · 干饭计数</h3>
     <div class="row"><label class="c"><input type="checkbox" data-k="rice_counter.enabled">把白饭计数叠加到直播画面</label><span style="flex:1"></span><b id="riceTotal">0 碗</b></div>
     <div class="row"><label class="f" style="max-width:240px">大额礼物门槛（单次总额 / 元）<input type="number" min="0.01" step="0.01" data-k="rice_counter.large_gift_yuan"></label><span class="hint" id="riceGiftProgress">普通礼物进度 0/10</span></div>
@@ -318,7 +336,7 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
       <li>直播姬的画布/直播设置改成 <b>1920×1080</b>，和源画面窗口一样大；缩放选「适配」，别选「拉伸填满」，否则画面会再糊一次。</li>
       <li>直播姬的音频选<b>系统声音</b>，只采一次：源画面窗口本身无声，游戏声和千音配音由系统声音采集；不要再对这两个进程重复采音。</li>
       <li>在直播姬点「开始直播」。这时千音的「开始直播」会被挡住，避免重复推流。</li>
-      <li>源画面窗口<b>没有标题条</b>（留着会被直播姬一起播进画面），要关它在千音里点「关闭源画面」。关闭只是隐藏窗口，下次开启会沿用同一个窗口，直播姬里<b>不需要重新选采集窗口</b>。</li>
+      <li>源画面窗口<b>没有标题条</b>（留着会被直播姬一起播进画面），要关它在千音里点「关闭源画面」。关闭只是隐藏窗口，下次开启会沿用同一个窗口；千音重启后直播姬也会按固定的窗口标题和类名自动重新认出，直播姬里<b>不需要重新选采集窗口</b>（从旧版本升级后需重选一次）。</li>
     </ol>
   </div>
   <div class="card">
@@ -326,13 +344,11 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
     <div class="row" style="align-items:flex-start;gap:18px">
       <div style="width:280px;flex:none">
         <div class="hint" style="margin-bottom:6px">当前封面</div>
-        <img id="roomCoverPreview" alt="直播间封面" referrerpolicy="no-referrer" onerror="this.style.display='none';var e=document.querySelector('#roomCoverEmpty');e.style.display='';e.textContent='当前封面加载失败（B站图链已失效），重新上传一张即可';" style="display:none;width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:8px;background:#000">
+        <img id="roomCoverPreview" alt="直播间封面" referrerpolicy="no-referrer" onerror="this.style.display='none';var e=document.querySelector('#roomCoverEmpty');e.style.display='';e.textContent='当前封面加载失败，请在直播姬里重新设置';" style="display:none;width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:8px;background:#000">
         <div id="roomCoverEmpty" class="hint" style="padding:36px 0;text-align:center;border:1px dashed var(--line);border-radius:8px">登录后可查看当前封面</div>
       </div>
       <div style="flex:1;min-width:220px">
-        <div class="row"><label class="f">新的直播间封面（JPG/PNG，16:9，至少 640×360，≤5MB）<input type="file" id="roomCoverFile" accept="image/jpeg,image/png"></label></div>
-        <div class="row"><button class="btn p" id="roomCoverSave">上传并设为封面</button><span class="hint" id="roomCoverHint">封面提交后会进入 B站审核，直播中和未开播都可修改。</span></div>
-        <div class="hint" id="roomCoverResult" role="status"></div>
+        <p class="hint">封面由你在直播姬里设置，千音不会修改封面，这里只读显示当前封面；标题会按游戏自动切换。</p>
       </div>
     </div>
     <div class="row" style="margin-top:14px"><label class="f">直播间公告（最多 60 字）<textarea id="roomNotice" maxlength="60" rows="2" placeholder="填写直播间公告，例如：每晚 8 点直播《恶魔之塔 ZERO》"></textarea></label></div>
@@ -386,7 +402,7 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
   </div>
   <div class="card theme-settings" id="themeOceanSettings" hidden>
     <h3>你的深海电台</h3>
-    <div class="row"><label class="f">直播间名称<input data-k="stream_theme.title" maxlength="24" placeholder="深蓝放映室"></label><label class="f">一句欢迎语<input data-k="stream_theme.subtitle" maxlength="60" placeholder="和你一起，潜入今天的冒险"></label></div>
+    <div class="row"><label class="f">直播间名称<input data-k="stream_theme.title" maxlength="24" placeholder="深蓝放映室"></label><label class="f">一句欢迎语<input data-k="stream_theme.subtitle" maxlength="60" placeholder="喜欢就点点关注呀～开播不迷路"></label></div>
     <div class="row"><label class="f">底部滚动公告（没有播放音乐时显示）<textarea data-k="stream_theme.ticker" maxlength="300" placeholder="写一段想告诉观众的话，留空隐藏文字"></textarea></label></div>
     <div class="row"><label class="f">角色取景（1 = 全身，2 = 半身）<input type="range" data-k="stream_theme.avatar_zoom" min="1" max="3" step="0.05"></label><b data-show="stream_theme.avatar_zoom"></b></div>
     <label class="c"><input type="checkbox" data-k="stream_theme.show_chat">显示真实弹幕与礼物消息</label>
@@ -475,7 +491,8 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
     <div class="row">
       <label class="f">待回复队列上限（满了丢弃优先级最低的）<input type="number" data-k="filter.max_queue"></label>
       <label class="f">最长等待秒数（太久的消息就不回了）<input type="number" data-k="filter.max_wait"></label>
-      <label class="f">名字最多念几个字<input type="number" data-k="filter.name_max_len"></label>
+      <label class="f">名字最多显示几个字<input type="number" data-k="filter.name_max_len"></label>
+      <label class="f">名字超过几个字只叫新朋友（0=不限）<input type="number" data-k="filter.name_read_max"></label>
     </div>
     <div class="row">
       <label class="c"><input type="checkbox" data-k="filter.ignore_owner">不回复主播自己的消息</label>
@@ -526,6 +543,7 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
         <select data-k="game.active" id="gameActive">
           <option value="demontower">恶魔之塔 Zero</option>
           <option value="stardew">星露谷物语</option>
+          <option value="sts2">杀戮尖塔 2</option>
         </select>
       </label>
     </div>
@@ -578,11 +596,52 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
       </div>
       <p class="hint">需要游戏目录里已装 SMAPI 4.0+ 和 Stardew MCP，并把 mod 的 P1 设为 Brain:none（本工具会自动用 8770 的 MCP 接管）。三项 AI 字段都填才会切到 OpenAI 兼容接口；留空则沿用上面的 AI 设置。</p>
     </div>
+    <div data-game="sts2" style="display:none">
+      <div class="row" style="margin-top:8px">
+        <label class="f">游戏目录<input data-k="sts2.game_dir"></label>
+        <span class="btn" data-pick="sts2.game_dir" data-kind="dir" style="margin-top:18px">浏览…</span>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label class="f">SlayTheSpire2.exe（留空用游戏目录下的）<input data-k="sts2.exe"></label>
+        <span class="btn" data-pick="sts2.exe" data-kind="exe" style="margin-top:18px">浏览…</span>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label class="f">API 端口（默认 8080，冲突会自动换）<input type="number" data-k="sts2.api_port"></label>
+        <label class="f">每步间隔秒数<input type="number" step="0.1" data-k="sts2.step_interval"></label>
+        <label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" data-k="sts2.enabled" style="width:auto">启动时自动托管</label>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label class="f">接口地址（留空沿用上面的 AI 设置）<input data-k="sts2.openai_base"></label>
+        <label class="f">模型名（留空沿用）<input data-k="sts2.openai_model"></label>
+        <label class="f">API Key（留空沿用）<input type="password" data-k="sts2.openai_key"></label>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" data-k="sts2.auto_launch" style="width:auto">托管时自动启动游戏</label>
+        <label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" data-k="sts2.narrate" style="width:auto">播报游戏解说</label>
+        <label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" data-k="sts2.new_run" style="width:auto">开局不等存档，直接新开一局</label>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label class="f">本游戏人设（留空沿用 AI 设置）<textarea data-k="sts2.persona" rows="2"></textarea></label>
+      </div>
+      <p class="hint">需要游戏 mods 目录里已放 STS2-Agent（STS2AIAgent.dll / .pck / mod_id.json）。第一次启动若游戏问是否加载 Mod，选择加载并重启；之后千音会自动开 MCP 并接管。建议用窗口/无边框窗口运行，独占全屏抓不到窗口。</p>
+    </div>
   </div>
   <div class="card">
     <h3>人设与说话风格</h3>
-    <textarea data-k="ai.persona" style="min-height:220px"></textarea>
-    <p class="hint">弹幕聊天、主动互动和游戏解说共用这份人设，保存后下次生成生效。默认嘴硬心软、傲娇可爱，偶尔顺着现场说个抽象梗；认真回应时也会自然收住。</p>
+    <div class="row">
+      <label class="f" style="max-width:340px">AI 直播风格
+        <select data-k="ai.style" id="aiStyle">
+          <option value="default">默认 · 嘴硬心软</option>
+          <option value="taffy">永雏塔菲风格</option>
+          <option value="custom">自定义人设</option>
+        </select>
+      </label>
+      <span class="hint" id="aiStyleTag" style="margin-top:22px"></span>
+    </div>
+    <p class="hint" id="aiStyleInfo"></p>
+    <p class="hint">预设风格会同时替换仍是出厂默认的主动话题、关注提醒和礼物感谢备用文案；你改过的文案优先保留。</p>
+    <textarea data-k="ai.persona" id="aiPersona" style="min-height:220px"></textarea>
+    <p class="hint" id="aiPersonaHint"></p>
     <div class="row"><label class="c"><input type="checkbox" data-k="interaction.emotional_value">加强陪伴感与情绪回应</label></div>
     <p class="hint">分享烦心事时温和接住，好消息一起庆祝，被夸时自然开心；游戏关键时刻也更有情绪起伏。关心不催回应，安静看直播也欢迎。</p>
     <div class="row" style="margin-top:10px">
@@ -605,11 +664,12 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
     <h3>Qwen3-TTS 模型</h3>
     <div class="row">
       <label class="f" style="max-width:300px">模型大小<select id="qwenModelSize"><option value="0.6B">0.6B · 较低显存</option><option value="1.7B">1.7B · 较大模型</option></select></label>
-      <button class="btn b" id="qwenModelApply" style="align-self:flex-end">切换模型</button>
+      <label class="f" style="max-width:260px">克隆音色<select id="qwenVoice"><option value="custom">自定义（用下方路径）</option></select></label>
+      <button class="btn b" id="qwenModelApply" style="align-self:flex-end">应用切换</button>
       <span class="hint" id="qwenModelState" role="status"></span>
     </div>
-    <p class="hint">两种 Base 模型都沿用同一份参考音频。切换时先卸载旧模型再加载新模型，首次使用需要下载；本句语音播完后再切换。</p>
-    <div class="row"><label class="f">克隆参考音频<input data-k="tts.qwen_ref_audio"></label><span class="btn" data-pick="tts.qwen_ref_audio" data-kind="audio" style="margin-top:18px">浏览…</span></div>
+    <p class="hint">两种 Base 模型都使用当前音色的参考音频。切换模型或音色时先卸载旧引擎再加载，本句语音播完后再切换。肥鱼两段参考音来自 <a href="https://github.com/Esmerubphire/astrbot_plugin_feiyu_voice" target="_blank" rel="noreferrer">astrbot_plugin_feiyu_voice</a> 的 CosyVoice3 声库（素材授权见该项目）。</p>
+    <div class="row"><label class="f">克隆参考音频<input data-k="tts.qwen_ref_audio"></label><span class="btn" data-pick="tts.qwen_ref_audio" data-kind="audio" style="margin-top:18px">浏览…</span><span class="hint" style="align-self:flex-end">也可直接填路径；改完点【应用切换】重载引擎。</span></div>
   </div>
   <div class="card">
     <div class="row">
@@ -917,7 +977,7 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
 <div class="modal" id="planModal" role="dialog" aria-modal="true" aria-labelledby="planModalTitle">
   <div class="modal-card">
     <div class="row" style="align-items:flex-start;margin-bottom:10px">
-      <div><h3 id="planModalTitle" style="margin:0">播放计划</h3><div class="hint" style="margin-top:4px">到点先切到这一段选的游戏并启动托管，再开播；结束时间早于开始时间表示播到次日。相邻两段可以首尾相接。</div></div>
+      <div><h3 id="planModalTitle" style="margin:0">播放计划</h3><div class="hint" style="margin-top:4px">到点先切到这一段选的游戏并启动托管，再开播；结束时间早于开始时间表示播到次日。相邻两段可以首尾相接。每一段都可以单独指定开播后自动循环的歌单，留空则沿用「点歌」页记住的歌单。</div></div>
       <span style="flex:1"></span>
       <button class="btn sm" id="planClose" aria-label="关闭播放计划">关闭</button>
     </div>
@@ -926,7 +986,8 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
       <label class="f" style="max-width:320px">开停播方式<select id="planMode"><option value="managed">本工具：自动开播和停播</option><option value="livehime">直播姬：自动开播和停播</option></select></label>
     </div>
     <div id="planRows"></div>
-    <div class="row" style="margin-top:10px"><button class="btn" id="planAdd" type="button">＋ 加一段</button><span class="hint">每一段单独选开始时间、结束时间和要播的游戏</span></div>
+    <datalist id="planPlaylistOptions"></datalist>
+    <div class="row" style="margin-top:10px"><button class="btn" id="planAdd" type="button">＋ 加一段</button><span class="hint">每一段单独选开始时间、结束时间、要播的游戏和开播歌单</span></div>
     <div class="row" id="planLivehimeRow" style="display:none">
       <label class="f" style="max-width:360px">直播姬程序路径<input id="planLivehimePath" placeholder="留空自动查找 livehime.exe"></label>
       <label class="f" style="max-width:220px">开始/停止直播快捷键<input id="planLivehimeHotkey" placeholder="例如 F9"></label>
@@ -934,8 +995,8 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
       <button class="btn" id="planLivehimeCalibrate" style="margin-top:18px" type="button">校准开始按钮</button>
       <span class="hint" id="planLivehimeState" style="margin-top:18px" role="status"></span>
     </div>
-    <div class="hint" id="planLivehimeHint" style="display:none">先在直播姬「设置 → 快捷键」给「开始/停止直播」绑定一个键（例如 F9）填到左边；版本不支持快捷键时，可清空快捷键并用「校准开始按钮」，3 秒内把鼠标移到直播姬的「开始直播」按钮上。直播姬需登录同一主播账号，场景已添加「千音源画面」窗口采集，画布 1920×1080，音频选系统声音。</div>
-    <div class="hint" id="planHint">启用前请确认已登录主播账号。本工具模式会用上方直播标题、分区，并自动选中当前游戏窗口和默认声音设备；直播姬模式会先拉起游戏、代打和千音源画面，再发送开/停快捷键。只想按点停播、不需要自动开播时，请用下方「每日定时直播」的单段计划。</div>
+    <div class="hint" id="planLivehimeHint" style="display:none">先在直播姬「设置 → 快捷键」给「开始/停止直播」绑定一个键（例如 F9）填到左边；版本不支持快捷键时，可清空快捷键并用「校准开始按钮」，3 秒内把鼠标移到直播姬的「开始直播」按钮上。直播姬需登录同一主播账号，场景已添加「千音源画面」窗口采集，画布 1920×1080，音频选系统声音。直播姬程序要求管理员权限，千音也要用管理员身份启动，否则 Windows 会拦截模拟的快捷键。</div>
+    <div class="hint" id="planHint">启用前请确认已登录主播账号。本工具模式会沿用直播姬里的分区和封面，并按这一段选择的游戏自动修改直播间标题，自动选中当前游戏窗口和默认声音设备；直播姬模式会先拉起游戏、代打和千音源画面，再发送开/停快捷键。只想按点停播、不需要自动开播时，请用下方「每日定时直播」的单段计划。</div>
     <div class="hint" id="planResult" role="status" style="margin-top:8px;color:var(--red)"></div>
     <div class="row" style="justify-content:flex-end;margin-top:12px"><button class="btn" id="planCancel">取消</button><button class="btn p" id="planSave">保存播放计划</button></div>
   </div>
@@ -963,7 +1024,7 @@ $$('nav button[data-tab]').forEach(b => b.onclick = () => {
 // ---------- 回复规则卡片 ----------
 const EV = [
   ['danmaku', '弹幕', [['cooldown_user', '同一观众冷却(秒)'], ['probability', '回复概率(%)'], ['trigger_words', '触发词（留空=全部回复，填了只回含这些词的）', 'text']], [['ignore_emoticon', '忽略表情包弹幕'], ['read_original', 'AI 回复前先念出原弹幕']]],
-  ['enter', '进入直播间', [['cooldown_user', '同一观众多久内不重复欢迎(秒)'], ['merge_window', '合并窗口(秒)'], ['max_names', '一次最多念几个名字']], [['supporter_welcome', '送过礼物的观众单独暖心欢迎']]],
+  ['enter', '进入直播间', [['cooldown_user', '同一观众多久内不重复欢迎(秒)'], ['merge_window', '合并窗口(秒)'], ['max_names', '一次最多念几个名字'], ['crowd_count', '人多时超过几位就不念名字(0=关闭)'], ['crowd_window', '统计进房人数的时间窗口(秒)']], [['supporter_welcome', '送过礼物的观众单独暖心欢迎']]],
   ['follow', '关注', [['cooldown_user', '同一观众冷却(秒)'], ['merge_window', '合并窗口(秒)'], ['max_names', '一次最多念几个名字']], []],
   ['gift', '礼物', [['merge_window', '连击合并窗口(秒)'], ['min_value', '付费礼物最低价值(元)']], [['thank_free', '感谢免费礼物（小心心、辣条等）'], ['tiered_thanks', '按数量和价值丰富感谢（token 口粮）']]],
   ['guard', '上舰（舰长/提督/总督）', [], []],
@@ -973,15 +1034,19 @@ const EV = [
 $('#evCards').innerHTML = EV.map(([k, name, nums, checks]) => `
   <div class="card">
     <div class="ev-head"><h3><label class="c"><input type="checkbox" data-k="events.${k}.enabled">${name}</label></h3>
-      <span class="seg"><label><input type="radio" name="mode_${k}" value="ai" data-k="events.${k}.mode"><span>AI 回复</span></label><label><input type="radio" name="mode_${k}" value="template" data-k="events.${k}.mode"><span>模板</span></label></span></div>
+      <span class="seg"><label><input type="radio" name="mode_${k}" value="ai" data-k="events.${k}.mode"><span>AI 回复</span></label><label><input type="radio" name="mode_${k}" value="template" data-k="events.${k}.mode"><span>模板</span></label>${k === 'enter' ? `<label><input type="radio" name="mode_${k}" value="hybrid" data-k="events.${k}.mode"><span>预制+AI(随机)</span></label>` : ''}</span></div>
     ${nums.length ? `<div class="row">${nums.map(([f, l, t]) => `<label class="f">${l}<input ${t ? '' : 'type="number"'} data-k="events.${k}.${f}"></label>`).join('')}</div>` : ''}
     ${checks.length ? `<div class="row">${checks.map(([f, l]) => `<label class="c"><input type="checkbox" data-k="events.${k}.${f}">${l}</label>`).join('')}</div>` : ''}
     ${k === 'gift' ? '<p class="hint">开启分档感谢后，先点名说「谢谢老板，这能买不少token了」，达到 5 / 20 / 100 个或总价值 10 / 50 / 200 元时逐档增加感谢、比心和祝福。连击按合并后的总量计算，AI 失败时使用同档模板；关闭后使用下方自定义文案。</p>' : ''}
     <div class="row"><label class="f">模板（每行一条）<textarea data-k="events.${k}.templates"></textarea></label>
     <label class="f">AI 提示<textarea data-k="events.${k}.ai_prompt"></textarea></label></div>
-    ${k === 'enter' ? `<p class="hint">从程序实际收到的礼物开始记住送礼观众，重启后保留。同一观众再次进房时单独欢迎，沿用进房冷却和上方 AI / 模板模式。AI 模式用专属提示生成，模板模式或 AI 失败时用下方暖心文案。</p>
+    ${k === 'enter' ? `<p class="hint">模式说明：模板 = 只念预制欢迎语；AI 回复 = 整句交给模型；预制+AI = 每条欢迎随机二选一，整句 AI 生成或整句预制文案，AI 失败时自动用预制（推荐，既有固定风格又不死板）。</p>
+    <p class="hint">从程序实际收到的礼物开始记住送礼观众，重启后保留。同一观众再次进房时单独欢迎，沿用进房冷却和上方模式。AI 模式用专属提示生成，模板模式或 AI 失败时用下方暖心文案。</p>
     <div class="row"><label class="f">送礼观众欢迎模板（每行一条）<textarea data-k="events.enter.supporter_templates"></textarea></label>
-    <label class="f">送礼观众欢迎 AI 提示<textarea data-k="events.enter.supporter_ai_prompt"></textarea></label></div>` : ''}
+    <label class="f">送礼观众欢迎 AI 提示<textarea data-k="events.enter.supporter_ai_prompt"></textarea></label></div>
+    <p class="hint">统计窗口内进房人数达到「人多时超过几位」后，欢迎语改用下面这套通用文案，不再念任何名字，直到人流回落。送礼观众不受影响，仍单独欢迎。名字超过「过滤与队列」里的字数上限时也只叫新朋友，避免念长名字又慢又容易读岔。</p>
+    <div class="row"><label class="f">人多时通用欢迎模板（每行一条）<textarea data-k="events.enter.crowd_templates"></textarea></label>
+    <label class="f">人多时欢迎 AI 提示<textarea data-k="events.enter.crowd_ai_prompt"></textarea></label></div>` : ''}
   </div>`).join('');
 
 // ---------- 配置绑定 ----------
@@ -1003,27 +1068,36 @@ function fillForm() {
   renderLayout();
   renderTheme();
   renderGameSettings();
-  syncGameTitle((CFG.game && CFG.game.active) || 'demontower');
+  renderAiStyle();
 }
 
-const GAME_TITLES = {demontower: '恶魔之塔 ZERO｜AI 游戏直播', stardew: '星露谷物语｜AI 游戏直播'};
-function syncGameTitle(game) {
-  const field = document.querySelector('[data-k="broadcast.title"]');
-  if (!field || document.activeElement === field) return;
-  const current = (field.value || '').trim();
-  const defaults = Object.values(GAME_TITLES);
-  if (current && !defaults.includes(current)) return;
-  const next = GAME_TITLES[game];
-  if (!next || current === next) return;
-  field.value = next;
-  queueConfig(setPatch('broadcast.title', next), 500);
+function aiStyleMeta(id) {
+  return ((CFG.ai && CFG.ai._styles) || []).find(s => s.id === (id || 'default')) || {};
+}
+function renderAiStyle() {
+  const id = (CFG.ai && CFG.ai.style) || 'default';
+  const meta = aiStyleMeta(id);
+  const box = $('#aiPersona');
+  if (box) {
+    box.readOnly = id !== 'custom';
+    if (box.readOnly || document.activeElement !== box) {
+      box.value = id === 'custom' ? (CFG.ai.persona || '') : (meta.persona || '');
+    }
+  }
+  if ($('#aiStyleTag')) $('#aiStyleTag').textContent = meta.tagline || '';
+  if ($('#aiStyleInfo')) $('#aiStyleInfo').textContent = meta.description || '';
+  if ($('#aiPersonaHint')) $('#aiPersonaHint').textContent = id === 'custom'
+    ? '自定义人设同时用于弹幕聊天、主动互动和游戏解说，留空时使用默认人设；保存后下一句生成生效，正在播的台词照常说完。'
+    : '当前是预设风格的只读预览。想微调请切到「自定义人设」；切换后下一句生成生效，正在播的台词照常说完。';
+  $$('[data-k="ai.style"]').forEach(el => { if (el.value !== id) el.value = id; });
 }
 
 function renderGameSettings() {
   const game = (CFG.game && CFG.game.active) || 'demontower';
   $$('[data-game]').forEach(el => { el.style.display = el.dataset.game === game ? '' : 'none'; });
   const title = $('#dtTitle');
-  if (title) title.textContent = game === 'stardew' ? '星露谷物语 · 自动托管' : '恶魔之塔 Zero · 自动托管';
+  const titles = {stardew: '星露谷物语 · 自动托管', sts2: '杀戮尖塔 2 · 自动托管'};
+  if (title) title.textContent = titles[game] || '恶魔之塔 Zero · 自动托管';
   const dashboard = $('#dtGameSelect');
   if (dashboard && document.activeElement !== dashboard) dashboard.value = game;
   const settings = $('#gameActive');
@@ -1043,6 +1117,7 @@ function queueConfig(p, delay = 500) {
   });
   $$('[data-show]').forEach(el => el.textContent = getPath(CFG, el.dataset.show));
   if (p.game) renderGameSettings();
+  if (p.ai) renderAiStyle();
   if (p.songs) renderAutoPlaylist();
   if (p.live2d) { renderLayout(); syncL2dTestPreview(); $('#layoutSaveState').textContent = '正在保存调整…'; }
   if (p.rice_counter) { renderLayout(); $('#layoutSaveState').textContent = '正在保存调整…'; }
@@ -1057,6 +1132,7 @@ async function flushConfig() {
       const r = await api('/api/config', p);
       if (!r.ok) throw new Error(r.error || '设置保存失败');
       if (p.stream_theme) { $('#themeSaveState').textContent = '主题已保存，预览、源画面和直播同步生效'; renderTheme(true); }
+      if (p.marquee) renderTheme(true);
       if (p.live2d || p.rice_counter || p.stream_theme) $('#layoutSaveState').textContent = '调整已保存，预览和直播同步生效';
       else toast('设置已保存');
     }).catch(error => {
@@ -1074,7 +1150,7 @@ function onField(el) {
   let v;
   if (el.type === 'checkbox') v = el.checked;
   else if (el.type === 'radio') { if (!el.checked) return; v = el.value; }
-  else if (el.type === 'number' || el.type === 'range' || el.dataset.k === 'tts.sample_steps' || el.dataset.k === 'broadcast.area_id') v = el.value === '' ? 0 : Number(el.value);
+  else if (el.type === 'number' || el.type === 'range' || el.dataset.k === 'tts.sample_steps') v = el.value === '' ? 0 : Number(el.value);
   else v = el.value;
   if (oceanTheme() && el.dataset.k === 'live2d.overlay_size') { moveLayout({overlay_size: v}); return; }
   if (oceanTheme() && ['live2d.overlay_corner', 'live2d.overlay_margin'].includes(el.dataset.k)) return;
@@ -1082,7 +1158,7 @@ function onField(el) {
   if (el.dataset.k === 'live2d.overlay_in_broadcast' && v) p.live2d.enabled = true;
   if (['live2d.overlay_corner', 'live2d.overlay_margin'].includes(el.dataset.k)) Object.assign(p.live2d, {overlay_x: null, overlay_y: null});
   queueConfig(p, /^(live2d|rice_counter)\.overlay_/.test(el.dataset.k) ? 120 : 500);
-  if (el.dataset.k === 'game.active') { renderGameSettings(); syncGameTitle(v); setTimeout(pollDt, 800); }
+  if (el.dataset.k === 'game.active') { renderGameSettings(); setTimeout(pollDt, 800); }
   if (el.dataset.k === 'ai.backend') fillForm();
   if (el.dataset.k === 'wishlist.action') renderWishFields();
 }
@@ -1174,22 +1250,47 @@ $('#aiResetBtn').onclick = async () => { await api('/api/ai/reset', {}); toast('
 $('#ttsTestBtn').onclick = async () => { await api('/api/say', {text: $('#ttsTest').value}); toast('已加入播放队列'); };
 $('#engStart').onclick = async () => { await flushConfig(); const r = await api('/api/tts/start', {}); toast(r.ok ? '正在启动引擎，进度看控制台' : r.error); await pollSpeechModel(); };
 let speechModelBusy = false;
+let voiceChoices = [];
+function voiceLabel(id) {
+  const item = voiceChoices.find(v => v.id === id);
+  return item ? item.name : '自定义参考音';
+}
+function renderVoices(r) {
+  const sel = $('#qwenVoice');
+  if (!sel) return;
+  const current = (r && r.current) || 'custom';
+  sel.innerHTML = voiceChoices.map(v =>
+    `<option value="${esc(v.id)}"${v.exists ? '' : ' disabled'}>${esc(v.name)}${v.exists ? '' : '（文件缺失）'}</option>`
+  ).join('') + '<option value="custom">自定义（用下方路径）</option>';
+  sel.value = [...sel.options].some(o => o.value === current) ? current : 'custom';
+}
+async function loadVoices() {
+  const r = await api('/api/tts/voices');
+  voiceChoices = Array.isArray(r.choices) ? r.choices : [];
+  renderVoices(r);
+}
 async function pollSpeechModel() {
   try {
     const r = await api('/api/tts/models');
     if (!r.ok) return;
     if (!speechModelBusy && document.activeElement !== $('#qwenModelSize')) $('#qwenModelSize').value = r.selected;
+    if (!speechModelBusy && document.activeElement !== $('#qwenVoice')) {
+      const value = r.voice || 'custom';
+      if ([...$('#qwenVoice').options].some(o => o.value === value)) $('#qwenVoice').value = value;
+    }
     $('#qwenModelApply').disabled = speechModelBusy || r.loading;
-    $('#qwenModelState').textContent = r.error || (r.phase === 'downloading' ? '首次使用正在下载模型…' : r.loading ? '正在切换并加载模型…' : r.ready ? `正在运行：${r.actual.split(/[\\/]/).pop()}${Number.isFinite(r.memory_mib) ? ' · 模型预留显存 ' + (r.memory_mib / 1024).toFixed(2) + ' GiB' : ''}` : !r.runtime_ready ? '语音环境未安装' : !r.reference_ready ? '请先选择克隆参考音频' : `已选择 ${r.selected}，引擎未启动`);
+    $('#qwenVoice').disabled = speechModelBusy || r.loading;
+    const voice = r.voice_name || voiceLabel(r.voice);
+    $('#qwenModelState').textContent = r.error || (r.phase === 'downloading' ? '首次使用正在下载模型…' : r.loading ? '正在切换并加载模型或音色…' : r.ready ? `正在运行：${r.actual.split(/[\\/]/).pop()} · ${voice}${Number.isFinite(r.memory_mib) ? ' · 模型预留显存 ' + (r.memory_mib / 1024).toFixed(2) + ' GiB' : ''}` : !r.runtime_ready ? '语音环境未安装' : !r.reference_ready ? '请先选择克隆参考音频' : `已选择 ${r.selected} · ${voice}，引擎未启动`);
   } catch {}
 }
 $('#qwenModelApply').onclick = async () => {
-  speechModelBusy = true; $('#qwenModelApply').disabled = true;
+  speechModelBusy = true; $('#qwenModelApply').disabled = true; $('#qwenVoice').disabled = true;
   try {
     await flushConfig();
-    const r = await api('/api/tts/model', {size: $('#qwenModelSize').value});
-    if (!r.ok) throw new Error(r.error || '模型切换失败');
-    toast(r.message || '正在切换模型，加载进度见控制台');
+    const r = await api('/api/tts/model', {size: $('#qwenModelSize').value, voice: $('#qwenVoice').value});
+    if (!r.ok) throw new Error(r.error || '模型或音色切换失败');
+    toast(r.message || '正在切换模型或音色，加载进度见控制台');
     await loadConfig();
   } catch (error) { toast(error.message); }
   finally { speechModelBusy = false; await pollSpeechModel(); }
@@ -1244,6 +1345,8 @@ async function pollDt() {
   try {
     const r = await api('/api/dtgame/status');
     const isStardew = r.game_kind === 'stardew';
+    const isSts2 = r.game_kind === 'sts2';
+    const isApiGame = isStardew || isSts2;
     if (r.game_kind && CFG.game) CFG.game.active = r.game_kind;
     renderGameSettings();
     const scr = r.game && r.game.screen ? r.game.screen : '';
@@ -1251,7 +1354,7 @@ async function pollDt() {
                    event:'事件', death:'阵亡', death_analysis:'死亡分析', run_end:'本局结算', soul_forge:'灵魂锻造',
                    loot:'战利品', menu:'主菜单', hall:'大厅',
                    character_select:'选角', other:'其他'};
-    $('#dtScreen').textContent = isStardew
+    $('#dtScreen').textContent = isApiGame
       ? (r.game_text || (r.game_running ? '已启动' : '未启动'))
       : (scr ? (names[scr] || scr) : (r.game_running ? '启动中' : '未启动'));
     $('#dtTurns').textContent = r.turns || 0;
@@ -1266,23 +1369,25 @@ async function pollDt() {
     } else if (r.running && r.ready) {
       $('#dtHint').textContent = isStardew
         ? '正在托管星露谷，台词自动配音；暂停会保留游戏和语音。'
-        : '正在代打，台词自动配音；暂停会保留游戏和语音。';
+        : isSts2
+          ? '正在托管杀戮尖塔 2，台词自动配音；暂停会保留游戏和语音。'
+          : '正在代打，台词自动配音；暂停会保留游戏和语音。';
     } else if (r.running) {
       $('#dtHint').textContent = '游戏连接中断，可点「启动 / 继续代打」恢复。';
     } else if (r.game_running) {
-      $('#dtHint').textContent = isStardew
-        ? '星露谷已启动，点「启动 / 继续代打」通过 MCP 接管。'
+      $('#dtHint').textContent = isApiGame
+        ? `${r.game_name || '游戏'}已启动，点「启动 / 继续代打」通过 MCP 接管。`
         : '游戏已启动，点「启动 / 继续代打」接管当前进度。';
     } else {
-      $('#dtHint').textContent = isStardew
-        ? '点「启动 / 继续代打」自动打开星露谷并读档；关闭全部请用左下方按钮。'
+      $('#dtHint').textContent = isApiGame
+        ? `点「启动 / 继续代打」自动打开${r.game_name || '游戏'}并继续存档；关闭全部请用左下方按钮。`
         : '点「启动 / 继续代打」自动打开游戏并继续存档；关闭全部请用左下方按钮。';
     }
     const bStart = $('#broadcastDtStart'), bStop = $('#broadcastDtStop'), bState = $('#broadcastDtState');
     if (bStart) bStart.disabled = broadcastDtBusy || (r.running && r.ready);
     if (bStop) bStop.disabled = broadcastDtBusy || !r.running;
     if (bState) bState.textContent = r.running
-      ? (isStardew ? `代打运行中 · ${r.game_text || ''}` : '代打运行中')
+      ? (isApiGame ? `代打运行中 · ${r.game_text || ''}` : '代打运行中')
       : (r.ready ? '代打未启动，游戏已就绪' : (r.game_running ? '游戏已启动，等待连接' : '游戏未启动'));
   } catch (e) {}
 }
@@ -1893,7 +1998,8 @@ function renderTheme(refresh = false) {
     styleThemeAvatar(avatar);
     if (!avatar.getAttribute('src')) avatar.src = '/live2d?overlay=1';
   } else avatar.removeAttribute('src');
-  const signature = JSON.stringify([c.preset, c.title, c.subtitle, c.ticker, c.show_chat]);
+  const signature = JSON.stringify([c.preset, c.title, c.subtitle, c.ticker, c.show_chat,
+                                    CFG.marquee?.enabled, CFG.marquee?.text]);
   const image = $('#themePreviewImage'), background = $('#layoutThemeBackground');
   const needSample = (visible && !live) || ($('#layout').classList.contains('on') && ocean && !broadcastInfo.previewing);
   if (needSample && (!image.getAttribute('src') || refresh && image.dataset.skin !== signature)) {
@@ -2059,11 +2165,11 @@ async function refreshBroadcastAccount() {
   $('#roomCoverPreview').style.display = cover ? '' : 'none';
   $('#roomCoverEmpty').style.display = cover ? 'none' : '';
   $('#roomCoverPreview').src = cover ? ('/api/broadcast/room/cover.jpg?t=' + Date.now()) : '';
-  $('#roomCoverEmpty').textContent = r.logged_in ? (r.room_id ? '还没有设置直播间封面' : '请先开通直播间') : '登录后可查看当前封面';
+  $('#roomCoverEmpty').textContent = r.logged_in ? (r.room_id ? '直播间还没有封面，请在直播姬设置' : '请先开通直播间') : '登录后可查看当前封面';
   if (r.notice !== undefined && document.activeElement !== $('#roomNotice')) $('#roomNotice').value = r.notice || '';
   $('#roomNoticeCount').textContent = $('#roomNotice').value.length + '/60';
   $('#broadcastAccount').textContent = r.logged_in ? `${r.name} · 直播间 ${r.room_id || '未开通'}` : '请先登录主播账号';
-  $('#broadcastAccountHint').textContent = r.error || (r.room_id ? (r.live_status === 1 ? 'B站直播间已在直播，请勿覆盖其他推流。' : '主播账号已识别，选择画面与分区后即可开播。') : '需要 B站实名和直播资格，请先在 B站开通自己的直播间。');
+  $('#broadcastAccountHint').textContent = r.error || (r.room_id ? (r.live_status === 1 ? 'B站直播间已在直播，请勿覆盖其他推流。' : '主播账号已识别，选择画面后即可开播。') : '需要 B站实名和直播资格，请先在 B站开通自己的直播间。');
   updateBroadcastButtons();
 }
 async function refreshBroadcastSources() {
@@ -2080,16 +2186,10 @@ async function refreshBroadcastSources() {
   if (picked && picked.minimized) $('#broadcastError').textContent = '所选游戏窗口已最小化，请先恢复游戏窗口再预览。';
   else if (!r.default_window && !picked) $('#broadcastError').textContent = '没有检测到可用的游戏窗口，请先启动并按需恢复游戏窗口，再点刷新窗口。';
 }
-async function loadBroadcastAreas() {
-  const r = await api('/api/broadcast/areas');
-  if (!r.ok) throw new Error(r.error || '直播分区读取失败');
-  $('#broadcastArea').innerHTML = '<option value="0">请选择直播分区</option>' + r.areas.map(a => `<option value="${esc(a.id)}">${esc(a.parent)} · ${esc(a.name)}</option>`).join('');
-  $('#broadcastArea').value = String(CFG.broadcast?.area_id || 0);
-}
 function updateBroadcastButtons() {
   const finishing = broadcastInfo.finishing || scheduleInfo.active_action === 'farewell';
   const active = broadcastInfo.running || broadcastInfo.phase === 'starting' || broadcastInfo.phase === 'stopping' || !!scheduleInfo.active_action || finishing;
-  $('#broadcastStart').disabled = broadcastBusy || active || !broadcastInfo.previewing || !broadcastAccount?.room_id || !broadcastAccount?.logged_in || !Number($('#broadcastArea').value);
+  $('#broadcastStart').disabled = broadcastBusy || active || !broadcastInfo.previewing || !broadcastAccount?.room_id || !broadcastAccount?.logged_in;
   $('#broadcastStop').disabled = broadcastBusy || !active;
   ['broadcastFinish', 'broadcastDashFinish'].forEach(id => {
     $('#' + id).disabled = broadcastBusy || finishing || !broadcastInfo.running || broadcastInfo.phase !== 'live' || !!scheduleInfo.active_action;
@@ -2097,7 +2197,7 @@ function updateBroadcastButtons() {
   });
   $('#broadcastPreview').disabled = broadcastBusy || active;
   $('#broadcastPreviewStop').disabled = broadcastBusy || active || !broadcastInfo.previewing;
-  ['broadcastWindow', 'broadcastAudio', 'broadcastArea', 'broadcastTitle', 'broadcastLaunchGame', 'broadcastRefreshSources', 'broadcastLogin'].forEach(id => $('#' + id).disabled = broadcastBusy || active);
+  ['broadcastWindow', 'broadcastAudio', 'broadcastLaunchGame', 'broadcastRefreshSources', 'broadcastLogin'].forEach(id => $('#' + id).disabled = broadcastBusy || active);
 }
 async function broadcastAction(fn) {
   if (broadcastBusy) return;
@@ -2113,33 +2213,6 @@ async function broadcastAction(fn) {
 }
 function broadcastSelection() { return {hwnd: Number($('#broadcastWindow').value), audio_device: Number($('#broadcastAudio').value)}; }
 $('#broadcastRefreshAccount').onclick = () => broadcastAction(refreshBroadcastAccount);
-$('#roomCoverFile').onchange = () => {
-  const file = $('#roomCoverFile').files[0], preview = $('#roomCoverPreview'), empty = $('#roomCoverEmpty');
-  if (!file) return;
-  const local = URL.createObjectURL(file);
-  preview.src = local; preview.style.display = ''; empty.style.display = 'none';
-  $('#roomCoverHint').textContent = `${file.name} · ${(file.size / 1024 / 1024).toFixed(2)}MB，尚未上传`;
-};
-$('#roomCoverSave').onclick = () => broadcastAction(async () => {
-  const file = $('#roomCoverFile').files[0];
-  if (!file) throw new Error('请先选择封面图片');
-  if (file.size > 5 * 1024 * 1024) throw new Error('封面图片需小于 5MB，请先压缩');
-  if (!broadcastAccount?.logged_in) throw new Error('请先扫码登录主播账号');
-  if (!confirm('上传这张图片并设为直播间封面？提交后需 B站审核。')) return;
-  $('#roomCoverResult').textContent = '正在上传封面…';
-  const form = new FormData(); form.append('cover', file);
-  const response = await fetch('/api/broadcast/room/cover', {method: 'POST', headers: {'X-BVB': '1'}, body: form});
-  const raw = await response.text();
-  let r;
-  try { r = JSON.parse(raw); }
-  catch { throw new Error(/body size/i.test(raw) ? '封面图片过大，服务拒收' : '封面上传失败：服务返回异常'); }
-  if (!r.ok) throw new Error(r.error || '封面上传失败');
-  if (r.cover) { $('#roomCoverPreview').src = r.cover; $('#roomCoverPreview').style.display = ''; $('#roomCoverEmpty').style.display = 'none'; }
-  $('#roomCoverResult').textContent = r.audit ? '封面已提交 B站审核，审核通过后生效。' : '直播间封面已更新。';
-  $('#roomCoverHint').textContent = '封面已提交 B站审核。';
-  $('#roomCoverFile').value = '';
-  toast('直播间封面已提交');
-});
 $('#roomNotice').addEventListener('input', () => $('#roomNoticeCount').textContent = $('#roomNotice').value.length + '/60');
 $('#roomNoticeSave').onclick = () => broadcastAction(async () => {
   if (!broadcastAccount?.logged_in) throw new Error('请先扫码登录主播账号');
@@ -2188,26 +2261,33 @@ $('#broadcastDtStop').onclick = () => broadcastDtAction(async () => {
   if (!r.ok) throw new Error(r.error || '暂停失败');
   toast('已暂停代打，游戏与语音保留');
 });
+// 开预览和开源画面都要先确定采集目标：窗口列表为空时自动刷新，游戏没开就自动拉起。
+async function ensureBroadcastSelection() {
+  let selection = broadcastSelection();
+  if (!selection.hwnd) {
+    $('#broadcastStatus').textContent = '正在查找游戏窗口…';
+    await refreshBroadcastSources();
+    selection = broadcastSelection();
+  }
+  if (!selection.hwnd) {
+    $('#broadcastStatus').textContent = '未找到游戏窗口，正在启动游戏（最长约90秒）…';
+    const launched = await api('/api/dtgame/launch', {});
+    await refreshBroadcastSources();
+    selection = broadcastSelection();
+    if (!selection.hwnd) throw new Error(launched.error || '没有找到游戏窗口，请手动启动游戏并恢复窗口后重试');
+  }
+  const picked = [...$('#broadcastWindow').options].find(o => o.value === String(selection.hwnd));
+  if (picked && picked.textContent.includes('已最小化')) {
+    throw new Error('所选游戏窗口已最小化，请先恢复游戏窗口再预览');
+  }
+  return selection;
+}
 $('#broadcastPreview').onclick = () => broadcastAction(async () => {
   await flushConfig();
-  let selection = broadcastSelection();
   $('#broadcastStatus').style.color = 'var(--yellow)';
   $('#broadcastPreview').textContent = '正在启动预览…';
   try {
-    if (!selection.hwnd) {
-      $('#broadcastStatus').textContent = '正在查找游戏窗口…';
-      await refreshBroadcastSources();
-      selection = broadcastSelection();
-    }
-    if (!selection.hwnd) {
-      $('#broadcastStatus').textContent = '未找到游戏窗口，正在启动游戏（最长约90秒）…';
-      const launched = await api('/api/dtgame/launch', {});
-      await refreshBroadcastSources();
-      selection = broadcastSelection();
-      if (!selection.hwnd) throw new Error(launched.error || '没有找到游戏窗口，请手动启动游戏并恢复窗口后重试');
-    }
-    const picked = [...$('#broadcastWindow').options].find(o => o.value === String(selection.hwnd));
-    if (picked && picked.textContent.includes('已最小化')) throw new Error('所选游戏窗口已最小化，请先恢复游戏窗口再预览');
+    const selection = await ensureBroadcastSelection();
     $('#broadcastStatus').textContent = '正在启动画面和声音采集…';
     const r = await api('/api/broadcast/preview', selection);
     if (!r.ok) throw new Error(r.error);
@@ -2215,8 +2295,8 @@ $('#broadcastPreview').onclick = () => broadcastAction(async () => {
 });
 $('#broadcastPreviewStop').onclick = () => broadcastAction(async () => { const r = await api('/api/broadcast/preview/stop', {}); if (!r.ok) throw new Error(r.error); });
 $('#srcStart').onclick = () => broadcastAction(async () => {
-  const selection = broadcastSelection();
-  if (!selection.hwnd) throw new Error('请先选择要直播的游戏窗口');
+  await flushConfig();
+  const selection = await ensureBroadcastSelection();
   $('#srcState').textContent = '正在开启源画面…';
   const r = await api('/api/broadcast/source', selection);
   if (!r.ok) throw new Error(r.error);
@@ -2230,7 +2310,7 @@ $('#srcStop').onclick = () => broadcastAction(async () => {
 $('#broadcastStart').onclick = () => broadcastAction(async () => {
   await flushConfig();
   if (!confirm(`以 ${broadcastAccount?.name || '当前账号'} 公开开播？观众将看到预览画面并听到所选设备声音。`)) return;
-  const r = await api('/api/broadcast/start', {...broadcastSelection(), title: $('#broadcastTitle').value.trim(), area_id: Number($('#broadcastArea').value), confirm: true});
+  const r = await api('/api/broadcast/start', {...broadcastSelection(), confirm: true});
   if (!r.ok) throw new Error(r.error);
   toast('直播已开始');
 });
@@ -2243,7 +2323,6 @@ $('#broadcastFinish').onclick = $('#broadcastDashFinish').onclick = () => broadc
   toast('直播已停止，游戏和千音语音仍保留');
 });
 $('#broadcastWindow').onchange = $('#broadcastAudio').onchange = () => { if (broadcastInfo.previewing && !broadcastInfo.running) broadcastAction(async () => { const r = await api('/api/broadcast/preview/stop', {}); if (!r.ok) throw new Error(r.error); }); };
-$('#broadcastArea').addEventListener('change', updateBroadcastButtons);
 async function pollBroadcast() {
   try {
     broadcastInfo = await api('/api/broadcast/status');
@@ -2338,12 +2417,12 @@ async function saveSchedule(disable = false) {
   const confirmText = mode === 'stop_only'
     ? `允许每天 ${stop} 自动结束已登录主播账号的B站直播间？适用于直播姬 / OBS 开播，不会自动开播。`
     : mode === 'livehime'
-      ? `允许每天 ${start} 自动拉起游戏、代打和千音源画面，并用直播姬的开始/停止快捷键开播、${stop} 停播？直播姬会使用它自己记住的标题和分区。`
-      : `允许每天 ${start} 自动公开开播、${stop} 自动停播？将使用上方标题、分区和已预览的窗口与声音，不再弹出开播确认。`;
+      ? `允许每天 ${start} 自动拉起游戏、代打和千音源画面，并用直播姬的开始/停止快捷键开播、${stop} 停播？直播姬会使用它自己记住的分区，千音会按游戏自动修改直播间标题。`
+      : `允许每天 ${start} 自动公开开播、${stop} 自动停播？将使用已预览的窗口与声音，沿用直播姬里的分区和封面，并按游戏自动修改直播间标题，不再弹出开播确认。`;
   if (enabled && !confirm(confirmText)) return;
   scheduleBusy = true; $('#scheduleSave').disabled = $('#scheduleDisable').disabled = true;
   try {
-    const selection = mode === 'stop_only' ? {} : {...broadcastSelection(), title: $('#broadcastTitle').value.trim(), area_id: Number($('#broadcastArea').value)};
+    const selection = mode === 'stop_only' ? {} : broadcastSelection();
     const savedLivehime = scheduleInfo.livehime || {};
     const livehime = mode === 'livehime' ? {
       path: disable ? (savedLivehime.path || '') : $('#livehimePath').value.trim(),
@@ -2362,14 +2441,15 @@ $('#scheduleSave').onclick = () => saveSchedule();
 $('#scheduleDisable').onclick = () => saveSchedule(true);
 
 // ---------- 播放计划 ----------
-const PLAN_GAMES = {demontower: '恶魔之塔', stardew: '星露谷'};
+const PLAN_GAMES = {demontower: '恶魔之塔', stardew: '星露谷', sts2: '杀戮尖塔2'};
 function renderPlanSummary(r) {
   const plans = Array.isArray(r.plans) ? r.plans : [];
   const active = !!(r.plans_enabled && plans.length);
   if (!plans.length) {
     $('#planSummary').textContent = '未设置。可以安排每天几点开播、几点结束、播哪款游戏。';
   } else {
-    const parts = plans.map(p => `${p.start}–${p.stop} ${PLAN_GAMES[p.game] || p.game}`).join('；');
+    const parts = plans.map(p => `${p.start}–${p.stop} ${PLAN_GAMES[p.game] || p.game}`
+      + (p.playlist ? `（歌单 ${p.playlist_name || p.playlist}）` : '')).join('；');
     let text = `${active ? (r.enabled ? '生效中' : '已暂停') : '未启用'} · 每天 ${parts}`;
     if (active && r.enabled) {
       if (r.next_start) text += ` · 下次开播 ${r.next_start}`;
@@ -2402,11 +2482,20 @@ function planRow(plan = {}) {
   row.dataset.id = plan.id || `plan-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   row.innerHTML = '<label class="f">开始时间<input type="time" class="plan-start" step="60"></label>'
     + '<label class="f">结束时间<input type="time" class="plan-stop" step="60"></label>'
-    + '<label class="f">播的游戏<select class="plan-game"><option value="demontower">恶魔之塔 Zero</option><option value="stardew">星露谷物语</option></select></label>'
-    + '<button class="btn r sm plan-del" type="button">删除</button>';
+    + '<label class="f">播的游戏<select class="plan-game"><option value="demontower">恶魔之塔 Zero</option><option value="stardew">星露谷物语</option><option value="sts2">杀戮尖塔 2</option></select></label>'
+    + '<button class="btn r sm plan-del" type="button">删除</button>'
+    + '<label class="f plan-music">开播歌单（留空=沿用「点歌」页记住的歌单）<input class="plan-playlist" list="planPlaylistOptions" placeholder="网易云歌单链接或 ID" autocomplete="off"></label>';
   row.querySelector('.plan-start').value = plan.start || '20:00';
   row.querySelector('.plan-stop').value = plan.stop || '23:00';
   row.querySelector('.plan-game').value = plan.game || 'demontower';
+  const music = row.querySelector('.plan-playlist');
+  music.value = plan.playlist || '';
+  row.dataset.playlistName = plan.playlist_name || '';
+  music.addEventListener('input', () => {
+    const value = music.value.trim();
+    const option = value && [...$('#planPlaylistOptions').options].find(o => o.value === value);
+    row.dataset.playlistName = option ? (option.label || option.textContent || '') : '';
+  });
   row.querySelector('.plan-del').onclick = () => { row.remove(); refreshPlanEmpty(); };
   return row;
 }
@@ -2428,6 +2517,8 @@ function collectPlans() {
     start: row.querySelector('.plan-start').value,
     stop: row.querySelector('.plan-stop').value,
     game: row.querySelector('.plan-game').value,
+    playlist: row.querySelector('.plan-playlist').value.trim(),
+    playlist_name: row.querySelector('.plan-playlist').value.trim() ? (row.dataset.playlistName || '') : '',
   }));
 }
 function closePlanModal() {
@@ -2440,7 +2531,24 @@ function syncPlanMode() {
   $('#planLivehimeHint').style.display = livehime ? '' : 'none';
 }
 $('#planMode').onchange = syncPlanMode;
+let planPlaylistsLoaded = false;
+async function loadPlanPlaylists() {
+  if (planPlaylistsLoaded) return;
+  try {
+    const r = await api('/api/songs/playlists');
+    if (!r.ok) return;
+    const box = $('#planPlaylistOptions');
+    for (const p of r.playlists || []) {
+      const option = document.createElement('option');
+      option.value = String(p.id);
+      option.label = option.textContent = p.name || String(p.id);
+      box.appendChild(option);
+    }
+    planPlaylistsLoaded = true;
+  } catch {}
+}
 $('#planOpen').onclick = () => {
+  loadPlanPlaylists();
   const plans = (scheduleInfo.plans || []).slice();
   setPlanRows(plans);
   if (!plans.length) addPlanRow({start: '20:00', stop: '23:00', game: (CFG.game && CFG.game.active) || 'demontower'});
@@ -2467,8 +2575,9 @@ $('#planLivehimeCheck').onclick = async () => {
                                        hotkey: $('#planLivehimeHotkey').value.trim()});
     const r = await api('/api/broadcast/livehime/check?' + query.toString());
     if (!r.ok) throw new Error(r.error || '没有找到直播姬');
-    state.textContent = `${r.running ? '直播姬正在运行' : '直播姬未运行（到点会自动启动）'} · ${r.path || '未找到 livehime.exe'} · ${r.hotkey || '快捷键未设置'}`;
-    state.style.color = r.hotkey_ok ? '' : 'var(--red)';
+    state.textContent = `${r.running ? '直播姬正在运行' : '直播姬未运行（到点会自动启动）'} · ${r.path || '未找到 livehime.exe'} · ${r.hotkey || '快捷键未设置'}`
+      + (r.elevated && !r.self_elevated ? ' · 直播姬以管理员权限运行，请同样用管理员身份启动千音' : '');
+    state.style.color = r.hotkey_ok && !(r.elevated && !r.self_elevated) ? '' : 'var(--red)';
   } catch (e) { state.style.color = 'var(--red)'; state.textContent = e.message || String(e); }
 };
 $('#planLivehimeCalibrate').onclick = async () => {
@@ -2581,7 +2690,7 @@ $('#ricePreview').onclick = async () => {
 setInterval(() => api('/api/rice/state').then(renderRice).catch(() => {}), 2000);
 api('/api/rice/state').then(renderRice).catch(() => {});
 setInterval(pollBroadcast, 1000);
-loadConfig().then(() => { loadWeights(); loadDevices(); loadL2d(); api('/api/songs/state').then(renderSongs); refreshBroadcastAccount(); refreshBroadcastSources().catch(e => $('#broadcastError').textContent = e.message); loadBroadcastAreas().catch(e => $('#broadcastError').textContent = e.message); pollBroadcast(); });
+loadConfig().then(() => { loadWeights(); loadDevices(); loadL2d(); loadVoices().catch(() => {}); api('/api/songs/state').then(renderSongs); refreshBroadcastAccount(); refreshBroadcastSources().catch(e => $('#broadcastError').textContent = e.message); pollBroadcast(); });
 connectWs();
 </script>
 </body>

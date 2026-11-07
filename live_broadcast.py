@@ -12,6 +12,7 @@ from live_overlay import Live2DOverlay, OverlayCompositor, OverlayError, find_ed
 from live_rice import RiceCompositor
 from live_subtitles import SourceSubtitles
 from live_theme import StreamTheme, DEFAULTS as THEME_DEFAULTS
+from live_marquee import MarqueeBanner
 from live_platform import (BiliBroadcastPlatform, FaceAuthRequiredError,
                            PlatformError)
 
@@ -64,6 +65,7 @@ class Broadcast:
         self.capture.source_subtitles = self.source_subtitles
         self.theme = StreamTheme(lambda: app.cfg.get("stream_theme", {}), lambda: song_snapshot(app))
         self.capture.theme_compositor = self.theme
+        self.capture.marquee_compositor = MarqueeBanner(lambda: app.cfg.get("marquee", {}))
         if getattr(app, "rice", None) is not None:
             self.capture.rice_compositor = RiceCompositor(app.rice, lambda: app.cfg.get("rice_counter", {}))
         self.capture.banner_compositor = getattr(app, "gift_banner", None)
@@ -191,6 +193,12 @@ class Broadcast:
         self.app.bili.login_name = result.get("name", "") if result.get("logged_in") else ""
         return result
 
+    async def update_title(self, title):
+        try:
+            return await BiliBroadcastPlatform(self.app.cfg.get("bili_cookie", "")).update_title(title)
+        except PlatformError as error:
+            return {"ok": False, "error": str(error)}
+
     async def login(self):
         result = await self.account()
         if result.get("logged_in"):
@@ -205,46 +213,6 @@ class Broadcast:
             self.app.bili.login_uid, self.app.bili.login_name = None, ""
             self.app.push("log", {"level": "warn", "msg": result.get("error") or "请先登录主播账号"})
         return result
-
-    async def areas(self):
-        try:
-            return {"ok": True, "areas": await BiliBroadcastPlatform("").areas()}
-        except PlatformError as error:
-            return {"ok": False, "error": str(error), "areas": []}
-
-    @staticmethod
-    def image_problem(data: bytes):
-        from io import BytesIO
-        from PIL import Image
-        if not data or len(data) > 5 * 1024 * 1024:
-            return "封面图片需小于 5MB"
-        try:
-            image = Image.open(BytesIO(data))
-            image.verify()
-            image = Image.open(BytesIO(data))
-            width, height = image.size
-        except Exception:
-            return "封面必须是有效的 JPG 或 PNG 图片"
-        if image.format not in ("JPEG", "PNG"):
-            return "封面只支持 JPG 或 PNG"
-        if width < 640 or height < 360:
-            return "封面尺寸至少 640×360，建议 1280×720（16:9）"
-        if not (1.5 <= width / height <= 2.0):
-            return "封面比例请使用 16:9 或 3:2"
-        return ""
-
-    async def update_cover(self, data: bytes, filename: str, mime: str):
-        if not self.app.cfg.get("bili_cookie"):
-            return {"ok": False, "error": "请先扫码登录主播账号，再修改直播间封面"}
-        problem = self.image_problem(data)
-        if problem:
-            return {"ok": False, "error": problem}
-        try:
-            result = await BiliBroadcastPlatform(self.app.cfg.get("bili_cookie", "")).update_cover(data, filename, mime)
-            self.app.push("log", {"level": "info", "msg": "直播间封面已提交 B站审核"})
-            return result
-        except PlatformError as error:
-            return {"ok": False, "error": str(error)}
 
     async def update_notice(self, notice: str):
         try:
@@ -449,11 +417,6 @@ class Broadcast:
                 hwnd, audio = self.selection(data)
                 if data.get("confirm") is not True:
                     raise ValueError("开播前需要确认公开直播")
-                title, area = data.get("title"), data.get("area_id")
-                if not isinstance(title, str) or not 1 <= len(title.strip()) <= 60:
-                    raise ValueError("直播标题必须为1–60个字符")
-                if type(area) is not int or area <= 0:
-                    raise ValueError("请选择直播分区")
                 if not self.capture.previewing or self.capture.hwnd != hwnd or self.capture.audio_device != audio:
                     raise ValueError("请先预览当前窗口和声音，再开始直播")
                 if self.capture.error:
@@ -466,7 +429,7 @@ class Broadcast:
                     raise OverlayError(self.overlay_error)
                 self.phase, self.error = "starting", ""
                 self.platform = BiliBroadcastPlatform(self.app.cfg.get("bili_cookie", ""))
-                result = await self.platform.begin(title.strip(), area)
+                result = await self.platform.begin()
                 await asyncio.to_thread(self.capture.start_output, result["url"])
                 self.started_at = time.monotonic()
                 self.phase = "live"

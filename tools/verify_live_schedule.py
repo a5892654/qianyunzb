@@ -101,7 +101,7 @@ async def s02_day_start_stop():
     await fire(s, now, "2026-10-01 08:00")
     b, arg = a.broadcast, a.broadcast.start.await_args.args[0]
     req(b.preview.await_args.args[0] == {"hwnd": 1111, "audio_device": 2222}, "未按保存源预览")
-    req(arg["confirm"] is True and arg["title"] == "千音" and arg["area_id"] == 591, "start 参数: " + str(arg))
+    req(arg["confirm"] is True and "title" not in arg and "area_id" not in arg, "start 参数: " + str(arg))
     req(a.cfg["room_id"] == 42 and s.settings["last_start"] == "2026-10-01" and s.last_result["ok"], "开播未落账")
     await asyncio.sleep(0.02); b.running = True
     await fire(s, now, "2026-10-01 18:00")
@@ -184,7 +184,7 @@ async def s10_fail_once():
     req(s3.last_result["ok"] is False and a3.pushes[-1][1]["level"] == "warn", "执行异常应记 last_result 并 warn")
 
 def payload(**kw):
-    d = {"enabled": True, "authorized": True, "title": "千音", "area_id": 591,
+    d = {"enabled": True, "authorized": True,
          "start_time": "08:00", "stop_time": "18:00"}
     d.update(kw)
     return d
@@ -198,7 +198,7 @@ async def s11_save_rejects():
              (P(), lambda a: setattr(a.broadcast.capture, "previewing", False), "预览"),
              (P(), lambda a: setattr(a.broadcast.capture, "hwnd", 999), "预览"),
              (P(), lambda a: setattr(a.broadcast.capture, "error", "黑屏"), "预览"),
-             (P(title="  "), None, "标题"), (P(area_id=0), None, "分区"), (P(), no_src, "读不到"),
+             (P(), no_src, "读不到"),
              (P(), lambda a: setattr(a.broadcast, "sources", AsyncMock(return_value=src(h=5555))), "已变化"),
              (P(), lambda a: setattr(a.broadcast, "sources", AsyncMock(return_value=src(dup=True))), "重名")]
     for data, prep, want in cases:
@@ -214,11 +214,13 @@ async def s11_save_rejects():
 
 async def s12_save_enabled_ok():
     s, a, now = make(enabled=True, last_start="2026-09-30")
-    st = await s.save(payload(title=" 千音直播 "))
+    a.cfg["broadcast"]["title"] = "直播姬里设的标题"
+    st = await s.save(payload())
     saved = SAVED[-1]["broadcast"]["schedule"]
     req(st["ok"] and saved["window_title"] == "DemoTower" and saved["audio_name"] == "loop-x"
         and "hwnd" not in saved and "audio_device" not in saved, "只应存名称不存句柄: " + str(saved))
-    req(saved["last_start"] == "2026-09-30" and a.cfg["broadcast"]["title"] == "千音直播", "ledger 保留/标题去空格")
+    req(saved["last_start"] == "2026-09-30" and a.cfg["broadcast"]["title"] == "直播姬里设的标题",
+        "ledger 保留/不得修改直播间标题")
     req("next_start" in st and st["local_time"] == "2026-10-01 07:00", "status: " + str(st))
 
 async def s13_disable_keeps_live():
@@ -556,6 +558,21 @@ async def s31_auto_stop_also_stops_autoplay():
     req(a3.stop_dt.await_count == 0, "没在直播却暂停了代打")
 
 
+async def s32_stop_catch_up_after_missed_minute():
+    s, a, now = make(enabled=True, mode="stop_only", external_room_id=42)
+    a.broadcast.account = AsyncMock(return_value={"ok": True, "logged_in": True, "room_id": 42, "live_status": 1})
+    await fire(s, now, "2026-10-01 18:10")
+    req(a.broadcast.stop_external.await_count == 1 and s.settings["last_stop"] == "2026-10-01",
+        "错过 18:00 整分钟后 10 分钟应补停")
+    req(any("补停" in str(m) for _, m in a.pushes), "补停应写日志: " + str(a.pushes[-3:]))
+    await fire(s, now, "2026-10-01 18:11")
+    req(a.broadcast.stop_external.await_count == 1, "同一天补停不得重复")
+    s2, a2, now2 = make(enabled=True, mode="stop_only", external_room_id=42)
+    a2.broadcast.account = AsyncMock(return_value={"ok": True, "logged_in": True, "room_id": 42, "live_status": 1})
+    await fire(s2, now2, "2026-10-01 18:40")
+    req(a2.broadcast.stop_external.await_count == 0, "超过 30 分钟不再补停，避免大半夜误触发")
+
+
 SUITES = [s01_disabled, s02_day_start_stop, s03_cross_midnight, s04_minute_and_rollback, s05_restart_ledger,
           s06_init_save_minute_and_missed, s07_skip_and_stop_noop, s08_sources_bad, s09_resolve_new_ids,
           s10_fail_once, s11_save_rejects, s12_save_enabled_ok, s13_disable_keeps_live,
@@ -565,7 +582,8 @@ SUITES = [s01_disabled, s02_day_start_stop, s03_cross_midnight, s04_minute_and_r
           s22_livehime_start, s23_livehime_already_live, s24_livehime_trigger_fails,
           s25_livehime_not_confirmed, s26_livehime_stop_uses_hotkey_and_api,
           s27_livehime_save_sets_global_settings, s28_livehime_save_rejects,
-          s29_livehime_cancel_during_ready, s30_livehime_daily_stop, s31_auto_stop_also_stops_autoplay]
+          s29_livehime_cancel_during_ready, s30_livehime_daily_stop, s31_auto_stop_also_stops_autoplay,
+          s32_stop_catch_up_after_missed_minute]
 
 async def amain():
     t0 = time.time()

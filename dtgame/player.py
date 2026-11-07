@@ -26,13 +26,18 @@ from dtgame.expedition import choose_depth, depth_settings
 from dtgame import view
 from dtgame import grans
 from dtgame import lifecycle
-from dtgame.commentary import GameCommentary, scene
+from dtgame.commentary import GameCommentary, battle_key, scene
 from live_context import mentions_rice, rice_question
 
 log = logging.getLogger("dtplay")
 
 # 本局最多复活两次（玩家设定）：第三次阵亡就结束本局回大厅开新局。
 MAX_REVIVES = 2
+
+# 普通解说至少隔一步再开口，避免每步报流水账；战斗开场和关键时刻不受这个限制。
+COMBO_STEPS = 2
+# 冷场兜底：整整这么久没有开口，才强制接一句和当前局面有关的话。
+SILENCE_SECONDS = 12.0
 
 _SAY_STRIP = re.compile(r"[\"'“”‘’「」『』【】\[\]{}()（）#*_`>|]")
 
@@ -111,21 +116,43 @@ SYSTEM = """你在直播玩《恶魔之塔 Zero》——一款类杀戮尖塔的
   新手教学路线固定深度0；游戏桥没给解锁上限时不填 depth，沿用当前设置。
   深度只能在大厅开始新出征前调整，不能中途改本局难度，也不要为改深度放弃现有进度。
 
-每个 JSON 都要带一个非空的 "say" 字段，随口说一句此刻的解说或感受，
-不超过 30 字，保持边玩边聊，不要念数值或解说规则。
+"say" 是直播解说，允许为空。真人主播不会每张牌都念一句：
+战斗开场可以先说一句；打起来之后有时一步就接话，有时连打几步再总结成一句连招，
+节奏穿插着来。没有值得开口的内容就把 say 留空，但别连续太久不吭声。
+不要逐张报牌名或写流水账，也不要把动作 JSON 塞进 say。
 刚掉血、险胜、失误或拿到奖励时，依据已经发生的事实自然反应，不能提前庆祝尚未确认的结果。
+一句 say 不超过 30 字，不要念数值或解说规则。
 
 手牌后面标 ✕ 的牌当前打不出来，括号里是原因，别选它。
 敌人标了 ✕不可选中 的（已阵亡或隐匿）别当目标，系统会自动改成能选的那个。
 道具写了「现在用不了：…」的同理，原因没变就别再撞同一个 slot。
 本局最多复活两次，第三次阵亡就回大厅开新局，别跟观众承诺无限复活。
 
-决策要点：
-- 优先算清能不能挡住这一回合的伤害，再考虑输出。
-- 能量有限，别把牌留到死；能斩杀就斩杀。
-- 血少时优先进攻或格挡，别贪。
-- 挡不住又还有元素瓶就喝，它不消耗回合，瓶子攒到死没意义。
+战斗决策顺序（状态里有【作战参谋】就先看它的粗算，没有就自己按牌面算）：
+- 有斩杀窗口（总伤害够清场，或够杀掉威胁最大的敌人）就先输出，不为多余格挡浪费能量。
+- 会被打死时先活下来：格挡、元素瓶、药水、减伤。元素瓶不消耗回合，别留到死。
+- 不能斩杀也不用全挡时，用最少能量挡住最大单段伤害，剩余能量打输出。
+- 能力/抽牌/回能牌先铺；单体高伤点杀威胁最大的敌人，群体牌留给多敌。
+- 作战参谋只按基础牌面粗算；条件加成、抽牌连锁、状态牌效果以手牌说明为准。
+- 手牌数值是基础值，力量/敏捷和敌人易伤会改变实际结果，别把粗算当成精确伤害。
+- 血少、挡不住、又没回血手段时，优先击杀最大威胁而不是平均摊伤害。
 - 不确定时选最稳的一步。
+
+商店决策：
+- 先看商品名称和效果，补当前短板：缺血买治疗，缺防买格挡，缺输出买攻击；遗物通常优先。
+- 只看买得起且没售出的商品；灵魂不够就买得起的那件或直接离开，别反复撞同一个 slot。
+- 买完就离开，别在商店空转。
+
+卡牌奖励：
+- 参考状态里的牌组摘要补短板，稀有度不等于强度；没有合适的就跳过。
+
+灵魂锻造：
+- 先看卡牌数值和每个强化项的前→后预览，别只按名字猜。
+- 优先强化核心牌：高费核心牌先降费；关键输出/防御牌再考虑加数值。
+- 附魔·重奏、角色专属强化、专属路线通常比通用的「伤害+3」更值，灵魂够就优先。
+- 同一张卡锻得越多越贵；不是绝对核心就别反复锻，换一张可能更划算。
+- 诅咒铭刻、元素质变、记忆强化只在牌组明确围绕它们时才选。
+- 界面默认停在第一项，不代表最优；确认前先比较全部强化项。
 """
 
 
@@ -150,7 +177,10 @@ class Player:
         self.narrate = narrate
         self.pipe = pipe
         self.emotions = emotions or (lambda: [])
-        self._pending_speech = None
+        self._silent_actions: list[str] = []
+        self._quiet_from = time.monotonic()
+        self._battle_key = None
+        self._battle_opening = False
         self.history: list[dict] = []
         self.running = False
         self.turns_taken = 0
@@ -198,8 +228,51 @@ class Player:
             text += "\n刚才的游戏解说：" + self.last_say
         return text
 
+    def fresh_commentary(self) -> str:
+        """解说排队太久时，用最新读到的局面补一句，别让观众听到进房前的画面。"""
+        if not self._last_state or time.monotonic() - self._state_time > 20:
+            return ""
+        return self.commentary.context_line(self._last_state)
+
     def speech_state(self):
         return scene(self._last_state if time.monotonic() - self._state_time < 30 else None)
+
+    def _remember_action(self, state: dict, result: dict) -> None:
+        action = result.get("action")
+        if not isinstance(action, dict) or not action:
+            return
+        label = f"{state.get('screen')} {json.dumps(action, ensure_ascii=False)}"
+        self._silent_actions.append(label[:160])
+        del self._silent_actions[:-6]
+
+    @staticmethod
+    def _speech_tail(text: str) -> float:
+        """按字数估算这句话播完还要多久，避免把正在播的语音算成冷场。"""
+        return min(8.0, 0.6 + 0.2 * len(text))
+
+    def _silence_seconds(self) -> float:
+        return max(0.0, time.monotonic() - self._quiet_from)
+
+    def _combo_prompt(self, state: dict) -> str:
+        """连续操作几步后，把这一串交给模型合成一句，而不是每步报流水账。"""
+        if not self.narrate:
+            return ""
+        if state.get("screen") == "battle" and self._battle_opening:
+            return ("\n【战斗开场】这是新一场战斗的第一手，这一手请带一句开场或应战的话（say 不能为空）；"
+                    "这句不用等连招，说完再按正常节奏操作。")
+        cold = self._silence_seconds() >= SILENCE_SECONDS
+        parts = []
+        if cold:
+            parts.append("\n【该开口了】已经整整 12 秒没听到你说话。这次必须带一句和当前局面有关的短句："
+                         "提一下现在的血量、能量、手牌、敌人意图，或你刚做完的这步操作；"
+                         "不要空泛地说一句“继续”就完事。")
+        if len(self._silent_actions) >= COMBO_STEPS:
+            steps = "；".join(self._silent_actions[-4:])
+            parts.append("\n【连招解说】最近连续完成的操作：" + steps
+                         + "。这次开口时把这些动作合成一句带感的总结，像真人主播打完一段连招再说话；"
+                           "不要逐条报动作或只报数值，也不要提前宣告尚未发生的结果。"
+                         + ("" if cold else "如果确实没有值得说的，say 可以留空。"))
+        return "".join(parts)
 
     def remember_interaction(self, ev, reply):
         """把已安排的弹幕回复交给下一步游戏决策，避免两边各说各的。"""
@@ -569,18 +642,6 @@ class Player:
         # restart 只把弹窗收掉，深度还没选；标 stale 让下一轮正常走深度选择，别误判成出征失败。
         return {**result, "stale": True, "say": ""} if result.get("ok") else {**result, "say": ""}
 
-    async def _wait_spoken(self, job_id, timeout: float = 40.0):
-        """等这句话播完（含合成排队时间）。超时就放行，不让一句话卡死整局。"""
-        is_done = getattr(self.pipe, "spoken_done", None) if self.pipe else None
-        if is_done is None:
-            await asyncio.sleep(min(6.0, 0.8 + 0.12 * len(self.last_say)))
-            return
-        deadline = asyncio.get_running_loop().time() + timeout
-        while asyncio.get_running_loop().time() < deadline:
-            if is_done(job_id):
-                return
-            await asyncio.sleep(0.15)
-
     def _reset_death_wait(self) -> None:
         self._death_stage = None
         self._death_since = None
@@ -660,28 +721,49 @@ class Player:
         mode = (state.get("run") or {}).get("mode")
         if mode and mode != "deep":
             return await self._step(state)
+        if state.get("screen") == "battle" and not state.get("busy"):
+            key = battle_key(state)
+            if key != self._battle_key:
+                self._battle_key = key
+                self._battle_opening = True
         self.commentary.observe(state)
         result = await self._step(state)
-        generated = "_emotion" in result
         emotion = result.pop("_emotion", "")
         action = (result.get("action") or {}).get("action", "")
         if (not result.get("ok") or result.get("stale") or result.get("recovering")
                 or action.startswith("wait") or action == "abandon_run"):
             return result
         moment = self.commentary.moment()
-        say = result.get("say") or (self.commentary.fallback() if moment else "")
-        if not say and not moment and not generated:
-            return result
-        if not say or mentions_rice(say) or (self.commentary.recent and say == self.commentary.recent[-1]):
-            say = self.commentary.fallback() or self.commentary.filler(state)
-            emotion = ""
         situation = scene(state)
-        say = _clean_say(say, min(30, situation["max_chars"]))
         important = bool(moment) or state.get("screen") in ("character_select", "hall")
-        if not self.commentary.can_speak(state, say, important):
-            say = self.commentary.filler(state)
-        result["say"] = say
+        say = str(result.get("say") or "").strip()
+        if say:
+            say = _clean_say(say, min(30, situation["max_chars"]))
+        if not say and moment:
+            say = self.commentary.fallback()
+        if say and (mentions_rice(say) or not self.commentary.can_speak(state, say, important)):
+            say = self.commentary.fallback() if moment else ""
+            emotion = ""
         if not self.narrate:
+            result["say"] = say
+            return result
+
+        forced = self._silence_seconds() >= SILENCE_SECONDS
+        opening = state.get("screen") == "battle" and self._battle_opening
+        if state.get("screen") == "battle":
+            self._battle_opening = False
+        self._remember_action(state, result)
+        if not say:
+            if not forced:
+                result["say"] = ""
+                return result
+            say = self.commentary.context_line(state)
+            emotion = ""
+        result["say"] = say
+
+        # 语音不阻塞操作：普通解说至少隔一步再开口；冷场、战斗开场和关键时刻照常即时播报。
+        if (not important and not opening and not forced and self.commentary.recent
+                and len(self._silent_actions) < COMBO_STEPS):
             return result
         if moment and not emotion:
             expected = {"low_health": "惊讶", "hurt": "惊讶", "boss": "期待", "heal": "开心",
@@ -692,10 +774,10 @@ class Player:
             reaction = getattr(self.pipe, "react", None) if self.pipe is not None else None
             job = reaction(say, emotion) if moment and callable(reaction) else self.speak(say, emotion)
             if job is not None or self.pipe is None:
+                self._silent_actions.clear()
+                self._quiet_from = time.monotonic() + self._speech_tail(say)
                 self.last_say = say
                 self.commentary.spoken(state, say)
-            if job is not None:
-                self._pending_speech = job
         except Exception as e:
             log.warning("播报失败：%s", e)
         return result
@@ -766,6 +848,7 @@ class Player:
                     "ok": bool(r.get("ok")), "error": r.get("error", ""), "say": ""}
         text = view.render(self._character_state(state) if screen == "character_select" else state)
         text += self.commentary.prompt(state, emotional_value=self.cfg.get("emotional_value", True))
+        text += self._combo_prompt(state)
         if screen == "character_select":
             text += "\n" + self._rotation(state)
         if screen == "hall" and self._last_expedition:
@@ -816,6 +899,14 @@ class Player:
             if allowed_emotions and say:
                 self.log_push("warn", "代打未选择有效皮套情绪，本句将按台词关键词匹配")
 
+        # 模型思考期间手牌可能已被抽牌动画重排；记住它当时选的是哪张牌，
+        # 让游戏桥按 id 校验，避免照着旧槽位打错牌。
+        if screen == "battle" and act.get("action") == "play" and not act.get("id"):
+            slot = act.get("slot")
+            picked = next((c for c in (state.get("battle") or {}).get("hand") or []
+                           if c.get("slot") == slot), None)
+            if picked and picked.get("id"):
+                act["id"] = str(picked["id"])
         # 先出牌再说话：画面是"因"，台词是"果"。
         # 反过来的话（之前就是）声音还在合成，牌早打完了，观感就是音画脱节。
         result = await asyncio.to_thread(self._do, state, act)
@@ -908,11 +999,7 @@ class Player:
                 if state and state.get("busy") and not urgent:
                     await asyncio.sleep(0.3)
                     continue
-                # 0血结算不等待上一句语音；正常出牌仍维持原来的音画节流。
-                if self._pending_speech is not None and not urgent:
-                    await self._wait_spoken(self._pending_speech)
-                    self._pending_speech = None
-                    state = None  # 等语音期间局面可能变化，出牌前重新读取。
+                # 语音在后台排队，操作立刻继续；台词由 step 按连招节奏决定何时开口。
                 r = await self.step(state)
                 if r.get("error") and not r.get("action"):
                     await asyncio.sleep(1.0)

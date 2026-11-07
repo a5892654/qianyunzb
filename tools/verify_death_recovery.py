@@ -167,19 +167,16 @@ class RecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await p.step())["action"]["action"], "return_to_hall")
         bridge.revive.assert_not_called()
 
-    async def test_busy_screen_and_pending_speech_do_not_bypass_recovery_in_run_loop(self):
+    async def test_busy_screen_does_not_bypass_recovery_in_run_loop(self):
         p, bridge = self.player(state(busy=True))
         p.DEATH_BUSY_TIMEOUT = 0
         bridge.screen.return_value = {"screen": "battle", "busy": True}
-        p._pending_speech = "unfinished"
-        p._wait_spoken = AsyncMock(side_effect=AssertionError("不应等待语音"))
         def end():
             p.stop()
             return {"ok": True}
         bridge.end_turn.side_effect = end
         await asyncio.wait_for(p.run_forever(0), 1)
         bridge.end_turn.assert_called_once()
-        p._wait_spoken.assert_not_awaited()
         p._ask.assert_not_awaited()
 
     async def test_bridge_failure_does_not_ask_model_or_reset_retry_count(self):

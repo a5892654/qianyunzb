@@ -17,6 +17,7 @@ import config
 from live_broadcast import Broadcast
 from live_capture import OUT_H, OUT_W, WindowStreamCapture
 from live_overlay import OverlayCompositor
+from live_marquee import BAR_HEIGHT as MARQUEE_BAR_HEIGHT, MarqueeBanner
 from live_theme import DEFAULTS, GAME_RECT, RADIO_RECT, RADIO_SWITCH_SECONDS, StreamTheme
 
 
@@ -164,7 +165,10 @@ class ThemeTests(unittest.TestCase):
         self.assertEqual(broadcast.overlay_settings(), classic)
         self.assertEqual(cfg['live2d'], original)
         capture._compose_frame(capture._source_frame)
-        np.testing.assert_array_equal(np.frombuffer(capture._frame, np.uint8).reshape(OUT_H, OUT_W, 4), capture._source_frame)
+        composed = np.frombuffer(capture._frame, np.uint8).reshape(OUT_H, OUT_W, 4)
+        # 经典模式不再加主题，但默认开启的底部横幅仍会占据最底部一条。
+        self.assertFalse(np.array_equal(composed[-MARQUEE_BAR_HEIGHT:], capture._source_frame[-MARQUEE_BAR_HEIGHT:]))
+        np.testing.assert_array_equal(composed[:-MARQUEE_BAR_HEIGHT], capture._source_frame[:-MARQUEE_BAR_HEIGHT])
 
     def test_missing_asset_falls_back_and_reports_error(self):
         capture = WindowStreamCapture()
@@ -286,6 +290,21 @@ class ThemeTests(unittest.TestCase):
         self.assertTrue(info['admin'])
         self.assertEqual(info['sender'], '海盐汽水')
 
+    def test_marquee_settles_short_text_and_scrolls_only_overflow(self):
+        def render(banner, now):
+            with patch('live_marquee.time.monotonic', return_value=now):
+                frame = np.zeros((OUT_H, OUT_W, 4), np.uint8)
+                banner.apply(frame)
+                return frame
+        now = time.monotonic()
+        short = MarqueeBanner(lambda: {'enabled': True, 'text': '今天挑战游戏最高难度'})
+        np.testing.assert_array_equal(render(short, now), render(short, now + 5))
+        overflow = MarqueeBanner(lambda: {'enabled': True, 'text': '很长的滚动横幅文字' * 12})
+        self.assertFalse(np.array_equal(render(overflow, now), render(overflow, now + 5)))
+        for cfg in ({'enabled': False, 'text': 'x'}, {'enabled': True, 'text': '   '}):
+            blank = np.full((OUT_H, OUT_W, 4), 33, np.uint8)
+            self.assertFalse(MarqueeBanner(lambda: cfg).apply(blank))
+
     def test_cached_composition_budget(self):
         self.theme.compose(self.game)
         times = []
@@ -353,6 +372,24 @@ class ThemeRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(np.count_nonzero(hint.max(axis=2) > 200), 100)
         self.assertEqual((await self.client.get('/static/assets/ocean-background.png')).status, 200)
         self.assertFalse(self.app.broadcast.running)
+        # 底部滚动横幅：保存、校验与预览同步。
+        with patch('config.save') as save:
+            response = await self.client.post('/api/config', json={'marquee': {'enabled': True, 'text': '今天挑战游戏最高难度'}}, headers=headers)
+        self.assertEqual(response.status, 200)
+        save.assert_called_once_with(self.app.cfg)
+        saved = await (await self.client.get('/api/config')).json()
+        self.assertEqual(saved['marquee'], {'enabled': True, 'text': '今天挑战游戏最高难度'})
+        for patch_value in (None, {'enabled': 1}, {'text': 1}, {'text': 'a' * 121}, {'unknown': 1}):
+            with self.subTest(marquee=patch_value), patch('config.save') as save:
+                response = await self.client.post('/api/config', json={'marquee': patch_value}, headers=headers)
+                self.assertEqual(response.status, 400)
+                save.assert_not_called()
+        on = cv2.imdecode(np.frombuffer(await (await self.client.get('/api/theme/preview.jpg')).read(), np.uint8), cv2.IMREAD_COLOR)
+        with patch('config.save'):
+            await self.client.post('/api/config', json={'marquee': {'enabled': False}}, headers=headers)
+        off = cv2.imdecode(np.frombuffer(await (await self.client.get('/api/theme/preview.jpg')).read(), np.uint8), cv2.IMREAD_COLOR)
+        np.testing.assert_array_equal(on[:1000], off[:1000])
+        self.assertFalse(np.array_equal(on[-MARQUEE_BAR_HEIGHT:], off[-MARQUEE_BAR_HEIGHT:]))
 
 
 if __name__ == '__main__':

@@ -8,7 +8,7 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 PROJECT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT))
@@ -44,6 +44,26 @@ class SongNotifyTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(manager.notify_live_started())      # 已经在循环，不重复
         await asyncio.sleep(0)
         self.assertEqual(started, ["456"])
+
+    async def test_plan_playlist_override(self):
+        app = song_app()
+        manager = app.songs
+        app.cfg["songs"]["auto_play_on_live"] = False
+        started = []
+
+        async def play(reference):
+            started.append(reference)
+            manager.loop_playlist = {"id": int(reference), "name": "计划歌单", "ids": [1], "version": 1}
+            return {"id": reference, "name": "计划歌单", "total": 1, "loop": True}
+        manager.play_playlist = AsyncMock(side_effect=play)
+
+        self.assertTrue(manager.notify_live_started("999"))   # 计划歌单不依赖记忆与全局开关
+        await manager._auto_task
+        self.assertEqual(started, ["999"])
+        self.assertFalse(manager.notify_live_started("999"))  # 同一歌单已在循环
+        self.assertTrue(manager.notify_live_started("1000"))  # 下一段计划切换歌单
+        await manager._auto_task
+        self.assertEqual(started, ["999", "1000"])
 
     async def test_autoplay_skips_when_disabled_or_unset(self):
         app = song_app()
@@ -143,6 +163,88 @@ class LiveWatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(scheduler.music_check_task)          # 手动开播已直接触发
 
 
+class ScheduledStartMusicTests(unittest.IsolatedAsyncioTestCase):
+    def build(self, plans, songs_cfg):
+        from main import App
+
+        broadcast = SimpleNamespace(
+            running=False, phase="", source_open=False,
+            capture=SimpleNamespace(previewing=False, hwnd=0, audio_device=0, error=""),
+            sources=AsyncMock(return_value={
+                "ok": True,
+                "windows": [{"hwnd": 3333, "title": "DemonTower", "minimized": False}],
+                "audio": [{"id": 2222, "name": "loop-x"}],
+                "default_window": 3333, "default_audio": 2222}),
+            preview=AsyncMock(return_value={"ok": True}),
+            start=AsyncMock(return_value={"ok": True, "room_id": 42}),
+            stop=AsyncMock(return_value={"ok": True}),
+            account=AsyncMock(return_value={"ok": True, "logged_in": True, "room_id": 42,
+                                            "live_status": 0}))
+        app = SimpleNamespace(
+            cfg={"bili_cookie": "FAKE", "audio": {}, "songs": songs_cfg,
+                 "game": {"active": "demontower"},
+                 "broadcast": {"title": "恶魔之塔 ZERO｜AI 游戏直播", "area_id": 283,
+                               "auto_stop_minutes": 0, "livehime": {},
+                               "schedule": {
+                                   "enabled": True, "mode": "managed",
+                                   "start_time": "08:00", "stop_time": "18:00",
+                                   "window_title": "DemonTower", "audio_name": "loop-x",
+                                   "last_start": "", "last_stop": "",
+                                   "plans": plans, "plans_enabled": True,
+                                   "last_starts": {}, "last_stops": {}}}},
+            push=Mock(), pipe=Mock(), player=Mock(), broadcast=broadcast,
+            livehime=Mock(), connect=AsyncMock(),
+            ensure_game_and_dt=AsyncMock(return_value={"ok": True, "launched": False}),
+            dt=SimpleNamespace(running=False), stop_dt=AsyncMock(),
+            game=SimpleNamespace(sync=Mock()))
+        app.player.music_progress.return_value = (0, 0)
+        manager = SongManager(app)
+        app.songs = manager
+        app.notify_live_started = App.notify_live_started.__get__(app)
+        started = []
+
+        async def play(reference):
+            started.append(reference)
+            manager.loop_playlist = {"id": int(reference), "name": "zb", "ids": [1], "version": 1}
+            return {"id": reference, "name": "zb", "total": 1, "loop": True}
+        manager.play_playlist = AsyncMock(side_effect=play)
+
+        now = [datetime(2026, 11, 6, 19, 59)]
+        return DailyBroadcastSchedule(app, clock=lambda: now[0]), app, manager, started, now
+
+    async def fire(self, scheduler, manager, now):
+        with patch.object(config, "save", lambda cfg: None):
+            now[0] = datetime(2026, 11, 6, 20, 0)
+            scheduler.tick()
+            while scheduler.jobs:
+                await asyncio.gather(*list(scheduler.jobs), return_exceptions=True)
+                await asyncio.sleep(0.01)
+        await manager._auto_task
+
+    async def test_timed_plan_start_plays_remembered_playlist(self):
+        """到点自动开播成功后，App 桥接应真正拉起上次歌单循环。"""
+        songs_cfg = copy.deepcopy(config.DEFAULTS["songs"])
+        songs_cfg.update(enabled=True, auto_play_on_live=True, auto_playlist_ref="456")
+        scheduler, app, manager, started, now = self.build(
+            [{"id": "night", "start": "20:00", "stop": "23:00", "game": "demontower"}], songs_cfg)
+        await self.fire(scheduler, manager, now)
+        self.assertEqual(started, ["456"])
+        self.assertEqual(manager.loop_playlist["id"], 456)
+        self.assertTrue(any("开播自动循环歌单" in call.args[1]["msg"]
+                            for call in app.push.call_args_list))
+
+    async def test_timed_plan_start_plays_plan_playlist(self):
+        """这一段计划指定了歌单时，即使没记住上次歌单也照常自动循环。"""
+        songs_cfg = copy.deepcopy(config.DEFAULTS["songs"])
+        songs_cfg.update(enabled=True, auto_play_on_live=False, auto_playlist_ref="")
+        scheduler, app, manager, started, now = self.build(
+            [{"id": "night", "start": "20:00", "stop": "23:00", "game": "demontower",
+              "playlist": "999", "playlist_name": "夜间"}], songs_cfg)
+        await self.fire(scheduler, manager, now)
+        self.assertEqual(started, ["999"])
+        self.assertEqual(manager.loop_playlist["id"], 999)
+
+
 class ConfigAndUiTests(unittest.TestCase):
     def test_defaults_expose_autoplay_fields(self):
         cfg = config.DEFAULTS["songs"]
@@ -157,6 +259,13 @@ class ConfigAndUiTests(unittest.TestCase):
         self.assertIn("auto_playlist_ref", html)
         self.assertIn("auto_playlist_name", html)
         self.assertIn("以后每次开播也会自动播放它", html)
+
+    def test_plan_ui_has_playlist_field(self):
+        html = (PROJECT / "web" / "index.html").read_text(encoding="utf-8")
+        self.assertIn('class="plan-playlist"', html)
+        self.assertIn("planPlaylistOptions", html)
+        self.assertIn("playlist_name", html)
+        self.assertIn("开播后自动循环的歌单", html)
 
 
 if __name__ == "__main__":

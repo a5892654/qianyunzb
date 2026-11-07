@@ -3,6 +3,7 @@ r"""「源画面窗口」（给直播姬窗口采集用）离线验证：不启�
 运行：.venv\Scripts\python.exe tools\verify_source_window.py
 """
 import asyncio
+import inspect
 import sys
 import unittest
 from pathlib import Path
@@ -273,6 +274,16 @@ class SourceWindowTests(unittest.IsolatedAsyncioTestCase):
 
 
 class WindowRuntimeTests(unittest.TestCase):
+    def test_window_class_is_stable_across_runs(self):
+        """直播姬把采集目标存成「标题:窗口类名:exe」，窗口没了就按这三个值去找。
+        类名里要是带 pid，千音每次重启都换名字，直播姬永远认不出新窗口。"""
+        from tools import native_source
+
+        self.assertEqual(native_source.SOURCE_CLASS, "QianyinSourceHost")
+        source = inspect.getsource(native_source.run)
+        self.assertIn("class_name = SOURCE_CLASS", source)
+        self.assertNotIn("getpid", source)
+
     def test_capture_window_keeps_rendering_when_covered(self):
         import os
         from tools import source_window

@@ -51,6 +51,7 @@ class DepthTests(unittest.TestCase):
             {"depth": 1, "name": "精英猎场", "desc": "精英出现率增加"}]))
         self.assertIn("当前选择深度: 2", text)
         self.assertIn("0～5", text)
+        self.assertIn("深度 2 及以下均已通关", text)
         self.assertIn("精英猎场", text)
         self.assertIn("action=expedition", text)
         self.assertIn("未提供已解锁深度上限", view.render({"screen": "hall"}))

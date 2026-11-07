@@ -15,7 +15,9 @@ from aiohttp import web, WSMsgType, ClientSession
 
 import config
 import live2d
+import styles
 import tts_models
+import tts_voices
 from bili import BiliLive, QrLogin, SmsLogin
 from brain import Brain, default_qoder_exe, list_qoder_models
 from dtgame.bridge import BridgeError, GameBridge
@@ -24,9 +26,11 @@ from dtgame.launcher import find_godot
 from dtgame.player import Player as DTPlayer
 from dtgame.rice import RiceTracker
 from dtgame.stardew import StardewGame, StardewPlayer
+from dtgame.sts2 import STS2Game, STS2Player
 from gift_banner import GiftBanner
 from live_rice import RiceCounter, ai_context as rice_ai_context, validate_settings as validate_rice_settings
 from live_broadcast import Broadcast
+from live_marquee import validate_settings as validate_marquee_settings
 from live_theme import preview_jpeg as theme_preview_jpeg, validate_settings as validate_theme_settings
 from live_schedule import DailyBroadcastSchedule
 from live_livehime import LivehimeController
@@ -191,11 +195,39 @@ class App:
     def _is_stardew(self) -> bool:
         return self._active_game() == "stardew"
 
+    def _is_sts2(self) -> bool:
+        return self._active_game() == "sts2"
+
     def _game_name(self) -> str:
-        return "星露谷物语" if self._is_stardew() else "恶魔之塔 Zero"
+        if self._is_stardew():
+            return "星露谷物语"
+        if self._is_sts2():
+            return "杀戮尖塔 2"
+        return "恶魔之塔 Zero"
+
+    async def sync_room_title(self, game=""):
+        """开播时按游戏改直播间标题；失败只写日志，不影响直播。"""
+        titles = self.cfg["broadcast"].get("game_titles") or {}
+        title = str(titles.get(game or self._active_game()) or "").strip()
+        if not title:
+            return {"ok": True, "skipped": True}
+        try:
+            result = await self.broadcast.update_title(title)
+        except Exception as error:
+            result = {"ok": False, "error": str(error)}
+        if result.get("ok"):
+            self.push("log", {"level": "info", "msg": f"直播间标题已改为：{title}"})
+        else:
+            self.push("log", {"level": "warn",
+                              "msg": f"直播间标题未能改为「{title}」：{result.get('error') or '未知原因'}"})
+        return result
 
     def _game_cfg(self) -> dict:
-        return self.cfg.get("stardew" if self._is_stardew() else "dtgame", {})
+        if self._is_stardew():
+            return self.cfg.get("stardew", {})
+        if self._is_sts2():
+            return self.cfg.get("sts2", {})
+        return self.cfg.get("dtgame", {})
 
     def _autoplay_enabled(self) -> bool:
         return bool(self._game_cfg().get("enabled", True))
@@ -203,6 +235,7 @@ class App:
     def _dt_ai(self) -> dict:
         c = self.cfg.get("dtgame", {})
         ai = dict(self.cfg.get("ai", {}))
+        ai["persona"] = styles.game_persona(self.cfg.get("ai", {}))
         ai["emotional_value"] = bool(self.cfg.get("interaction", {}).get("emotional_value", True))
         for key in ("openai_base", "openai_key", "openai_model"):
             if c.get(key):
@@ -212,6 +245,7 @@ class App:
     def _stardew_ai(self) -> dict:
         c = self.cfg.get("stardew", {})
         ai = dict(self.cfg.get("ai", {}))
+        ai["persona"] = styles.game_persona(self.cfg.get("ai", {}))
         ai["emotional_value"] = bool(self.cfg.get("interaction", {}).get("emotional_value", True))
         if str(c.get("openai_base") or "").strip() and str(c.get("openai_model") or "").strip():
             ai["backend"] = "openai"
@@ -227,11 +261,34 @@ class App:
         ai["step_interval"] = float(c.get("step_interval", 0.4))
         return ai
 
-    def _game_ai(self) -> dict:
-        return self._stardew_ai() if self._is_stardew() else self._dt_ai()
+    def _sts2_ai(self) -> dict:
+        c = self.cfg.get("sts2", {})
+        ai = dict(self.cfg.get("ai", {}))
+        ai["persona"] = styles.game_persona(self.cfg.get("ai", {}))
+        ai["emotional_value"] = bool(self.cfg.get("interaction", {}).get("emotional_value", True))
+        if str(c.get("openai_base") or "").strip() and str(c.get("openai_model") or "").strip():
+            ai["backend"] = "openai"
+        for key in ("openai_base", "openai_key", "openai_model"):
+            if c.get(key):
+                ai[key] = c[key]
+        if c.get("persona"):
+            ai["persona"] = c["persona"]
+        for key in ("temperature", "max_tokens", "timeout", "tool_timeout"):
+            if c.get(key) is not None:
+                ai[key] = c[key]
+        ai["narrate"] = bool(c.get("narrate", True))
+        ai["step_interval"] = float(c.get("step_interval", 0.6))
+        return ai
 
-    def _config_problem(self) -> str:
-        """模型/启动配置检查，返回空串表示没问题。"""
+    def _game_ai(self) -> dict:
+        if self._is_stardew():
+            return self._stardew_ai()
+        if self._is_sts2():
+            return self._sts2_ai()
+        return self._dt_ai()
+
+    def _config_problem(self, stardew_alive=None, sts2_alive=None) -> str:
+        """模型/启动配置检查，返回空串表示没问题。传入 *_alive 可复用已探测结果。"""
         ai = self._game_ai()
         if not self._is_stardew() or str(ai.get("backend")) == "openai":
             if not str(ai.get("openai_base", "")).strip():
@@ -240,19 +297,30 @@ class App:
                 return "还没填模型名"
             if not str(ai.get("openai_key", "")).strip():
                 return "还没填 API Key（AI 设置 → OpenAI 兼容 API）"
-        elif self._is_stardew():
+        elif self._is_stardew() or self._is_sts2():
             exe = ai.get("qoder_exe") or default_qoder_exe()
             if not os.path.exists(exe):
                 return f"找不到 qodercli：{exe}（请先安装或运行 qoder_login.bat）"
         if self._is_stardew():
             c = self.cfg.get("stardew", {})
-            if not self._stardew_alive() and c.get("auto_launch", True):
+            alive = self._stardew_alive() if stardew_alive is None else stardew_alive
+            if not alive and c.get("auto_launch", True):
                 game_dir = str(c.get("game_dir", "")).strip().rstrip("\\/")
                 if not game_dir:
                     return "还没填星露谷游戏目录"
                 exe = str(c.get("smapi_exe", "")).strip() or os.path.join(game_dir, "StardewModdingAPI.exe")
                 if not os.path.exists(exe):
                     return f"找不到 StardewModdingAPI.exe：{exe}"
+        if self._is_sts2():
+            c = self.cfg.get("sts2", {})
+            alive = self._sts2_alive() if sts2_alive is None else sts2_alive
+            if not alive and c.get("auto_launch", True):
+                game_dir = str(c.get("game_dir", "")).strip().rstrip("\\/")
+                if not game_dir:
+                    return "还没填杀戮尖塔2游戏目录"
+                exe = str(c.get("exe", "")).strip() or os.path.join(game_dir, "SlayTheSpire2.exe")
+                if not os.path.exists(exe):
+                    return f"找不到 SlayTheSpire2.exe：{exe}"
         return ""
 
     def _stardew_alive(self) -> bool:
@@ -265,8 +333,37 @@ class App:
         except OSError:
             return False
 
+    async def _stardew_alive_async(self) -> bool:
+        """状态轮询用：MCP 端口无监听时同步 connect 会卡满超时，不能放在事件循环里。"""
+        c = self.cfg.get("stardew", {})
+        host = str(c.get("mcp_host", "127.0.0.1"))
+        port = int(c.get("mcp_port", 8770))
+        try:
+            _, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=0.8)
+        except (OSError, asyncio.TimeoutError):
+            return False
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except OSError:
+            pass
+        return True
+
+    def _sts2_alive(self) -> bool:
+        try:
+            return bool(self.game.sts2.discover_port())
+        except Exception:
+            return False
+
+    async def _sts2_alive_async(self) -> bool:
+        return await asyncio.to_thread(self._sts2_alive)
+
     def _game_alive(self) -> bool:
-        return self._stardew_alive() if self._is_stardew() else self._bridge_alive()
+        if self._is_stardew():
+            return self._stardew_alive()
+        if self._is_sts2():
+            return self._sts2_alive()
+        return self._bridge_alive()
 
     def dt_ready(self) -> tuple[bool, str]:
         """托管前的体检：模型配好没有、游戏在不在。"""
@@ -276,6 +373,15 @@ class App:
         if self._is_stardew():
             if not self._stardew_alive():
                 return False, "星露谷 MCP 没连上（游戏没开或 mod 没加载）"
+            return True, ""
+        if self._is_sts2():
+            if not self._sts2_alive():
+                return False, "杀戮尖塔2 API 没连上（游戏没开或 STS2-Agent mod 没加载）"
+            health = self.game.sts2.health()
+            if not health:
+                return False, "杀戮尖塔2 API 没响应，请查看游戏窗口"
+            if str(health.get("status") or "") != "ready":
+                return False, f"杀戮尖塔2 还没准备好：{health.get('status') or '未知状态'}"
             return True, ""
         try:
             self._dt_bridge().screen()
@@ -290,7 +396,7 @@ class App:
         self.cfg["dtgame"]["recent_chars"] = list(names)
         config.save(self.cfg)
 
-    def start_dt(self) -> dict:
+    def start_dt(self, new_run: bool = False) -> dict:
         """只建 Player 并丢进事件循环，游戏启动/体检放到 async 那一侧做。"""
         if self.dt and self.dt.running:
             return {"ok": False, "error": "自动托管已经在跑"}
@@ -299,7 +405,18 @@ class App:
         if why:
             return {"ok": False, "error": why}
         c = self._game_cfg()
-        if self._is_stardew():
+        if self._is_sts2():
+            p = STS2Player(
+                self._sts2_ai(),
+                STS2Game(c),
+                speak=self.pipe.narrate,
+                log_push=lambda level, msg: self.push("log", {"level": level, "msg": msg}),
+                narrate=bool(c.get("narrate", True)),
+                pipe=self.pipe,
+                emotions=lambda: self.cfg["live2d"].get("emotions", []) if self.cfg["live2d"].get("enabled") else [],
+                new_run=bool(c.get("new_run", False)) or new_run,
+            )
+        elif self._is_stardew():
             p = StardewPlayer(
                 self._stardew_ai(),
                 StardewGame(c),
@@ -430,13 +547,14 @@ class App:
 
     async def _resume_stardew(self) -> dict:
         async with self.dt_resume_lock:
-            if self.dt and self.dt.running and self._stardew_alive():
+            if self.dt and self.dt.running and await self._stardew_alive_async():
                 return {"ok": True, "already": True}
             await self.stop_dt()
-            why = self._config_problem()
+            alive = await self._stardew_alive_async()
+            why = self._config_problem(alive)
             if why:
                 return {"ok": False, "error": why}
-            if not self._stardew_alive():
+            if not alive:
                 if not self.cfg.get("stardew", {}).get("auto_launch", True):
                     return {"ok": False, "error": "星露谷没在运行，且自动启动是关的"}
                 result = await self.game.launch_and_wait(self._stardew_alive)
@@ -445,7 +563,27 @@ class App:
                 self.push("log", {"level": "info", "msg": "星露谷已启动，等待 MCP 就绪"})
             return self.start_dt()
 
+    async def _resume_sts2(self, new_run: bool = False) -> dict:
+        async with self.dt_resume_lock:
+            if self.dt and self.dt.running and await self._sts2_alive_async():
+                return {"ok": True, "already": True}
+            await self.stop_dt()
+            alive = await self._sts2_alive_async()
+            why = self._config_problem(sts2_alive=alive)
+            if why:
+                return {"ok": False, "error": why}
+            if not alive:
+                if not self.cfg.get("sts2", {}).get("auto_launch", True):
+                    return {"ok": False, "error": "杀戮尖塔2 没在运行，且自动启动是关的"}
+                result = await self.game.launch_and_wait(self._sts2_alive)
+                if not result.get("ok"):
+                    return result
+                self.push("log", {"level": "info", "msg": "杀戮尖塔2已启动，等待 MCP 就绪"})
+            return self.start_dt(new_run=new_run)
+
     async def resume_dt(self, new_run: bool = False) -> dict:
+        if self._is_sts2():
+            return await self._resume_sts2(new_run)
         if self._is_stardew():
             return await self._resume_stardew()
         async with self.dt_resume_lock:
@@ -505,13 +643,16 @@ class App:
             self.push("log", {"level": "warn", "msg": "自动托管没有开起来，先照常开播：" + str(r.get("error"))})
         return {"ok": True, "launched": launched}
 
-    def notify_live_started(self):
-        """开播成功后触发一次（手动/定时/直播姬），由点歌模块决定是否自动放歌单。"""
+    def notify_live_started(self, playlist=""):
+        """开播成功后触发一次（手动/定时/直播姬），由点歌模块决定是否自动放歌单。
+
+        playlist 是播放计划那一段指定的歌单；为空时沿用点歌页记住的歌单。
+        """
         songs = getattr(self, "songs", None)
         if songs is None:
             return
         try:
-            songs.notify_live_started()
+            songs.notify_live_started(playlist)
         except Exception:
             log.warning("开播自动播放歌单触发失败", exc_info=True)
 
@@ -606,7 +747,8 @@ def build_web(app: App):
 
     @routes.get("/api/theme/preview.jpg")
     async def theme_preview(_):
-        data = await asyncio.to_thread(theme_preview_jpeg, dict(app.cfg.get("stream_theme", {})))
+        data = await asyncio.to_thread(theme_preview_jpeg, dict(app.cfg.get("stream_theme", {})),
+                                       dict(app.cfg.get("marquee", {})))
         return web.Response(body=data, content_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
     @routes.get("/api/rice/state")
@@ -701,6 +843,7 @@ def build_web(app: App):
         c["_qoder_default"] = default_qoder_exe()
         c["_logged_in"] = bool(app.cfg.get("bili_cookie"))
         c.pop("bili_cookie", None)
+        c["ai"]["_styles"] = styles.ui_styles()
         c["songs"]["_ne_logged_in"] = bool(c["songs"].pop("netease_cookie", ""))
         if isinstance(c.get("wishlist"), dict):
             c["wishlist"].pop("_completed", None)
@@ -710,6 +853,14 @@ def build_web(app: App):
     async def set_config(request):
         patch = await request.json()
         patch.pop("bili_cookie", None)
+        if isinstance(patch.get("ai"), dict):
+            ai_patch = patch["ai"]
+            ai_patch.pop("_styles", None)
+            if "style" in ai_patch and ai_patch["style"] not in styles.VALID:
+                return web.json_response({"ok": False, "error": "未知的直播风格，请刷新页面后重试"}, status=400)
+            if "persona" in ai_patch and "style" not in ai_patch:
+                # 编辑人设文本就等于切换到自定义，避免保存后还被预设覆盖。
+                ai_patch["style"] = styles.CUSTOM
         if isinstance(patch.get("tts"), dict) and "stream_buffer_seconds" in patch["tts"]:
             seconds = patch["tts"]["stream_buffer_seconds"]
             if type(seconds) not in (int, float) or not 0 <= seconds <= 3:
@@ -736,6 +887,11 @@ def build_web(app: App):
                 validate_theme_settings(patch["stream_theme"])
             except ValueError as error:
                 return web.json_response({"ok": False, "error": str(error)}, status=400)
+        if "marquee" in patch:
+            try:
+                validate_marquee_settings(patch["marquee"])
+            except ValueError as error:
+                return web.json_response({"ok": False, "error": str(error)}, status=400)
         if isinstance(patch.get("broadcast"), dict) and "schedule" in patch["broadcast"]:
             return web.json_response({"ok": False, "error": "请通过定时直播计划的保存按钮确认修改"}, status=400)
         if isinstance(patch.get("broadcast"), dict) and "auto_stop_minutes" in patch["broadcast"]:
@@ -760,6 +916,7 @@ def build_web(app: App):
                 return web.json_response({"ok": False, "error": str(error)}, status=400)
         old_room = app.cfg.get("room_id")
         old_persona = app.cfg.get("ai", {}).get("persona")
+        old_style = app.cfg.get("ai", {}).get("style")
         old_emotional_value = app.cfg.get("interaction", {}).get("emotional_value", True)
         old_game = (app.cfg.get("game") or {}).get("active")
         app.cfg = config.merge(app.cfg, patch)
@@ -768,14 +925,22 @@ def build_web(app: App):
         if (app.cfg.get("game") or {}).get("active") != old_game:
             await app.stop_dt()
             app.push("log", {"level": "info", "msg": f"已切换为{app._game_name()}，请重新启动托管"})
-        if (app.cfg.get("ai", {}).get("persona") != old_persona
+        style_changed = app.cfg.get("ai", {}).get("style") != old_style
+        if (app.cfg.get("ai", {}).get("persona") != old_persona or style_changed
                 or app.cfg.get("interaction", {}).get("emotional_value", True) != old_emotional_value):
             # 聊天的 Qoder 会按系统提示自动换会话；游戏保持本局决策记忆，只更新口吻。
             if getattr(app, "brain", None) is not None:
                 app.brain.openai.history.clear()
             if getattr(app, "dt", None) is not None:
-                app.dt.cfg["persona"] = app.cfg["ai"]["persona"]
+                game_section = ("stardew" if app._is_stardew()
+                                else ("sts2" if app._is_sts2() else ""))
+                game_persona = app.cfg.get(game_section, {}).get("persona") if game_section else ""
+                app.dt.cfg["persona"] = game_persona or styles.game_persona(app.cfg.get("ai", {}))
                 app.dt.cfg["emotional_value"] = app.cfg.get("interaction", {}).get("emotional_value", True)
+            if style_changed:
+                name = next((s["name"] for s in styles.ui_styles()
+                             if s["id"] == app.cfg.get("ai", {}).get("style")), "新风格")
+                app.push("log", {"level": "info", "msg": f"AI 直播风格已切换为{name}，下一句生成生效"})
         if "overlay" in patch:
             app.push("overlay_config", app.cfg["overlay"])
         if isinstance(patch.get("broadcast"), dict) and "auto_stop_minutes" in patch["broadcast"]:
@@ -919,16 +1084,16 @@ def build_web(app: App):
                     continue
         return web.Response(status=404)
 
-    @routes.get("/api/broadcast/areas")
-    async def broadcast_areas(_):
-        return web.json_response(await app.broadcast.areas())
-
     @routes.get("/api/broadcast/sources")
     async def broadcast_sources(_):
         data = await app.broadcast.sources()
         try:
-            marks = ("stardew", "星露谷") if app._active_game() == "stardew" else (
-                "demontower", "godot", "恶魔之塔")
+            if app._active_game() == "stardew":
+                marks = ("stardew", "星露谷")
+            elif app._active_game() == "sts2":
+                marks = ("slay the spire", "杀戮尖塔", "spire")
+            else:
+                marks = ("demontower", "godot", "恶魔之塔")
             chosen = next((w for w in (data.get("windows") or [])
                            if not w.get("minimized")
                            and any(mark in str(w.get("title", "")).lower() for mark in marks)), None)
@@ -1002,18 +1167,6 @@ def build_web(app: App):
         app.schedule.refresh_auto_timer()
         return web.json_response(app.schedule.status())
 
-    @routes.post("/api/broadcast/room/cover")
-    async def broadcast_room_cover(request):
-        if not request.content_type.startswith("multipart/"):
-            return web.json_response({"ok": False, "error": "请选择封面图片文件"}, status=400)
-        reader = await request.multipart()
-        field = await reader.next()
-        if field is None or field.name != "cover":
-            return web.json_response({"ok": False, "error": "上传字段无效"}, status=400)
-        data = await field.read(decode=False)
-        return web.json_response(await app.broadcast.update_cover(
-            data, field.filename or "cover.jpg", field.headers.get("Content-Type", "image/jpeg")))
-
     @routes.post("/api/broadcast/room/notice")
     async def broadcast_room_notice(request):
         body = await request.json()
@@ -1076,6 +1229,9 @@ def build_web(app: App):
             config.save(app.cfg)
             asyncio.create_task(app.connect())
             app.schedule.arm_local_timer()
+            sync_title = getattr(app, "sync_room_title", None)
+            if callable(sync_title):
+                await sync_title()
             notify = getattr(app, "notify_live_started", None)
             if callable(notify):
                 notify()
@@ -1323,6 +1479,7 @@ def build_web(app: App):
         desired = str(settings.get("ttsd_model", "")).replace("\\", "/").rstrip("/").split("/")[-1]
         mismatch = (f"当前引擎仍是 {actual}，尚未完成模型切换" if actual else "外部引擎未提供模型信息，无法确认模型大小") if state.get("ok") and actual != desired else ""
         return ok(selected=tts_models.selected_size(settings), choices=tts_models.choices(settings),
+                  voice=tts_voices.current_id(settings), voice_name=tts_voices.current_name(settings),
                   loading=bool(speech_switch_task and not speech_switch_task.done()) or state.get("phase") in ("loading", "downloading"),
                   phase=state.get("phase", ""),
                   ready=bool(state.get("ok")) and bool(actual) and actual == desired, actual=state.get("model", ""),
@@ -1331,31 +1488,48 @@ def build_web(app: App):
                   runtime_ready=os.path.isfile(py) and os.path.isfile(script),
                   reference_ready=os.path.isfile(ttsd._resolve_ref(settings)))
 
+    @routes.get("/api/tts/voices")
+    async def tts_voice_status(_):
+        from dtgame import ttsd
+        settings = app.cfg["tts"]
+        return ok(current=tts_voices.current_id(settings), current_name=tts_voices.current_name(settings),
+                  current_path=ttsd._resolve_ref(settings), choices=tts_voices.choices(settings))
+
     @routes.post("/api/tts/model")
     async def tts_model_switch(request):
         nonlocal speech_switch_task, speech_switch_error
         data = await request.json()
+        preset = None
         try:
             if not isinstance(data, dict):
-                raise ValueError("请选择语音模型")
-            patch = tts_models.selection_patch(app.cfg["tts"], data.get("size"))
+                raise ValueError("请选择语音模型或音色")
+            size = data.get("size") or tts_models.selected_size(app.cfg["tts"])
+            voice = data.get("voice")
+            if voice not in (None, "", "custom"):
+                preset = tts_voices.select(voice)
+            patch = tts_models.selection_patch(app.cfg["tts"], size)
+            if preset:
+                patch["qwen_ref_audio"] = preset["file"]
         except (ValueError, TypeError) as error:
             return web.json_response({"ok": False, "error": str(error)}, status=400)
         if speech_switch_task and not speech_switch_task.done():
-            return web.json_response({"ok": False, "error": "模型正在切换，请等待加载完成"}, status=409)
+            return web.json_response({"ok": False, "error": "模型或音色正在切换，请等待加载完成"}, status=409)
         if getattr(getattr(app, "pipe", None), "current", None):
-            return web.json_response({"ok": False, "error": "请等当前语音播完再切换模型"}, status=409)
+            return web.json_response({"ok": False, "error": "请等当前语音播完再切换模型或音色"}, status=409)
         app.cfg["tts"].update(patch)
         config.save(app.cfg)
         speech_switch_error = ""
         if not (app.cfg["tts"].get("enabled", True) and app.cfg["tts"].get("qwen_enabled", True)
                 and app.cfg["tts"].get("stream_enabled", True)):
-            return ok(selected=data["size"], loading=False, ready=False, message="模型选择已保存，启用 Qwen3-TTS 流式后生效")
+            return ok(selected=size, voice=tts_voices.current_id(app.cfg["tts"]), loading=False, ready=False,
+                      message="模型或音色选择已保存，启用 Qwen3-TTS 流式后生效")
         from dtgame import ttsd
         py, script = ttsd.runtime_paths(app.cfg["tts"])
         if not os.path.isfile(py) or not os.path.isfile(script) or not os.path.isfile(ttsd._resolve_ref(app.cfg["tts"])):
-            speech_switch_error = "模型选择已保存；请配置有效的流式语音环境和克隆参考音频，再启动引擎"
-            return ok(selected=data["size"], loading=False, ready=False, message=speech_switch_error)
+            speech_switch_error = f"音色文件不存在：{ttsd._resolve_ref(app.cfg['tts'])}" if preset else \
+                "模型或音色选择已保存；请配置有效的流式语音环境和克隆参考音频，再启动引擎"
+            return ok(selected=size, voice=tts_voices.current_id(app.cfg["tts"]), loading=False, ready=False,
+                      message=speech_switch_error)
 
         async def switch():
             nonlocal speech_switch_error
@@ -1365,9 +1539,10 @@ def build_web(app: App):
                     messages.append(message)
                     app.push("log", {"level": "info", "msg": message})
                 if not await ttsd.ensure(dict(app.cfg["tts"]), status):
-                    speech_switch_error = messages[-1] if messages else "语音模型切换失败"
+                    speech_switch_error = messages[-1] if messages else "语音模型或音色切换失败"
                 else:
-                    app.push("log", {"level": "info", "msg": f"流式语音已切换为 {data['size']}"})
+                    app.push("log", {"level": "info", "msg":
+                        f"流式语音已切换为 {size} · {tts_voices.current_name(app.cfg['tts'])}"})
             except Exception as error:
                 speech_switch_error = str(error)
             finally:
@@ -1379,7 +1554,7 @@ def build_web(app: App):
         speech_switch_task = asyncio.create_task(switch())
         if hasattr(app, "tasks"):
             app.tasks.append(speech_switch_task)
-        return ok(selected=data["size"], loading=True, ready=False)
+        return ok(selected=size, voice=tts_voices.current_id(app.cfg["tts"]), loading=True, ready=False)
 
     @routes.post("/api/tts/stop")
     async def tts_stop(_):
@@ -1449,7 +1624,8 @@ def build_web(app: App):
         return web.json_response({
             "app": "WhaleTalk", "running": bool(app.dt and app.dt.running),
             "starting": bool(app.dt and not app.engine_ready.is_set()),
-            "engine_ready": engine_ready, "game_running": app.game.running(),
+            "engine_ready": engine_ready,
+            "game_running": await asyncio.to_thread(app.game.running),
             "connected": await asyncio.to_thread(app._game_alive),
             "game_kind": app._active_game(),
         })
@@ -1477,20 +1653,32 @@ def build_web(app: App):
         info = {
             "running": running,
             "turns": app.dt.turns_taken if app.dt else 0,
-            "game_running": app.game.running(),
             "game_kind": kind,
             "game_name": app._game_name(),
             "auto_launch": bool(c.get("auto_launch", True)),
         }
-        why = app._config_problem()
         if kind == "stardew":
             info["game_text"] = app.dt.status_text() if app.dt and hasattr(app.dt, "status_text") else ""
             info["game"] = app.dt.status_summary() if app.dt and hasattr(app.dt, "status_summary") else {}
-            alive = app._stardew_alive()
+            alive = await app._stardew_alive_async()
+            info["game_running"] = alive
+            why = app._config_problem(alive)
             info["ready"] = not why and alive
             info["why"] = why or ("" if alive else "星露谷 MCP 未连接，请先启动游戏")
             info["mcp_port"] = int(c.get("mcp_port", 8770))
             return web.json_response(info)
+        if kind == "sts2":
+            info["game_text"] = app.dt.status_text() if app.dt and hasattr(app.dt, "status_text") else ""
+            info["game"] = app.dt.status_summary() if app.dt and hasattr(app.dt, "status_summary") else {}
+            alive = await app._sts2_alive_async()
+            info["game_running"] = alive
+            why = app._config_problem(sts2_alive=alive)
+            info["ready"] = not why and alive
+            info["why"] = why or ("" if alive else "杀戮尖塔2 API 未连接，请先启动游戏")
+            info["api_port"] = await asyncio.to_thread(lambda: app.game.sts2.api_port)
+            return web.json_response(info)
+        info["game_running"] = await asyncio.to_thread(app.game.running)
+        why = app._config_problem()
         info.update({
             "godot": find_godot(str(c.get("godot_exe", ""))),
             "project_dir": c.get("project_dir", ""),

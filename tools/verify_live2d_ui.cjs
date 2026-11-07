@@ -14,6 +14,11 @@ Object.assign(cfg.live2d, {enabled: true, model_dir: 'fixture', model_file: 'fix
 let previewing = false;
 let currentModel = 'fixture', rejectSwitch = false;
 let speechModelLoading = false, rejectSpeechModel = false;
+const voiceFiles = {feiyu_cute: 'feiyu_cute.wav', feiyu_gentle: 'feiyu_gentle.wav',
+  dafeiyu_ep07: 'dafeiyu_voice_ref_ep07.wav', dafeiyu: 'dafeiyu_voice_ref.wav'};
+const voiceNames = {feiyu_cute: '肥鱼 · 可爱', feiyu_gentle: '肥鱼 · 温柔',
+  dafeiyu_ep07: '大肥鱼 · EP07', dafeiyu: '大肥鱼 · 旧参考'};
+const currentVoice = () => Object.keys(voiceFiles).find(id => cfg.tts.qwen_ref_audio === voiceFiles[id]) || 'custom';
 const requests = [], errors = [];
 function merge(a, b) {
   for (const [key, value] of Object.entries(b)) {
@@ -56,15 +61,18 @@ function merge(a, b) {
         }
       }
       else if (url.pathname === '/api/tts/weights') response = {gpt: [], sovits: []};
-      else if (url.pathname === '/api/tts/models') response = {ok: true, selected: cfg.tts.qwen_model_size, loading: speechModelLoading, ready: !speechModelLoading, actual: cfg.tts.qwen_model, runtime_ready: true, reference_ready: true};
+      else if (url.pathname === '/api/tts/models') response = {ok: true, selected: cfg.tts.qwen_model_size, voice: currentVoice(), voice_name: voiceNames[currentVoice()] || '自定义参考音', loading: speechModelLoading, ready: !speechModelLoading, actual: cfg.tts.qwen_model, runtime_ready: true, reference_ready: true};
+      else if (url.pathname === '/api/tts/voices') response = {ok: true, current: currentVoice(), current_name: voiceNames[currentVoice()] || '自定义参考音',
+        choices: Object.keys(voiceFiles).map(id => ({id, name: voiceNames[id], file: voiceFiles[id], exists: true}))};
       else if (url.pathname === '/api/tts/model') {
         assert.equal(req.headers()['x-bvb'], '1');
         if (rejectSpeechModel) response = {ok: false, error: 'fixture speech model busy'};
         else {
           cfg.tts.qwen_model_size = body.size;
           cfg.tts.qwen_model = `Qwen/Qwen3-TTS-12Hz-${body.size}-Base`;
+          if (body.voice && body.voice !== 'custom') cfg.tts.qwen_ref_audio = voiceFiles[body.voice];
           speechModelLoading = true;
-          response = {ok: true, selected: body.size, loading: true, ready: false};
+          response = {ok: true, selected: body.size, voice: currentVoice(), loading: true, ready: false};
         }
       }
       else if (url.pathname === '/api/audio/devices') response = [];
@@ -324,6 +332,18 @@ function merge(a, b) {
     await page.waitForFunction(() => document.querySelector('#toast').textContent.includes('fixture speech model busy'));
     assert.equal(cfg.tts.qwen_model_size, '1.7B');
     console.log('PASS speech model selector switches both sizes, shows loading and keeps old selection on rejection');
+    rejectSpeechModel = false;
+    await page.waitForFunction(() => !document.querySelector('#qwenModelApply').disabled);
+    await page.waitForFunction(() => document.querySelector('#qwenVoice').options.length > 1);
+    await page.selectOption('#qwenVoice', 'feiyu_cute');
+    await page.click('#qwenModelApply');
+    await page.waitForFunction(() => document.querySelector('#qwenModelState').textContent.includes('正在切换'));
+    assert.equal(cfg.tts.qwen_ref_audio, 'feiyu_cute.wav');
+    speechModelLoading = false;
+    await page.evaluate(() => pollSpeechModel());
+    await page.waitForFunction(() => document.querySelector('#qwenModelState').textContent.includes('肥鱼 · 可爱'));
+    assert.equal(await page.locator('#qwenVoice').inputValue(), 'feiyu_cute');
+    console.log('PASS voice preset switches the reference and shows the selected voice');
     await page.goto('http://127.0.0.1:18787/rice');
     await page.waitForFunction(() => document.querySelector('canvas').style.left !== '');
     await page.waitForFunction(() => document.querySelector('canvas').style.height === '240px');

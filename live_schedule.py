@@ -4,11 +4,11 @@ from datetime import datetime, timedelta
 
 import config
 from live_livehime import LivehimeError, parse_hotkey, resolve_path
+from netease import music_reference
 
 _CLOCK = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d\Z")
 
-GAME_NAMES = {"demontower": "恶魔之塔 Zero", "stardew": "星露谷物语"}
-GAME_TITLES = {"demontower": "恶魔之塔 ZERO｜AI 游戏直播", "stardew": "星露谷物语｜AI 游戏直播"}
+GAME_NAMES = {"demontower": "恶魔之塔 Zero", "stardew": "星露谷物语", "sts2": "杀戮尖塔 2"}
 
 
 def _minutes(hhmm: str) -> int:
@@ -29,6 +29,8 @@ def _game_window(game: str, title: str) -> bool:
     text = title.lower()
     if game == "stardew":
         return "stardew" in text or "星露谷" in text
+    if game == "sts2":
+        return "slay the spire" in text or "杀戮尖塔" in text
     return "demontower" in text or ("godot" in text and "debug" in text)
 
 
@@ -41,6 +43,7 @@ class DailyBroadcastSchedule:
     FAREWELL_LEAD_SECONDS = 30
     TIMER_SECONDS_PER_MINUTE = 60
     AUTO_CHECK_SECONDS = 15
+    STOP_CATCH_UP_SECONDS = 1800
     LIVEHIME_READY_TIMEOUT = 45
     LIVE_STATUS_TRIES = 20
     LIVE_STATUS_INTERVAL = 1.5
@@ -116,7 +119,6 @@ class DailyBroadcastSchedule:
         updated.update(enabled=data["enabled"], mode=mode, start_time=start, stop_time=stop,
                        plans_enabled=False)
         livehime = self._livehime_settings(data)
-        title, area = self.app.cfg["broadcast"]["title"], self.app.cfg["broadcast"]["area_id"]
         if data["enabled"]:
             if data.get("authorized") is not True:
                 raise ValueError("启用前需要确认允许每日自动停播" if mode == "stop_only" else "启用前需要确认允许每日自动公开开播")
@@ -135,15 +137,12 @@ class DailyBroadcastSchedule:
             updated["external_room_id"] = int(info["room_id"])
             updated.update(await self._source_names(data))
         elif data["enabled"]:
-            title, area = data.get("title"), data.get("area_id")
-            if not isinstance(title, str) or not 1 <= len(title.strip()) <= 60 or type(area) is not int or area <= 0:
-                raise ValueError("请先填写直播标题并选择分区")
             updated.update(await self._source_names(data))
         if not data["enabled"] or mode == "stop_only":
             self.abort_start = True
         if self._cancel_daily_farewell():
             updated["last_stop"] = ""
-        self.app.cfg["broadcast"].update(schedule=updated, title=title.strip(), area_id=area, livehime=livehime)
+        self.app.cfg["broadcast"].update(schedule=updated, livehime=livehime)
         config.save(self.app.cfg)
         self.last_minute = self.clock().strftime("%Y-%m-%d %H:%M")
         self.last_result = None
@@ -178,12 +177,6 @@ class DailyBroadcastSchedule:
                 if not info.get("ok") or not info.get("logged_in") or not info.get("room_id"):
                     raise ValueError(info.get("error") or "请先扫码登录正在直播的主播账号")
                 external_room_id = int(info["room_id"])
-            else:
-                title, area = self.app.cfg["broadcast"].get("title"), self.app.cfg["broadcast"].get("area_id")
-                if not isinstance(title, str) or not 1 <= len(title.strip()) <= 60:
-                    raise ValueError("请先填写直播标题再启用播放计划")
-                if type(area) is not int or area <= 0:
-                    raise ValueError("请选择直播分区再启用播放计划")
         updated = {k: v for k, v in self.settings.items() if k != "livehime"}
         updated.update(enabled=enabled, mode=mode, plans=plans,
                        plans_enabled=bool(enabled and plans))
@@ -212,13 +205,24 @@ class DailyBroadcastSchedule:
             game = str(row.get("game") or "")
             if game not in GAME_NAMES:
                 raise ValueError("播放计划里的游戏无效")
+            playlist, playlist_name = "", ""
+            if str(row.get("playlist") or "").strip():
+                try:
+                    parsed = music_reference(row["playlist"], "playlist")
+                except ValueError:
+                    raise ValueError("播放计划的开播歌单请填网易云歌单链接或歌单 ID") from None
+                if not parsed or parsed[0] != "playlist":
+                    raise ValueError("开播歌单需要填写歌单链接，不能填歌曲链接")
+                playlist = str(parsed[1])
+                playlist_name = str(row.get("playlist_name") or "").strip()[:64]
             plan_id = str(row.get("id") or "").strip()[:64] or f"plan{index + 1}"
             base, suffix = plan_id, 2
             while plan_id in seen:
                 plan_id = f"{base}-{suffix}"
                 suffix += 1
             seen.add(plan_id)
-            cleaned.append({"id": plan_id, "start": start, "stop": stop, "game": game})
+            cleaned.append({"id": plan_id, "start": start, "stop": stop, "game": game,
+                            "playlist": playlist, "playlist_name": playlist_name})
         for index, plan in enumerate(cleaned):
             for other in cleaned[index + 1:]:
                 if any(a0 < b1 and b0 < a1
@@ -391,6 +395,22 @@ class DailyBroadcastSchedule:
                 self.daily_stop_task = job
             self.jobs.add(job)
             job.add_done_callback(self.jobs.discard)
+        # 整分钟和 30 秒告别窗口都可能被长任务/系统休眠错过，停播时间过后 30 分钟内补一次。
+        hour, stop_minute = map(int, self.settings["stop_time"].split(":"))
+        today_stop = now.replace(hour=hour, minute=stop_minute, second=0, microsecond=0)
+        missed = today_stop if today_stop <= now else today_stop - timedelta(days=1)
+        late = (now - missed).total_seconds()
+        missed_day = missed.date().isoformat()
+        if 0 < late <= self.STOP_CATCH_UP_SECONDS and self.settings["last_stop"] != missed_day:
+            self.settings["last_stop"] = missed_day
+            config.save(self.app.cfg)
+            self.abort_start = self.stop_requested = True
+            self.app.push("log", {"level": "warn", "msg":
+                f"已过定时停播时间（{self.settings['stop_time']}）{int(late // 60)} 分钟，立即补停直播"})
+            job = asyncio.create_task(self.execute("stop"))
+            self.daily_stop_task = job
+            self.jobs.add(job)
+            job.add_done_callback(self.jobs.discard)
 
     def _tick_plan_farewell(self, now):
         stops = dict(self.settings.get("last_stops") or {})
@@ -469,7 +489,8 @@ class DailyBroadcastSchedule:
                                     "ok": bool(result.get("ok")), "message": message}
                 self.app.push("log", {"level": "info" if result.get("ok") else "warn", "msg": message})
                 if action == "start" and result.get("ok"):
-                    self._notify_music_started()
+                    await self._sync_room_title(plan)
+                    self._notify_music_started(plan.get("playlist", "") if plan else "")
             except Exception:
                 self.last_result = {"action": action, "time": self.clock().strftime("%Y-%m-%d %H:%M"),
                                     "ok": False, "message": "定时直播执行失败，请检查账号与采集源"}
@@ -485,10 +506,6 @@ class DailyBroadcastSchedule:
         if getattr(self.app, "dt", None) is not None and getattr(self.app.dt, "running", False):
             await self.app.stop_dt()
         self.app.cfg.setdefault("game", {})["active"] = game
-        broadcast = self.app.cfg.setdefault("broadcast", {})
-        title = str(broadcast.get("title") or "").strip()
-        if not title or title in GAME_TITLES.values():
-            broadcast["title"] = GAME_TITLES[game]
         config.save(self.app.cfg)
         sync = getattr(getattr(self.app, "game", None), "sync", None)
         if callable(sync):
@@ -572,8 +589,7 @@ class DailyBroadcastSchedule:
             if self.closing or self.abort_start or not self.settings["enabled"] or not self.within_broadcast_window():
                 await self.app.broadcast.stop_preview()
                 return {"ok": True, "message": "已取消本次定时开播"}
-            result = await self.app.broadcast.start({**selection, "title": self.app.cfg["broadcast"]["title"],
-                                                      "area_id": self.app.cfg["broadcast"]["area_id"], "confirm": True})
+            result = await self.app.broadcast.start({**selection, "confirm": True})
             if result.get("ok"):
                 if self.closing or self.stop_requested:
                     return {"ok": True, "message": "已请求取消本次定时开播，等待停止完成"}
@@ -844,11 +860,19 @@ class DailyBroadcastSchedule:
         except Exception:
             self.auto_message = "暂时无法读取直播状态，将自动重试；请检查主播登录与网络"
 
-    def _notify_music_started(self):
+    async def _sync_room_title(self, plan=None):
+        sync = getattr(self.app, "sync_room_title", None)
+        if callable(sync):
+            try:
+                await sync(plan.get("game", "") if plan else "")
+            except Exception:
+                pass
+
+    def _notify_music_started(self, playlist=""):
         notify = getattr(self.app, "notify_live_started", None)
         if callable(notify):
             try:
-                notify()
+                notify(playlist)
             except Exception:
                 pass
 

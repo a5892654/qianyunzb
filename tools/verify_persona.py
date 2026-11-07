@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import ANY, AsyncMock, Mock, patch
 
 from aiohttp.test_utils import TestClient, TestServer
 
@@ -31,6 +31,8 @@ class PersonaConfigTests(unittest.TestCase):
                     saved = config.load()
                 expected = config.DEFAULT_PERSONA if old in (None, config.LEGACY_DEFAULT_PERSONA) else old
                 self.assertEqual(saved["ai"]["persona"], expected)
+                self.assertEqual(saved["ai"]["style"],
+                                 "custom" if expected and expected != config.DEFAULT_PERSONA else "default")
                 self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["ai"]["persona"], expected)
                 self.assertEqual(saved["ai"]["openai_model"], "keep-model")
                 self.assertEqual(saved["room_id"], 123)
@@ -53,7 +55,7 @@ class PersonaConfigTests(unittest.TestCase):
 class PersonaFlowTests(unittest.IsolatedAsyncioTestCase):
     async def test_both_chat_backends_and_game_use_the_same_persona(self):
         cfg = copy.deepcopy(config.DEFAULTS)
-        cfg["ai"]["persona"] = "自定义人物：嘴硬心软，夸奖时小得意。"
+        cfg["ai"].update(style="custom", persona="自定义人物：嘴硬心软，夸奖时小得意。")
         brain = Brain()
         for backend in ("qoder", "openai"):
             with self.subTest(backend=backend):
@@ -76,6 +78,7 @@ class PersonaFlowTests(unittest.IsolatedAsyncioTestCase):
         app.cfg = copy.deepcopy(config.DEFAULTS)
         app.bili = SimpleNamespace(client=None)
         app.game = Mock()
+        app.push = Mock()
         app.brain = Brain()
         app.brain.openai.history.append({"role": "assistant", "content": "旧语气"})
         app.dt = Player(app._dt_ai(), Mock())
@@ -93,6 +96,8 @@ class PersonaFlowTests(unittest.IsolatedAsyncioTestCase):
             save.assert_called_once_with(app.cfg)
         self.assertIn(persona, app.brain.system_prompt(app.cfg))
         self.assertIn(persona, app.dt._system_prompt())
+        self.assertEqual(app.cfg["ai"]["style"], "custom")
+        app.push.assert_called_with("log", ANY)
         self.assertFalse(app.brain.openai.history)
         self.assertEqual(app.dt.history, [decision])
         self.assertTrue(app.dt.running)

@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import contextlib
 import json
 import logging
 import os
 import re
 import socket
 import subprocess
+import threading
 import time
 
 import aiohttp
@@ -30,7 +32,106 @@ log = logging.getLogger("stardew")
 
 MCP_PROTOCOL = "2024-11-05"
 _CREATE_NO_WINDOW = 0x08000000
+WINDOW_WIDTH, WINDOW_HEIGHT = 1920, 1080
 _SAY_STRIP = re.compile(r"[\"'“”‘’「」『』【】\[\]{}()（）#*_`>|]")
+_GENERIC_SAYS = {"继续", "好继续", "那就继续", "那继续", "接着来", "接着", "嗯", "嗯这样", "好", "行", "好的", "然后呢"}
+_INVENTORY_FULL = re.compile(r"inventory is full|no room in your inventory|inventory full", re.I)
+_INVENTORY_SLOTS = re.compile(r"inventory \((\d+)/(\d+) slots used\)", re.I)
+
+
+def _clock_minutes(text: str) -> int | None:
+    match = re.match(r"^(\d{1,2}):(\d{2})$", str(text or "").strip())
+    return int(match.group(1)) * 60 + int(match.group(2)) if match else None
+
+
+def _find_game_window(pid: int) -> int:
+    import ctypes
+    import ctypes.wintypes as wt
+    user32 = ctypes.windll.user32
+    found = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, wt.HWND, wt.LPARAM)
+    def visit(hwnd, _):
+        owner = wt.DWORD()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        if owner.value == pid and user32.IsWindowVisible(hwnd):
+            name = ctypes.create_unicode_buffer(64)
+            user32.GetClassNameW(hwnd, name, 64)
+            if name.value == "SDL_app":
+                found.append(hwnd)
+                return False
+        return True
+
+    user32.EnumWindows(visit, 0)
+    return found[0] if found else 0
+
+
+def _fit_game_window(pid: int, width: int = WINDOW_WIDTH, height: int = WINDOW_HEIGHT,
+                     wait: float = 30.0) -> bool:
+    """等游戏窗口出来后把客户区拉成 width×height。
+
+    SDV 启动固定 1280×720，preferredResolution 在窗口模式下拉不起来，只能从外面改。
+    服务进程本身 DPI 不感知（WGC 采集要求），这里只把当前线程切成 per-monitor 感知，
+    拿到的才是物理像素。
+    """
+    import ctypes
+    import ctypes.wintypes as wt
+
+    user32 = ctypes.windll.user32
+    try:
+        # DPI_AWARENESS_CONTEXT 是伪句柄 -4，必须按指针传，传成 c_int 会失效
+        if not user32.SetThreadDpiAwarenessContext(ctypes.c_void_p(-4)):
+            log.warning("切不到 per-monitor DPI 上下文，跳过窗口尺寸设置")
+            return False
+    except (AttributeError, OSError):
+        log.warning("系统不支持 SetThreadDpiAwarenessContext，跳过窗口尺寸设置")
+        return False
+
+    deadline = time.monotonic() + wait
+    hwnd = 0
+    while not hwnd and time.monotonic() < deadline:
+        hwnd = _find_game_window(pid)
+        if not hwnd:
+            time.sleep(0.3)
+    if not hwnd:
+        log.warning("没等到星露谷窗口（pid=%s），跳过窗口尺寸设置", pid)
+        return False
+
+    def apply() -> None:
+        outer, client = wt.RECT(), wt.RECT()
+        user32.GetWindowRect(hwnd, ctypes.byref(outer))
+        user32.GetClientRect(hwnd, ctypes.byref(client))
+        pad_w = (outer.right - outer.left) - client.right
+        pad_h = (outer.bottom - outer.top) - client.bottom
+        outer_w, outer_h = width + pad_w, height + pad_h
+        screen_w, screen_h = user32.GetSystemMetrics(0), user32.GetSystemMetrics(1)
+        x = max(0, (screen_w - outer_w) // 2)
+        y = max(0, (screen_h - outer_h) // 2)
+        user32.ShowWindow(hwnd, 9)  # SW_RESTORE：最小化时 SetWindowPos 不会恢复
+        user32.SetWindowPos(hwnd, 0, x, y, outer_w, outer_h, 0x0004 | 0x0010)
+
+    settle = time.monotonic() + 2.5
+    while time.monotonic() < settle:
+        client = wt.RECT()
+        user32.GetClientRect(hwnd, ctypes.byref(client))
+        if client.right > 0 and (client.right, client.bottom) != (width, height):
+            apply()
+        time.sleep(0.5)
+
+    # 进存档时游戏可能再改一次尺寸，复核一次再补
+    time.sleep(2.0)
+    client = wt.RECT()
+    user32.GetClientRect(hwnd, ctypes.byref(client))
+    if (client.right, client.bottom) != (width, height):
+        apply()
+        time.sleep(0.6)
+        user32.GetClientRect(hwnd, ctypes.byref(client))
+    ok = (client.right, client.bottom) == (width, height)
+    if ok:
+        log.info("星露谷窗口已固定为 %dx%d", width, height)
+    else:
+        log.warning("星露谷窗口没固定成 %dx%d，当前 %dx%d", width, height, client.right, client.bottom)
+    return ok
 
 _TOP_TOOLS = {
     "status", "look", "inventory", "farm_summary", "walk_to", "travel_to",
@@ -38,7 +139,7 @@ _TOP_TOOLS = {
     "till_area", "interact", "respond", "close_menu", "menu", "eat", "fish",
     "fight", "talk_to", "buy", "sell", "ship", "chest", "craft", "cook",
     "go_to_bed", "journal", "quests", "calendar", "crops", "item_info",
-    "villagers", "wait", "rest", "think", "say",
+    "villagers", "rest", "think", "say", "festival", "trash", "shop_list",
 }
 
 
@@ -330,6 +431,7 @@ class StardewProcess:
             return {"ok": False, "error": f"启动失败：{error}"}
         import procutil
         procutil.bind_to_app(self.proc.pid)
+        threading.Thread(target=_fit_game_window, args=(self.proc.pid,), daemon=True).start()
         log.info("星露谷已启动 pid=%s", self.proc.pid)
         return {"ok": True, "pid": self.proc.pid, "smapi": exe}
 
@@ -386,6 +488,16 @@ class StardewPlayer:
 
     AI_FAIL_LIMIT = 5
     REFRESH_TURNS = 3
+    STUCK_SECONDS = 300
+    STUCK_ESCALATE_SECONDS = 60
+    FAIL_STUCK_LIMIT = 12
+    READY_TIMEOUT = 300
+    MAX_STEP_ERRORS = 8
+    LONG_ACTION_SPEAK_SECONDS = 15.0
+    LONG_ACTION_LINES = 6
+    SHOP_OPEN_MINUTES = 9 * 60
+    SHOP_CLOSE_MINUTES = 21 * 60
+    _STOP = object()
 
     def __init__(self, cfg: dict, game: StardewGame, speak=None, log_push=None,
                  narrate: bool = True, pipe=None, emotions=None):
@@ -414,6 +526,19 @@ class StardewPlayer:
         self._session_break = False
         self._wait_notice = 0.0
         self._qoder: QoderSession | None = None
+        self._stuck_sig = None
+        self._stuck_at = time.monotonic()
+        self._stuck_stage = 0
+        self._stuck_fails = 0
+        self._not_ready_since = time.monotonic()
+        self._stalled_task = None
+        self._quiet_turns = 0
+        self._inventory_full = False
+        self._inventory_used = 0
+        self._inventory_total = 0
+        self._inventory_stale = False
+        self._recent_says = collections.deque(maxlen=4)
+        self._line_qoder: QoderSession | None = None
 
     # ---------- 给直播聊天/弹幕复用的 duck-typed 接口 ----------
     def commentary_context(self) -> str:
@@ -527,6 +652,7 @@ class StardewPlayer:
 - tool 必须从下面的工具清单里原样选择。
 - args 按工具的 inputSchema 填；不需要填 reason，千音会把 say 自动填进 reason 给游戏覆盖层看。
 - say 是你要对观众说的话，口语、自然、短，不要念数值和规则，不要重复上一句。
+- say 每一手都必须有内容，不能留空；结合地点、时间、体力和刚发生的事说眼前这一步，别用“继续”“接着来”“嗯”这类空话凑数，也别重复上一句。
 - emotion 从【Live2D 表情】里选一个；没有可选项就留空。
 
 【每天节奏】
@@ -536,7 +662,15 @@ class StardewPlayer:
 - 每天 22:00 前准备睡觉；先调用 journal 写今天的 diary / lessons / plan（中文），再调用 go_to_bed。go_to_bed 失败提示要 journal 时，先 journal 再重试。
 - 如果 2:00 前没睡会晕倒，掉钱掉物品。日落后不要下矿。
 - 菜单/对话打开时先 respond / close_menu / menu 处理掉，再做别的。
+- 遇到节日：只有在还没到节日地图时才 travel_to；状态里 festival=true、地点是 Temp、或结果提示 "A festival is in progress" 时，说明你已经在节日现场，禁止再 travel_to，直接 look 找 Lewis/摊位，再用 festival start 或 talk_to。festival 只接受 start/leave/eggs。同一种办法失败 2 次就 journal + go_to_bed 结束当天，不许反复耗在节日上。
+- 结果出现 "Ended up in Temp instead of Forest" 时，你已经在花舞节现场，不要再 travel_to Forest；按上一条用 look / festival start 处理。
+- 直播中禁止用 wait（会卡 6 分钟没有画面）；要看变化用 look 或 status。
 - 工具结果带 [partial · low_energy]、[no_path]、[no_item] 这类标签时，读原因换方法，不要原样重复。
+- 背包满的信号：结果出现 "inventory is full"、"no room in your inventory" 或 "Stopped: the inventory is full" 时，东西没捡起来。下一步必须先腾格子：ship 卖掉矿石/木材/多余种子，或 chest 把不用的存进箱子，或 eat，或 trash；腾出空位后按结果里的 Left 坐标回去捡，不要直接走开，也不要马上再 harvest_all。
+- 地上的东西：采集品（forage）用 harvest 对应格子；树上或石头上掉在地上的物品，腾出空位后 walk_to 那一格捡起，不是 interact。
+- 长时间下矿或采集前先看 inventory，留 2-3 个空位；快满就先 ship 或 chest 存掉，再继续。
+- 商店营业时间：SeedShop 9:00–21:00。06:00–08:50 不要去商店，先做农活、下矿或钓鱼；结果提示 "SeedShop is closed now" 时不要重复 travel_to，等 9 点后再去。21:00 后也别去。
+- buy / shop_list / sell 必须在商店柜台 interact 打开菜单之后用；结果 "No shop is open" 时先 travel_to SeedShop（营业时间内）并 interact 柜台，打开菜单后再买，不要对着空气买。
 - 上一步结果提示 Dialogue open 时，下一步必须先用 respond 把对话处理掉，再做别的。
 - 第一天你从小屋醒来：先打开屋里的礼盒拿防风草种子（interact），再出门清地、翻地、种下、浇水。
 - 第一天别急着清全图：先清小屋门口一小块地，种下 15 个防风草种子并浇水，体力留给后面。
@@ -567,24 +701,20 @@ class StardewPlayer:
         prompt += "\n\n当前任务：只输出下一手 JSON。"
         return prompt
 
-    async def _ask(self, user_text: str) -> dict:
-        system_prompt = self._system_prompt()
+    async def _complete(self, messages: list[dict], *, max_tokens: int, timeout: float,
+                        line: bool = False) -> str:
         if self.cfg.get("backend") == "openai":
             base = str(self.cfg.get("openai_base", "")).rstrip("/")
             if not base or not self.cfg.get("openai_model"):
                 raise RuntimeError("未配置 OpenAI 兼容接口（base / model）")
-            messages = [{"role": "system", "content": system_prompt}]
-            messages.extend(self.history[-6:])
-            messages.append({"role": "user", "content": user_text[-7000:]})
             payload = {
                 "model": self.cfg["openai_model"],
                 "messages": messages,
                 "temperature": float(self.cfg.get("temperature", 0.6)),
-                "max_tokens": int(self.cfg.get("max_tokens", 400)),
+                "max_tokens": int(max_tokens),
             }
             headers = {"Authorization": f"Bearer {self.cfg.get('openai_key', '')}"}
-            timeout = aiohttp.ClientTimeout(total=float(self.cfg.get("timeout", 120)))
-            async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as session:
                 async with session.post(f"{base}/chat/completions", headers=headers, json=payload) as response:
                     raw = await response.text()
                     if response.status != 200:
@@ -593,15 +723,32 @@ class StardewPlayer:
                         data = json.loads(raw)
                     except ValueError as error:
                         raise RuntimeError(f"API 返回的不是 JSON：{raw[:200]}") from error
-            text = (data["choices"][0]["message"]["content"] or "").strip()
+            return (data["choices"][0]["message"]["content"] or "").strip()
+        session = self._line_qoder if line else self._qoder
+        if session is None:
+            session = QoderSession()
+            if line:
+                self._line_qoder = session
+            else:
+                self._qoder = session
+        return (await session.ask(self.cfg, str(messages[0]["content"]),
+                                  str(messages[-1]["content"])) or "").strip()
+
+    async def _ask(self, user_text: str) -> dict:
+        messages = [{"role": "system", "content": self._system_prompt()}]
+        if self.cfg.get("backend") == "openai":
+            messages.extend(self.history[-6:])
+        messages.append({"role": "user", "content": user_text[-7000:]})
+        text = await self._complete(
+            messages,
+            max_tokens=int(self.cfg.get("max_tokens", 400)),
+            timeout=float(self.cfg.get("timeout", 120)),
+        )
+        if self.cfg.get("backend") == "openai":
             self.history.extend([
                 {"role": "user", "content": user_text[-2600:]},
                 {"role": "assistant", "content": text[:600]},
             ])
-        else:
-            if self._qoder is None:
-                self._qoder = QoderSession()
-            text = (await self._qoder.ask(self.cfg, system_prompt, user_text) or "").strip()
         return self._parse(text)
 
     @staticmethod
@@ -703,34 +850,168 @@ class StardewPlayer:
         return {"tool": tool, "args": args, "say": say, "emotion": emotion}
 
     # ---------- 执行 ----------
-    def _fallback_say(self, tool: str, is_error: bool) -> str:
-        if is_error:
-            lines = ["这一步没成，我换个办法。", "哎，卡住了，重新来。", "不太顺，我调整一下。"]
-        elif tool in ("go_to_bed",):
-            lines = ["今天先到这儿，睡啦。", "收工，明天继续。"]
-        elif tool in ("journal",):
-            lines = ["把今天记一下。", "先写两句今天的收获。"]
-        elif tool in ("walk_to", "travel_to"):
-            lines = ["我过去看看。", "往那边走。", "这就去。"]
-        elif tool in ("fish",):
-            lines = ["试试手气。", "看看今天鱼口怎么样。"]
-        elif tool in ("fight",):
-            lines = ["小心点，先打。", "别慌，慢慢来。"]
-        elif tool in ("harvest", "harvest_all"):
-            lines = ["有收成了。", "先收这一批。"]
-        elif tool in ("water_all", "use_tool"):
-            lines = ["先把活干了。", "这里弄一下。"]
-        else:
-            lines = ["好，继续。", "接着来。", "嗯，这样。"]
-        return lines[self.turns_taken % len(lines)]
+    def _stuck_action(self, state: dict):
+        """游戏时间/地点长时间不变 = 卡死（花舞节、过场、寻路），强行换动作，别空耗直播。"""
+        sig = (state.get("day"), state.get("time"), state.get("location"),
+               state.get("energy"), state.get("money"))
+        now = time.monotonic()
+        if sig != self._stuck_sig:
+            self._stuck_sig = sig
+            self._stuck_at = now
+            self._stuck_stage = 0
+            self._stuck_fails = 0
+            return None
+        # 只认游戏状态变化：travel_to 可能“成功”但原地不动，工具返回成功不能算进展。
+        limit = self.STUCK_SECONDS if self._stuck_stage == 0 else self.STUCK_ESCALATE_SECONDS
+        if now - self._stuck_at < limit and (self._stuck_stage > 0 or self._stuck_fails < self.FAIL_STUCK_LIMIT):
+            return None
+        waited = max(1, int((now - self._stuck_at) // 60))
+        self._stuck_at = now
+        self._stuck_stage += 1
+        self._stuck_fails = 0
+        location = str(state.get("location") or "")
+        if self._stuck_stage == 1:
+            self.log_push("warn", f"星露谷 {waited} 分钟没有进展，先关掉卡住的界面")
+            return {"tool": "close_menu", "args": {}, "say": "先把这个界面关掉。", "emotion": ""}
+        if self._stuck_stage == 2:
+            if state.get("festival") or any(key in location for key in ("Forest", "Town", "Beach", "Mountain", "Festival")):
+                self.log_push("warn", f"星露谷 {waited} 分钟没有进展，尝试离开节日")
+                return {"tool": "festival", "args": {"action": "leave"}, "say": "这个节日卡住了，先出去。", "emotion": ""}
+            self.log_push("warn", f"星露谷 {waited} 分钟没有进展，准备回家睡觉")
+            return {"tool": "go_to_bed", "args": {}, "say": "今天先到这儿，回去睡了。", "emotion": ""}
+        if self._stuck_stage == 3:
+            self.log_push("warn", f"星露谷 {waited} 分钟没有进展，强制结束今天")
+            return {"tool": "go_to_bed", "args": {}, "say": "今天不干了，睡觉。", "emotion": ""}
+        self.log_push("error", "星露谷卡住太久，暂停代打并尝试下播")
+        self.running = False
+        self._schedule_stall_stop()
+        return self._STOP
 
-    def _dedupe_say(self, say: str) -> str:
-        if say and say != self.last_say:
+    def _schedule_stall_stop(self, farewell: str = "我这边卡住了，先下播，回头见。"):
+        if self.pipe is None or getattr(self.pipe, "app", None) is None:
+            return
+        if self._stalled_task is not None and not self._stalled_task.done():
+            return
+        self._stalled_task = asyncio.create_task(self._end_stalled_stream(farewell))
+
+    async def _end_stalled_stream(self, farewell: str = "我这边卡住了，先下播，回头见。"):
+        app = getattr(self.pipe, "app", None)
+        schedule = getattr(app, "schedule", None)
+        if schedule is None:
+            return
+        try:
+            info = await app.broadcast.account()
+            if not (info.get("ok") and info.get("logged_in") and int(info.get("live_status") or 0) == 1):
+                return
+            await schedule.stop_now(farewell=farewell, external=True,
+                                    room_id=int(info.get("room_id") or 0), stop_on_farewell_error=True)
+        except Exception as error:
+            log.warning("卡死自动下播失败：%s", error)
+
+    @staticmethod
+    def _bland_line(text: str) -> bool:
+        compact = re.sub(r"[\s，,。.!！?？、；;：:～~]+", "", text or "")
+        return not compact or compact in _GENERIC_SAYS
+
+    def _clean_line(self, text: str) -> str:
+        raw = re.sub(r"^```(?:json|text)?|```$", "", (text or "").strip(), flags=re.M).strip()
+        if raw.startswith("{"):
+            try:
+                raw = str(self._parse(raw).get("say") or "")
+            except Exception:
+                return ""
+        line = _clean_say(raw)
+        if self._bland_line(line) or line == self.last_say or line in self._recent_says:
+            return ""
+        return line
+
+    def _situation_brief(self) -> str:
+        state = self._last_state or {}
+        summary = self.status_summary()
+        season = {"spring": "春", "summer": "夏", "fall": "秋", "winter": "冬"}.get(
+            str(state.get("season")), str(state.get("season") or ""))
+        return (f"第{summary.get('day')}天 {season} {state.get('dayOfMonth')}日 "
+                f"{summary.get('time')} {state.get('weather') or ''}，在{summary.get('location')}，"
+                f"体力{summary.get('energy')}，金钱{summary.get('money')}g")
+
+    def _recent_lines(self) -> str:
+        return "\n".join(f"- {line}" for line in list(self._recent_says)[-3:]) or "（还没说过）"
+
+    async def _ai_situation_line(self, tool: str, args: dict,
+                                 *, in_progress: float | None = None) -> str:
+        """让模型看着此刻的局势现说一句，不用本地写死的台词。"""
+        brief = json.dumps(args, ensure_ascii=False)
+        if len(brief) > 240:
+            brief = brief[:240] + "…"
+        if in_progress is None:
+            phase = f"【接下来】\n{tool}：{brief or '（无参数）'}"
+            focus = "刚发生的事"
+        else:
+            phase = f"【正在做】\n{tool}：{brief or '（无参数）'}（已经做了约{int(in_progress)}秒）"
+            focus = "正在做的这件事的进度"
+        system = (
+            "你在直播玩《星露谷物语》，现在只需要说一句解说，不要输出 JSON，不要调用工具。"
+            f"要求：像主播边玩边说的口语，结合当前局势（地点、时间、体力）和{focus}；"
+            "不超过30个字；不要用“继续”“接着来”“嗯”这类空话；"
+            "不要和最近说过的话重复；不要编造没有发生的事。只输出这一句话本身。"
+        )
+        persona = str(self.cfg.get("persona") or "").strip()
+        if persona:
+            system += "\n【主播口吻】" + persona[:400]
+        user = (f"【当前局势】\n{self._situation_brief()}\n\n"
+                f"【刚发生】\n{(self._last_result or '刚开播，还没有操作结果。')[-500:]}\n\n"
+                f"{phase}\n\n"
+                f"【最近说过】\n{self._recent_lines()}\n")
+        chat = self._chat_context()
+        if chat:
+            user += "\n" + chat[:900] + "\n"
+        user += "\n只输出一句解说。"
+        try:
+            text = await self._complete(
+                [{"role": "system", "content": system}, {"role": "user", "content": user}],
+                max_tokens=80,
+                timeout=min(20.0, float(self.cfg.get("timeout", 120))),
+                line=True,
+            )
+        except Exception as error:
+            log.warning("补解说失败：%s", error)
+            return ""
+        return self._clean_line(text)
+
+    async def _resolve_say(self, tool: str, args: dict, say: str) -> str:
+        """模型没给台词或只给空话时，让 AI 按当前局势补一句。"""
+        if say and say not in self._recent_says and not self._bland_line(say):
             return say
-        return self._fallback_say(self._last_tool, False)
+        return await self._ai_situation_line(tool, args)
+
+    @staticmethod
+    def _state_hint(state: dict) -> str:
+        if state.get("festival"):
+            return ("你已经在节日现场（festival=true）。不要再 travel_to；先用 look 查看周围，"
+                    "找 Lewis 或摊位，再用 talk_to / festival start。要离开用 festival leave。")
+        if state.get("eventUp"):
+            return ("当前有事件/过场在播放（eventUp=true）。先用 look 观察；对话用 respond，"
+                    "不要重复 travel_to 或 wait。")
+        return ""
+
+    async def _narrate_long_action(self, tool: str, args: dict, emotion: str = ""):
+        elapsed = 0.0
+        for _ in range(self.LONG_ACTION_LINES):
+            await asyncio.sleep(self.LONG_ACTION_SPEAK_SECONDS)
+            if not self.running:
+                return
+            elapsed += self.LONG_ACTION_SPEAK_SECONDS
+            line = await self._ai_situation_line(tool, args, in_progress=elapsed)
+            if not line or not self.running or line in self._recent_says:
+                continue
+            self.speak(line, emotion)
+            self._recent_says.append(line)
 
     def _build_user_text(self, state: dict, status_text: str, extras: list[str]) -> str:
         lines = [f"【当前状态】\n{status_text}"]
+        hint = self._state_hint(state)
+        if hint:
+            lines.append("【当前阶段】\n" + hint)
         if extras:
             lines.append("\n\n".join(extras))
         if self._last_result:
@@ -740,6 +1021,31 @@ class StardewPlayer:
             lines.append(chat)
         if self._last_error:
             lines.append("【上一步失败原因】\n" + self._last_error[-500:])
+        if self._inventory_full:
+            slots = f"（{self._inventory_used}/{self._inventory_total}）" if self._inventory_total else ""
+            lines.append(
+                f"【背包已满】背包{slots}没有空位。捡东西前必须先腾格子："
+                "优先 ship 卖掉矿石/木材/多余种子，或 chest 把不用的存进箱子，或 eat 吃个食物，或 trash；"
+                "不确定卖什么就先 inventory 看一遍；腾出空位后按上一步结果里的 Left 坐标回去捡；"
+                "满包时不要重复 harvest_all。"
+            )
+        clock_now = _clock_minutes((self._last_state or {}).get("time"))
+        if "SeedShop is closed now" in self._last_result:
+            lines.append(
+                "【商店未开门】SeedShop 9:00 才开门（21:00 关）。不要重复 travel_to SeedShop，"
+                "先做农活、下矿或钓鱼，9 点后再去。"
+            )
+        elif clock_now is not None and not (self.SHOP_OPEN_MINUTES <= clock_now < self.SHOP_CLOSE_MINUTES):
+            lines.append(
+                "【商店未开门】现在不在 SeedShop 营业时间（9:00–21:00）。不要去商店，"
+                "先做农活、下矿或钓鱼。"
+            )
+        if self._quiet_turns > 0:
+            lines.append(
+                "【该开口了】上一手你没有给 say。这一手 say 必须有内容："
+                "说清眼下在做什么、刚发生了什么，或提一句当前局势；"
+                "不要用“继续”“接着来”“嗯”这类空话，也不要重复上一句。"
+            )
         lines.append("请只输出下一手 JSON。")
         return "\n\n".join(lines)
 
@@ -748,34 +1054,56 @@ class StardewPlayer:
         if self.turns_taken == 0:
             calls = [("farm_summary", {}), ("look", {"radius": 8}), ("inventory", {})]
         elif self.turns_taken % 6 == 0:
-            calls = [("farm_summary", {}), ("look", {"radius": 8})]
+            calls = [("farm_summary", {}), ("look", {"radius": 8}), ("inventory", {})]
         elif self.turns_taken % self.REFRESH_TURNS == 0:
             calls = [("look", {"radius": 8})]
+        if self._inventory_stale and not any(name == "inventory" for name, _ in calls):
+            calls.append(("inventory", {}))
+        self._inventory_stale = False
         texts = []
         for name, args in calls:
             result = await self.game.call(name, args, timeout=60)
             if result["text"]:
                 texts.append(f"【{name}】\n{result['text']}")
+                if name == "inventory":
+                    self._note_inventory(result["text"])
         return texts
+
+    def _set_inventory_full(self, full: bool) -> None:
+        if full and not self._inventory_full:
+            detail = f"（{self._inventory_used}/{self._inventory_total}）" if self._inventory_total else ""
+            self.log_push("warn", f"背包满了{detail}，先腾格子再捡")
+        self._inventory_full = full
+
+    def _note_inventory(self, text: str) -> None:
+        match = _INVENTORY_SLOTS.search(text)
+        if not match:
+            return
+        self._inventory_used, self._inventory_total = int(match.group(1)), int(match.group(2))
+        self._set_inventory_full(self._inventory_used >= self._inventory_total)
 
     async def step(self):
         state = await self.game.state()
         self._last_state = state
         self._state_time = time.monotonic()
         if not state.get("ready"):
-            if time.monotonic() - self._wait_notice > 30:
+            if time.monotonic() - self._not_ready_since > self.READY_TIMEOUT:
+                self.log_push("error", "星露谷长时间没有进入存档（自动读档失败或存档被删），自动托管已停止")
+                self.running = False
+                self._schedule_stall_stop("我这边一直读不到存档，先下播，回头见。")
+            elif time.monotonic() - self._wait_notice > 30:
                 self.log_push("warn", "星露谷还没进入存档，等待读档…")
                 self._wait_notice = time.monotonic()
             return
+        self._not_ready_since = time.monotonic()
         if state.get("paused"):
             if time.monotonic() - self._wait_notice > 30:
                 self.log_push("warn", "游戏被暂停（F8），等恢复后继续")
                 self._wait_notice = time.monotonic()
             return
         if state.get("stopNow"):
-            if time.monotonic() - self._wait_notice > 30:
-                self.log_push("warn", "游戏侧要求停止，等待…")
-                self._wait_notice = time.monotonic()
+            self.log_push("warn", "游戏侧要求停止，自动托管结束")
+            self.running = False
             return
 
         day = state.get("day")
@@ -786,59 +1114,96 @@ class StardewPlayer:
             self._day = day
             self.log_push("info", f"进入第 {day} 天")
 
-        status = await self.game.call("status", {}, timeout=30)
-        status_text = status["text"] or "（没有读到状态）"
-        self._last_status = status_text
-        extras = await self._read_extras()
-        user_text = self._build_user_text(state, status_text, extras)
+        action = self._stuck_action(state)
+        if action is self._STOP:
+            return
+        if action is None:
+            status = await self.game.call("status", {}, timeout=30)
+            status_text = status["text"] or "（没有读到状态）"
+            self._last_status = status_text
+            extras = await self._read_extras()
+            user_text = self._build_user_text(state, status_text, extras)
 
-        action = None
-        for attempt in range(2):
-            try:
-                action = self._parse_action(await self._ask(user_text))
-                self._ai_fails = 0
-                break
-            except Exception as error:
-                self._ai_fails += 1
-                log.warning("星露谷决策失败（%s）：%s", attempt + 1, error)
-                if attempt == 0:
-                    user_text += f"\n\n【上一条输出无效】{error}\n请只输出合法 JSON，并从工具清单里选工具。"
-                else:
-                    self._last_error = str(error)
-                    self._last_result = ""
-                    if self._ai_fails >= self.AI_FAIL_LIMIT:
-                        self.log_push("error", "模型连续失败，自动托管已暂停")
-                        self.running = False
-                        return
+            for attempt in range(2):
+                try:
+                    action = self._parse_action(await self._ask(user_text))
+                    self._ai_fails = 0
+                    break
+                except Exception as error:
+                    self._ai_fails += 1
+                    log.warning("星露谷决策失败（%s）：%s", attempt + 1, error)
+                    if attempt == 0:
+                        user_text += (f"\n\n【上一条输出无效】{error}\n"
+                                      "请只输出合法 JSON，并从工具清单里选工具；say 不能为空。")
+                    else:
+                        self._last_error = str(error)
+                        self._last_result = ""
+                        if self._ai_fails >= self.AI_FAIL_LIMIT:
+                            self.log_push("error", "模型连续失败，自动托管已暂停")
+                            self.running = False
+                            return
 
         if action is None:
             return
 
         tool, args, say = action["tool"], action["args"], action["say"]
+        if tool == "wait":
+            self.log_push("warn", "wait 会卡 6 分钟，直播里改成先观察")
+            tool, args = "look", {"radius": 8}
+        clock_now = _clock_minutes((self._last_state or {}).get("time"))
+        if (tool == "travel_to" and str(args.get("location") or "") == "SeedShop"
+                and clock_now is not None
+                and not (self.SHOP_OPEN_MINUTES <= clock_now < self.SHOP_CLOSE_MINUTES)):
+            self.log_push("warn", "商店 9:00 才开门，先去干别的")
+            tool, args, say = "farm_summary", {}, ""
+        say = await self._resolve_say(tool, args, say)
+        if say:
+            self.last_say = say
+            self._recent_says.append(say)
+        emotion = action.get("emotion") or ""
+        if self.narrate and say:
+            self.speak(say, emotion)
+            self._quiet_turns = 0
+        elif self.narrate:
+            self._quiet_turns += 1
+        filler = None
+        if self.narrate:
+            filler = asyncio.create_task(self._narrate_long_action(tool, args, emotion))
         try:
             result = await self.game.call(tool, args, timeout=float(self.cfg.get("tool_timeout", 180)))
         except Exception as error:
             self._last_error = str(error)
             self._last_result = ""
+            self._stuck_fails += 1
             self.log_push("warn", f"工具 {tool} 出错：{error}")
             self.turns_taken += 1
             return
+        finally:
+            if filler is not None:
+                filler.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await filler
 
         text = result["text"]
         is_error = result["is_error"]
+        if tool == "travel_to" and "Ended up in Temp instead of Forest" in text:
+            is_error = False
+            text = "已进入花舞节现场（Temp）。用 look 找 Lewis 或摊位，再 festival start / talk_to；不要再 travel_to Forest。"
+        if _INVENTORY_FULL.search(text):
+            self._set_inventory_full(True)
+        elif not is_error and (tool in ("ship", "trash", "eat", "sell")
+                               or (tool == "chest" and str(args.get("action") or "") == "store")):
+            self._set_inventory_full(False)
+            self._inventory_stale = True
+        if is_error:
+            self._stuck_fails += 1
         self._last_tool = tool
         self._last_result = text[:2000]
         self._last_error = text[:800] if is_error else ""
         self.turns_taken += 1
-        if not say:
-            say = self._fallback_say(tool, is_error)
-        say = self._dedupe_say(say)
-        self.last_say = say
-        if self.narrate and say:
-            self.speak(say, action.get("emotion") or "")
         level = "warn" if is_error else "info"
         suffix = f" | {text[:120]}" if is_error else ""
-        self.log_push(level, f"{tool}：{say}{suffix}")
+        self.log_push(level, f"{tool}：{say or '（静默）'}{suffix}")
 
         if tool == "go_to_bed" and is_error and "journal" in text.lower():
             try:
@@ -876,16 +1241,33 @@ class StardewPlayer:
                 return
             self._catalog = self._build_catalog(self.game.mcp.tools)
             self.log_push("info", f"已连接星露谷 MCP，{len(self._tool_map)} 个工具")
+            self._not_ready_since = time.monotonic()
+            error_streak = 0
             while self.running:
                 try:
                     await self.step()
+                    error_streak = 0
                     await asyncio.sleep(interval)
                 except asyncio.CancelledError:
                     break
                 except Exception as error:
+                    error_streak += 1
                     log.exception("星露谷自动托管循环异常")
-                    self.log_push("error", f"星露谷循环异常：{error}")
-                    await asyncio.sleep(2.0)
+                    self.log_push("error", f"星露谷循环异常（{error_streak}/{self.MAX_STEP_ERRORS}）：{error}")
+                    if error_streak in (3, 6):
+                        try:
+                            await self.game.restart_mcp()
+                            self._tool_map = {str(t.get("name")): t for t in self.game.mcp.tools if t.get("name")}
+                            self._catalog = self._build_catalog(self.game.mcp.tools)
+                            self.log_push("warn", "星露谷 MCP 无响应，已重连")
+                        except Exception as reconnect_error:
+                            log.warning("星露谷 MCP 重连失败：%s", reconnect_error)
+                    if error_streak >= self.MAX_STEP_ERRORS:
+                        self.log_push("error", "星露谷 MCP 连续无响应，自动托管已停止")
+                        self.running = False
+                        self._schedule_stall_stop("我这边连不上游戏了，先下播，回头见。")
+                        break
+                    await asyncio.sleep(min(2.0 * error_streak, 10.0))
         except asyncio.CancelledError:
             pass
         except Exception as error:
@@ -893,12 +1275,14 @@ class StardewPlayer:
             self.log_push("error", f"星露谷 MCP 启动失败：{error}")
         finally:
             self.running = False
-            if self._qoder is not None:
-                try:
-                    await self._qoder.close()
-                except Exception:
-                    pass
-                self._qoder = None
+            for session_name in ("_qoder", "_line_qoder"):
+                session = getattr(self, session_name)
+                if session is not None:
+                    try:
+                        await session.close()
+                    except Exception:
+                        pass
+                    setattr(self, session_name, None)
             try:
                 await self.game.close()
             except Exception:

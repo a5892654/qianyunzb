@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import ctypes
-import os
 from ctypes import wintypes as wt
 
 from live_source import SourceFrames
+
+# 直播姬把窗口采集目标存成「标题:窗口类名:exe」，窗口失效后靠这三个值重新找回来。
+# 类名一旦带上进程号，千音每次重启直播姬就再也匹配不到，只能手动重选采集窗口。
+SOURCE_CLASS = "QianyinSourceHost"
 
 _u = ctypes.WinDLL("user32", use_last_error=True)
 _g = ctypes.WinDLL("gdi32", use_last_error=True)
@@ -81,7 +84,7 @@ def run(name, title, width, height, x, y, frame_width=1920, frame_height=1080):
     frames = SourceFrames(frame_width, frame_height, name)
     dc = bitmap = old = hwnd = parent = None
     instance = _k.GetModuleHandleW(None)
-    class_name = f"QianyinNativeSource-{os.getpid()}"
+    class_name = SOURCE_CLASS
     registered = False
     sequence = 0
     # Keep the DPI behavior of the existing capture process: caller sizes in

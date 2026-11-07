@@ -5,6 +5,18 @@
 """
 
 from dtgame.expedition import depth_settings
+from dtgame import forge, tactics
+
+CARD_TYPE_CN = {
+    "attack": "攻击", "skill": "技能", "power": "能力", "status": "状态",
+    "curse": "诅咒", "quest": "任务", "ultimate": "终极", "monument": "灵碑",
+    "mythic": "神话", "special": "特殊",
+}
+RARITY_CN = {
+    "common": "普通", "uncommon": "精良", "rare": "稀有", "ancient": "远古",
+    "event": "事件", "token": "信物", "epic": "史诗", "legendary": "传说",
+    "mythic": "神话",
+}
 
 TYPE_CN = {
     "battle": "战斗", "elite": "精英", "boss": "BOSS", "campfire": "篝火",
@@ -48,6 +60,14 @@ def _fmt_status(status: dict) -> list[str]:
         extra.append("增益: " + ", ".join(f"{k}x{v}" for k, v in buff.items()))
     if debuff:
         extra.append("减益: " + ", ".join(f"{k}x{v}" for k, v in debuff.items()))
+    deck = status.get("deck") or []
+    if deck:
+        counts = {}
+        for name in deck:
+            counts[name] = counts.get(name, 0) + 1
+        shown = [f"{n}×{c}" if c > 1 else n for n, c in list(counts.items())[:10]]
+        more = " 等" if len(counts) > 10 else ""
+        extra.append(f"牌组 {len(deck)} 张: " + "、".join(shown) + more)
     return [line] + extra
 
 
@@ -101,9 +121,39 @@ def _fmt_potions(b: dict) -> list[str]:
     return ["道具（action=potion slot=序号）:", *out] if out else out
 
 
+def _card_nums(c: dict) -> str:
+    bits = []
+    dmg = c.get("damage") or 0
+    hits = c.get("hits") or 1
+    if dmg:
+        bits.append(f"伤害{dmg}" + (f"×{hits}" if hits > 1 else ""))
+    if c.get("block"):
+        bits.append(f"格挡{c['block']}")
+    if c.get("draw"):
+        bits.append(f"抽{c['draw']}")
+    if c.get("energy_gain"):
+        bits.append(f"回能{c['energy_gain']}")
+    if c.get("radiance_gain"):
+        bits.append(f"光焰+{c['radiance_gain']}")
+    if c.get("radiance_cost"):
+        bits.append(f"光焰-{c['radiance_cost']}")
+    if c.get("hp_cost"):
+        bits.append(f"耗血{c['hp_cost']}")
+    if c.get("self_damage"):
+        bits.append(f"自伤{c['self_damage']}")
+    return " ".join(bits)
+
+
 def _fmt_battle(b: dict, run: dict) -> list[str]:
     out = [f"回合 {b.get('turn')}，能量 {b.get('energy')}/{b.get('max_energy')}，"
            f"HP {b.get('hp')}/{b.get('max_hp')}" + (f"，格挡 {b['block']}" if b.get("block") else "")]
+    stats = []
+    if b.get("strength"):
+        stats.append(f"力量{b['strength']}")
+    if b.get("dexterity"):
+        stats.append(f"敏捷{b['dexterity']}")
+    if stats:
+        out[0] += "，" + " ".join(stats)
     rad, cost = b.get("radiance"), b.get("ultimate_cost")
     if rad is not None:
         if b.get("radiance_art_used"):
@@ -146,6 +196,8 @@ def _fmt_battle(b: dict, run: dict) -> list[str]:
         hide = "" if e.get("targetable", True) else (
             " ✕不可选中(已阵亡)" if not e.get("alive", True) else " ✕不可选中(隐匿)")
         out.append(f"  [{i}] {e.get('name')} {e.get('hp')}/{e.get('max_hp')}{tag_txt}{hide} 意图: {intent_txt}")
+        if it.get("desc"):
+            out.append(f"      意图说明: {str(it['desc']).strip()}")
     out.append("手牌:")
     if not b.get("hand"):
         out.append("  （空）")
@@ -155,7 +207,10 @@ def _fmt_battle(b: dict, run: dict) -> list[str]:
         cost = c.get("cost")
         cost_txt = "?" if cost is not None and cost < 0 else str(cost)
         tgt = {"single": "需选敌", "all": "群体", "self": "自身"}.get(c.get("target") or "", "自身")
-        out.append(f"  [{c.get('slot')}] {c.get('name')} 费{cost_txt} [{c.get('type')}] {tgt}{flag}")
+        type_cn = CARD_TYPE_CN.get(str(c.get("type") or ""), str(c.get("type") or ""))
+        nums = _card_nums(c)
+        out.append(f"  [{c.get('slot')}] {c.get('name')} 费{cost_txt} [{type_cn}] {tgt}"
+                   + (f" · {nums}" if nums else "") + flag)
         gc = c.get("grans") or {}
         desc = (gc.get("normal_desc") or c.get("desc") or "").strip().replace("\n", " ")
         if desc:
@@ -179,6 +234,10 @@ def _fmt_battle(b: dict, run: dict) -> list[str]:
             out.append(f"      合璧牌：按牌面自动消耗{gc.get('pair_spend', 0)}对光暗蓄能，不受开关影响，不要填 release。")
     out.append(f"牌库 {b.get('draw_pile_count')} / 弃牌 {b.get('discard_pile_count')} / 消耗 {b.get('exhaust_pile_count')}")
     out.extend(_fmt_potions(b))
+    notes = tactics.notes(b)
+    if notes:
+        out.append("【作战参谋】以下按基础牌面粗算，未计条件加成、抽牌连锁和特殊效果；以牌面说明为准。")
+        out.extend("  - " + n for n in notes)
     if b.get("battle_over"):
         out.append("战斗已结束，正在结算。")
     return out
@@ -221,12 +280,28 @@ def _fmt_campfire(c: dict) -> list[str]:
     return out
 
 
+SHOP_KIND_CN = {"card": "卡牌", "relic": "遗物", "item": "道具", "key": "钥匙"}
+
+
 def _fmt_shop(s: dict) -> list[str]:
-    out = [f"商店，持有 {s.get('souls')} 灵魂:"]
+    souls = s.get("souls")
+    out = [f"商店，持有 {souls} 灵魂:"]
     for t in s.get("tiles") or []:
-        sold = " (已售出)" if t.get("sold") else ""
-        out.append(f"  [{t['slot']}] {t.get('kind')} {t.get('id')} 价 {t.get('price')}{sold}")
-    out.append("action=leave 离开商店")
+        kind = SHOP_KIND_CN.get(str(t.get("kind") or ""), str(t.get("kind") or "商品"))
+        name = t.get("name") or t.get("id") or ""
+        meta = []
+        if t.get("rarity"):
+            meta.append(RARITY_CN.get(str(t["rarity"]), str(t["rarity"])))
+        if t.get("type"):
+            meta.append(CARD_TYPE_CN.get(str(t["type"]), str(t["type"])))
+        meta_txt = f" {'/'.join(meta)}" if meta else ""
+        state = " (已售出)" if t.get("sold") else (
+            "" if t.get("affordable", True) else " (灵魂不够)")
+        out.append(f"  [{t['slot']}] {kind}「{name}」{meta_txt} 价 {t.get('price')}{state}")
+        desc = (t.get("desc") or "").strip().replace("\n", " ")
+        if desc:
+            out.append("      " + desc[:160])
+    out.append('买: {"action":"shop","slot":序号}；走人: {"action":"shop","op":"leave"}')
     return out
 
 
@@ -244,16 +319,40 @@ def _fmt_soul_forge(f: dict) -> list[str]:
     if cards:
         out.append("可锻造的卡:")
         for c in cards:
-            out.append(f"  [{c.get('slot')}] {c.get('name')} 费{c.get('cost')} [{c.get('type')}]"
-                       f" 已锻{c.get('forge_count', 0)}次")
+            type_cn = CARD_TYPE_CN.get(str(c.get("type") or ""), str(c.get("type") or ""))
+            stats = []
+            for key, label in (("damage", "伤害"), ("block", "格挡"),
+                               ("erosion_value", "侵蚀"), ("memory_value", "记忆")):
+                if c.get(key):
+                    stats.append(f"{label}{c[key]}")
+            count = f" ×{c['count']}" if c.get("count", 1) > 1 else ""
+            out.append(f"  [{c.get('slot')}] {c.get('name')} 费{c.get('cost')} [{type_cn}]"
+                       f" 已锻{c.get('forge_count', 0)}次{count}"
+                       + (f" · {' '.join(stats)}" if stats else ""))
+            desc = str(c.get("desc") or "").strip().replace("\n", " ")
+            if desc:
+                out.append("      " + desc[:120])
     else:
         out.append("没有还能锻造的卡。")
     sel = f.get("selected") or {}
-    out.append(f"  已选卡: [{sel.get('slot')}] {sel.get('name')}" if sel else "  还没选卡")
+    if sel:
+        sel_type = CARD_TYPE_CN.get(str(sel.get("type") or ""), str(sel.get("type") or ""))
+        out.append(f"  已选卡: [{sel.get('slot')}] {sel.get('name')} 费{sel.get('cost')} [{sel_type}]"
+                   f" 已锻{sel.get('forge_count', 0)}次")
+    else:
+        out.append("  还没选卡")
+    rec_slot, _ = forge.recommend(f) if sel else (None, "")
     for o in f.get("options") or []:
         lock = "" if o.get("affordable", True) else "（灵魂不够）"
         cur = " ←已选" if o.get("slot") == f.get("selected_option") else ""
-        out.append(f"  强化 [{o.get('slot')}] {o.get('name')} 价 {o.get('cost')}{lock}{cur}")
+        star = " ★推荐" if o.get("slot") == rec_slot else ""
+        preview = str(o.get("preview") or "").strip()
+        out.append(f"  强化 [{o.get('slot')}] {o.get('name')} 价 {o.get('cost')}"
+                   + (f" · {preview}" if preview else "") + f"{star}{lock}{cur}")
+    notes = forge.notes(f)
+    if notes:
+        out.append("【锻造参谋】")
+        out.extend("  - " + n for n in notes)
     out.append('  {"action":"forge","op":"card","slot":卡牌序号}')
     out.append('  {"action":"forge","op":"option","slot":强化项序号}')
     if f.get("can_forge"):
@@ -344,6 +443,9 @@ def _fmt_hall(state: dict) -> list[str]:
             if type(item.get("depth")) is int and item["depth"] <= limit:
                 out.append(f"  深度 {item['depth']}: {item.get('name', '')} {item.get('desc', '')}")
         out.append("选择深度并出征: action=expedition depth=整数")
+        shallow = (state.get("hall") or {}).get("expedition_mode", (state.get("hall") or {}).get("mode")) == "shallow"
+        if not shallow and current is not None and current < limit:
+            out.append(f"深度 {current} 及以下均已通关，深度 {current + 1} 已解锁；上一局通关就升一级，别一直停在已通关深度。")
     return out
 
 

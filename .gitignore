@@ -43,6 +43,10 @@ Thumbs.db
 # Build artifacts / local backups
 QianyinAI.exe
 config.json.testbak
+config.json.*bak*
+
+# Debug screenshots from local verification
+_*.png
 
 # Model included with additional redistribution permission confirmed by the repository owner.
 !live2d-models/DeepSeek免费公皮/

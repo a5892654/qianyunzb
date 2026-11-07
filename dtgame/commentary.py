@@ -24,12 +24,22 @@ def scene(state):
     if state.get("busy") or (screen == "battle" and not settled and (danger or RiceTracker._boss(state))):
         mode, label = "tense", "战况紧张，用简短有反应的一句话解说，保持和观众交流"
     elif screen == "battle" and not settled:
-        mode, label = "battle", "正在打牌，自然解说当下，优先回应观众"
+        mode, label = "battle", "正在打牌，先专注操作；开场可以来一句，之后单句和连招总结穿插着说，优先回应观众"
     elif screen in ("reward", "campfire", "shop", "map", "event", "loot", "hall", "run_end") or settled:
         mode, label = "rest", "正在选择或结算，可以顺着聊天自然多说一两句"
     else:
         mode, label = "neutral", "自然闲聊，句子有长有短，不必每次追问"
     return {"mode": mode, "label": label, "max_chars": 18 if mode == "tense" else 26 if mode == "battle" else 40}
+
+
+def battle_key(state):
+    """同一场战斗的稳定标识：开场判定和事件去重共用。"""
+    run = state.get("run") or {}
+    battle = state.get("battle") or {}
+    run_key = tuple(str(run.get(k) or "") for k in ("run_id", "id", "seed", "run_seed", "character"))
+    enemies = tuple(str(e.get("id") or e.get("name") or i) for i, e in enumerate(battle.get("enemies") or []))
+    return (run_key, (battle.get("life") or {}).get("battle_id") or battle.get("battle_id")
+            or (run.get("act"), run.get("floor"), enemies))
 
 
 LINES = {
@@ -81,10 +91,8 @@ class GameCommentary:
     def observe(self, state):
         screen, run, battle = state.get("screen"), state.get("run") or {}, state.get("battle") or {}
         hp, maximum = number(battle.get("hp", run.get("hp"))), number(battle.get("max_hp", run.get("max_hp")))
-        run_key = tuple(str(run.get(k) or "") for k in ("run_id", "id", "seed", "run_seed", "character"))
-        enemies = tuple(str(e.get("id") or e.get("name") or i) for i, e in enumerate(battle.get("enemies") or []))
-        key = (run_key, (battle.get("life") or {}).get("battle_id") or battle.get("battle_id")
-               or (run.get("act"), run.get("floor"), enemies))
+        key = battle_key(state)
+        run_key = key[0]
         relics = tuple(str(r) for r in run.get("relics") or [])
         previous = self.previous
         same_run = previous is not None and previous["run"] == run_key
@@ -138,8 +146,9 @@ class GameCommentary:
     def prompt(self, state, *, emotional_value=True):
         situation = scene(state)
         prompt = ("\n【直播说话节奏】" + situation["label"]
-                  + f"。本次 say 请说一句约{min(situation['max_chars'], 30)}字的自然口语，保持边玩边聊，"
-                  "也不要提前宣告尚未发生的胜利、回血或奖励。")
+                  + f"。say 可以留空，不必每一步都解说，但别长时间不吭声；"
+                  f"想说时用一句约{min(situation['max_chars'], 30)}字的自然口语，"
+                  "保持边玩边聊，也不要提前宣告尚未发生的胜利、回血或奖励。")
         moment = self.moment()
         if moment:
             prompt += ("\n【刚发生的真实变化】" + json.dumps(moment["facts"], ensure_ascii=False)
@@ -154,6 +163,42 @@ class GameCommentary:
             return ""
         kind = moment["kind"]
         return LINES[kind][self.counts[kind] % len(LINES[kind])]
+
+    def context_line(self, state):
+        """冷场兜底必须贴着当前局面，不能只说空泛的“继续”。"""
+        def pick(*lines):
+            recent = list(self.recent)
+            return min(lines, key=lambda line: max(
+                (i + 1 for i, old in enumerate(recent) if old == line), default=0))
+
+        screen = state.get("screen")
+        battle, run = state.get("battle") or {}, state.get("run") or {}
+        hp = number(battle.get("hp", run.get("hp")))
+        maximum = number(battle.get("max_hp", run.get("max_hp")))
+        energy = number(battle.get("energy"))
+        hand = battle.get("hand") or []
+        enemies = [e for e in battle.get("enemies") or [] if e.get("alive", True)]
+        incoming = sum(max(0, number((e.get("intent") or {}).get("value")) or 0)
+                       * max(1, number((e.get("intent") or {}).get("hits")) or 1)
+                       for e in enemies if (e.get("intent") or {}).get("type") == "attack")
+        if screen == "battle":
+            if hp is not None and maximum and hp > 0 and hp / maximum <= 0.3:
+                return pick(f"血就剩 {hp}，这回合先别贪。", f"血不多了，先稳住这 {hp} 点。")
+            if incoming and hp is not None and incoming >= hp:
+                return pick(f"对面这轮要打 {incoming}，得先想好怎么挡。", "这波伤害不小，我先架住。")
+            if energy == 0:
+                return pick("能量见底了，这回合先收手。", "没能量了，先看对面怎么动。")
+            if hand:
+                return pick(f"手里还有 {len(hand)} 张牌，我看看怎么排。", "这几张牌得排个顺序。")
+            return pick("这手先看清局面再动。", "先别急，我看看这回合怎么接。")
+        return {
+            "reward": "这几张奖励得挑一张真能用的。",
+            "map": "下一条路得挑稳一点。",
+            "shop": "先看看钱够不够，别乱花。",
+            "campfire": "先喘口气，再决定怎么强化。",
+            "event": "这个事件得看清楚再选。",
+            "hall": "先确认这一局怎么开，再出发。",
+        }.get(screen, "先看清眼前这一步。")
 
     def filler(self, state):
         """模型漏写或跑题时，用一句贴合局面的短解说补上，不再多等一轮。"""

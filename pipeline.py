@@ -1,4 +1,5 @@
 import asyncio
+import collections
 import itertools
 import logging
 import random
@@ -22,7 +23,16 @@ TYPE_NAMES = {"enter": "进房", "follow": "关注", "danmaku": "弹幕", "gift"
 PRIORITY = {"farewell": -1, "manual": 0, "superchat": 0, "guard": 0, "gift": 1, "danmaku": 2, "follow": 2,
             "enter": 3, "reaction": 3, "like": 4, "interaction": 4, "narration": 5}
 MERGE_BY_TYPE = ("enter", "follow", "like")
+# 游戏解说描述的只是生成那一刻的画面；排队等欢迎超过这个时间就换说当前局势。
+NARRATION_FRESH_AFTER = 5.0
+# 正常中文语速约 5 字/秒；TTS 偶发复读时按文本长度给约 2 倍余量的上限，超了就掐断。
+SPEECH_SECONDS_PER_CHAR = 0.35
+SPEECH_CAP_EXTRA = 4.0
 _seq = itertools.count(1)
+
+
+def speech_cap(text):
+    return max(8.0, len(text or "") * SPEECH_SECONDS_PER_CHAR + SPEECH_CAP_EXTRA)
 
 
 def _split(s):
@@ -73,6 +83,7 @@ class Pipeline:
         self.paused = False
         self.last_seen = {}
         self.merging = {}
+        self._enter_times = collections.deque()
         self.current = None
         self._recovering = False
         self._spoken_ids = set()
@@ -95,6 +106,18 @@ class Pipeline:
         if f.get("rename_default", True) and (not name or "*" in name or re.fullmatch(r"bili_\d+", name)):
             name = "新朋友"
         return name[: int(f.get("name_max_len", 12))]
+
+    def _crowd_now(self):
+        """短时间内进房人数达到阈值：这段热闹期只报“新朋友”，不再挨个念名字。"""
+        ec = self.cfg["events"].get("enter", {})
+        count = int(ec.get("crowd_count", 0) or 0)
+        window = float(ec.get("crowd_window", 0) or 0)
+        if count <= 0 or window <= 0:
+            return False
+        now = time.monotonic()
+        while self._enter_times and now - self._enter_times[0] > window:
+            self._enter_times.popleft()
+        return len(self._enter_times) >= count
 
     def _reject(self, ev):
         """返回拒绝原因，None 表示通过。"""
@@ -178,6 +201,7 @@ class Pipeline:
                 not ev.get("test") and self.cfg["events"]["enter"].get("supporter_welcome", True)
                 and self.supporters.contains(room, ev.get("uid")))
         if ev["type"] == "danmaku" and self.app.songs.on_danmaku(ev):
+            log.info("弹幕 %s：%s -> 点歌指令", ev.get("name"), ev.get("text", ""))
             self.app.push("event", {"type": "danmaku", "tname": "点歌", "desc": describe(ev), "skip": None,
                                     "test": bool(ev.get("test")), **badge(ev)})
             return
@@ -186,6 +210,8 @@ class Pipeline:
             if rule:
                 ev["fixed_rule"] = dict(rule)
         reason = "已暂停" if self.paused else self._reject(ev)
+        if ev["type"] == "danmaku":
+            log.info("弹幕 %s：%s -> %s", ev.get("name"), ev.get("text", ""), reason or "进入回复队列")
         self.app.push("event", {"type": ev["type"], "tname": TYPE_NAMES.get(ev["type"], ev["type"]),
                                 "desc": describe(ev) + ("（命中固定回复）" if ev.get("fixed_rule") else ""),
                                 "skip": reason, "test": bool(ev.get("test")), **badge(ev)})
@@ -196,6 +222,10 @@ class Pipeline:
         ec = self.cfg["events"][t]
         win = float(ec.get("merge_window", 0) or 0)
         now = time.time()
+        if t == "enter":
+            if not ev.get("test"):
+                self._enter_times.append(time.monotonic())
+            ev["_crowd"] = self._crowd_now()
         if t in MERGE_BY_TYPE and win > 0:
             # 送礼观众按 UID 单独合并，避免把同批普通观众也说成送过礼物。
             key = (t, ev["uid"]) if t == "enter" and ev.get("_gift_supporter") else t
@@ -229,6 +259,11 @@ class Pipeline:
             ev["name"] = "、".join(shown[:-1]) + ("和" if len(shown) > 1 else "") + shown[-1]
             if len(names) > k:
                 ev["name"] += f"等{len(names)}位朋友"
+            if ev["type"] == "enter":
+                crowd_count = int(self.cfg["events"]["enter"].get("crowd_count", 0) or 0)
+                ev["_crowd"] = (not ev.get("_gift_supporter") and (
+                    bool(ev.get("_crowd")) or self._crowd_now()
+                    or (crowd_count > 0 and len(names) >= crowd_count)))
         if ev["type"] == "gift":
             minv = float(self.cfg["events"]["gift"].get("min_value", 0) or 0)
             if ev.get("paid") and ev.get("value", 0) < minv:
@@ -251,6 +286,11 @@ class Pipeline:
             banner = getattr(self.app, "gift_banner", None)
             if banner is not None:
                 banner.trigger(ev)
+        if ev["type"] == "narration":
+            # 解说跟着画面走：新的一句已经在排队时，旧的绝不能再补播。
+            for old in [j for j in self.jobs if j["type"] == "narration"]:
+                self.jobs.remove(old)
+                self._mark_done(old["id"])
         job = {"id": next(_seq), "type": ev["type"], "ev": ev, "text": text, "ts": time.time(),
                "prio": PRIORITY.get(ev["type"], 3)}
         self.jobs.append(job)
@@ -280,6 +320,26 @@ class Pipeline:
     def narrate(self, text, emotion=""):
         """普通游戏解说排在观众互动后面，保留手动播报的原有优先级。"""
         return self.say(text, emotion, kind="narration")
+
+    def narrate_fresh(self, text, emotion=""):
+        """游戏解说最新优先：丢掉排队/正在播的旧游戏解说，直接接当前这句。"""
+        for job in [j for j in self.jobs if j["type"] in ("narration", "reaction")]:
+            self.jobs.remove(job)
+            self._mark_done(job["id"])
+        keep = []
+        while True:
+            try:
+                item = self.play_q.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if item.get("type") in ("narration", "reaction"):
+                self._mark_done(item["id"])
+            else:
+                keep.append(item)
+        for item in keep:
+            self.play_q.put_nowait(item)
+        # 正在播的那句让它说完，只丢弃排队中的旧游戏解说；否则会频繁切句。
+        self.react(text, emotion)
 
     def react(self, text, emotion=""):
         """真实变化的短反应优先于闲聊，排队太久就作废，不播过时的惊呼。"""
@@ -331,6 +391,26 @@ class Pipeline:
     def _expired(item):
         return time.monotonic() >= item.get("expires_at", float("inf"))
 
+    def _refresh_narration(self, job):
+        """排队太久的解说改说当前画面，避免欢迎结束后播出进房前的旧局势。"""
+        waited = time.time() - job["ts"]
+        if waited < NARRATION_FRESH_AFTER or job["text"] is None:
+            return
+        dt = getattr(self.app, "dt", None)
+        fresh = getattr(dt, "fresh_commentary", None) if dt is not None else None
+        if not callable(fresh) or not getattr(dt, "running", False):
+            return
+        try:
+            line = fresh() or ""
+        except Exception as e:
+            log.warning("读取当前画面失败：%s", e)
+            return
+        if not line or line == job["text"]:
+            return
+        log.info("解说排队 %.1f 秒，改说当前画面：%s", waited, line)
+        job["text"] = job["ev"]["text"] = line
+        job["ev"]["emotion"] = ""
+
     async def _gen_worker(self):
         while True:
             await self.has_job.wait()
@@ -352,6 +432,7 @@ class Pipeline:
                 self.app.push("log", {"level": "warn", "msg": f"等待超过 {int(max_wait)} 秒，放弃：{describe(job['ev'])}"})
                 self._mark_done(job["id"])
                 continue
+            self._refresh_narration(job)
             dt = getattr(self.app, "dt", None)
             dt = dt if dt is not None and dt.running else None
             try:
@@ -439,6 +520,11 @@ class Pipeline:
                     t0 = time.time()
                     item["pcm"], item["sr"] = await self.app.engine.synth(tts, item["text"])
                     item["synth_s"] = round(time.time() - t0, 1)
+                    pcm, sr = item["pcm"], item["sr"]
+                    if pcm is not None and sr and len(pcm) / sr > speech_cap(item["text"]):
+                        item["pcm"] = pcm[: int(speech_cap(item["text"]) * sr)]
+                        self.app.push("log", {"level": "warn", "msg":
+                            f"语音疑似重复生成，已截断（{len(pcm) / sr:.0f} 秒）：{item['text'][:20]}"})
                 except Exception as e:
                     self.app.push("log", {"level": "error", "msg": f"语音合成失败：{e}"})
                     item["pcm"] = None
@@ -461,23 +547,36 @@ class Pipeline:
         t0, acc, env_n, sr = time.monotonic(), [], 0, None
         audio_s = 0.0
         generated_s = 0.0
+        cap = speech_cap(text)
         error = None
+        runaway = False
+        stream = None
         try:
             await loop.run_in_executor(None, self.app.player.begin_stream, dev, vol,
                                        self.cfg["tts"].get("stream_buffer_seconds", 0.8))
-            async for pcm, r in ttsd.synth_stream(text, self.cfg["tts"]):
+            stream = ttsd.synth_stream(text, self.cfg["tts"])
+            async for pcm, r in stream:
                 sr = r
                 if not acc:
                     item["synth_s"] = round(time.monotonic() - t0, 2)  # 首块延迟；开口还含预缓冲与设备延迟
                 acc.append(pcm)
                 audio_s += len(pcm) / r
+                if audio_s > cap:
+                    # 一句话生成出几倍长度的音频，通常是模型在复读；继续喂会把整条队列堵死。
+                    runaway = True
+                    break
                 env_n = self._push_env(item, acc, sr, env_n)
                 await loop.run_in_executor(None, self.app.player.feed_stream, pcm, r)
             generated_s = time.monotonic() - t0
         except Exception as e:
             error = e
         finally:
-            if error is not None:
+            if stream is not None:
+                try:
+                    await stream.aclose()
+                except Exception:
+                    pass
+            if error is not None or runaway:
                 # 缓冲里可能还压着半句，不 abort 的话 end_stream 会一直等它放完。
                 await loop.run_in_executor(None, self.app.player.skip)
             await loop.run_in_executor(None, self.app.player.end_stream)
@@ -492,6 +591,11 @@ class Pipeline:
             if stats["output_underflows"]:
                 self.app.push("log", {"level": "warn", "msg":
                     f"音频设备输出欠载 {stats['output_underflows']} 次，请检查音频设备或 CPU 占用"})
+        if runaway:
+            log.warning("流式语音时长异常（%.0f 秒），已截断：%s", audio_s, text)
+            self.app.push("log", {"level": "warn", "msg":
+                f"语音疑似重复生成，已截断（{audio_s:.0f} 秒）：{text[:20]}"})
+            return
         if error is None:
             return
         if acc:

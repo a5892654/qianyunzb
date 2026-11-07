@@ -130,6 +130,16 @@ def _ttsd_pids(script):
     return pids
 
 
+def owns_port(cfg_tts) -> bool:
+    """端口占用者是不是同脚本拉起的 ttsd（本软件上次被强杀后遗留的）。"""
+    try:
+        port = int(_base(cfg_tts).rsplit(":", 1)[-1])
+    except ValueError:
+        port = 8899
+    script = str(cfg_tts.get("ttsd_script", r"C:\gamedata\ttsd\ttsd.py"))
+    return bool(_listening_pids(port) & _ttsd_pids(script))
+
+
 def kill_stale(cfg_tts, on_status=None):
     """拉起前清掉残留的 ttsd：每份模型常驻约 4.8GB 显存，
     端口不冲突时完全看不出来，直到新实例加载时把显卡挤爆（表现为引擎无声消失）。
@@ -229,8 +239,11 @@ async def _ensure(cfg_tts, on_status):
     if state.get("ok") and await alive(cfg_tts):
         return True
     if state and not owned():
-        on_status("语音端口由外部引擎占用，无法核对或切换模型；请先关闭该外部语音服务")
-        return False
+        if not await asyncio.to_thread(owns_port, cfg_tts):
+            on_status("语音端口由外部引擎占用，无法核对或切换模型；请先关闭该外部语音服务")
+            return False
+        on_status("正在接管上次遗留的语音引擎并切换到所选模型…")
+        await asyncio.to_thread(kill_stale, cfg_tts, on_status)
     if not cfg_tts.get("ttsd_auto_start", True):
         return False
     if not spawn(cfg_tts, on_status):

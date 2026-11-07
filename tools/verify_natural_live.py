@@ -270,7 +270,7 @@ class NaturalPipelineTests(InteractionTestCase):
         await wait_until(lambda: app.pipe.spoken_done(job))
         app.player.play_blocking.assert_not_called()
 
-    async def test_game_reaction_uses_real_changes_and_normal_cards_keep_talking(self):
+    async def test_game_reaction_is_immediate_but_normal_cards_wait_for_a_combo(self):
         app, now = make_app()
         bridge = Mock()
         bridge.screen.return_value = {"screen": "battle"}
@@ -285,7 +285,8 @@ class NaturalPipelineTests(InteractionTestCase):
         self.assertEqual(second["say"], "这一张继续。")
         third = await player.step(state(10, turn=3))
         self.assertIn("疼", third["say"])
-        self.assertEqual([j["type"] for j in app.pipe.jobs], ["narration", "narration", "reaction"])
+        # 普通出牌攒着等连招，真实掉血反应不等。
+        self.assertEqual([j["type"] for j in app.pipe.jobs], ["narration", "reaction"])
         self.assertIn("当前生命", player._ask.await_args.args[0])
         bridge.state.assert_not_called()
         self.assertEqual(bridge.end_turn.call_count, 3)

@@ -45,24 +45,26 @@ class ResponsiveLiveTests(InteractionTestCase):
         self.assertEqual(item["type"], "danmaku")
         self.assertEqual(app.brain.openai.ask.await_count, 2)
 
-    async def test_empty_or_off_topic_game_lines_do_not_create_silent_actions(self):
+    async def test_empty_or_off_topic_game_lines_stay_silent_until_a_real_combo_line(self):
         app, now = make_app()
         bridge = Mock()
         bridge.screen.return_value = {"screen": "battle"}
         bridge.end_turn.return_value = {"ok": True}
         player = Player({}, bridge, pipe=app.pipe, speak=app.pipe.narrate)
         player.commentary.clock = lambda: now[0]
-        answers = iter(("", "左下角白饭有三碗。", "", ""))
+        answers = iter(("", "左下角白饭有三碗。", "", "", "这几手先垫着，稳住了。"))
         player._ask = AsyncMock(side_effect=lambda text: {"action": "end", "say": next(answers)})
         spoken = []
-        for turn in range(1, 5):
+        for turn in range(1, 6):
             result = await player.step(state(turn=turn))
             spoken.append(result["say"])
-        self.assertEqual(len(app.pipe.jobs), 4)
-        self.assertTrue(all(spoken))
-        self.assertTrue(all(a != b for a, b in zip(spoken, spoken[1:])))
+        self.assertEqual(spoken[:4], [""] * 4)
+        self.assertEqual(spoken[4], "这几手先垫着，稳住了。")
+        self.assertEqual([j["type"] for j in app.pipe.jobs], ["narration"])
+        self.assertEqual(app.pipe.jobs[0]["text"], spoken[4])
         self.assertFalse(any(mentions_rice(line) for line in spoken))
-        self.assertEqual(player._ask.await_count, 4)
+        self.assertIn("连招解说", player._ask.await_args.args[0])
+        self.assertEqual(player._ask.await_count, 5)
 
     async def test_rice_history_does_not_seed_proactive_topics(self):
         app, now = make_app()

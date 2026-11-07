@@ -11,7 +11,8 @@ import blivedm.models.web as wm
 from bilibili_api import Credential, user as bili_user
 
 log = logging.getLogger("bili")
-logging.getLogger("blivedm").setLevel(logging.ERROR)
+# 保留重连/心跳失败的 WARNING，否则弹幕连接断线重连期间丢消息在日志里完全看不出来
+logging.getLogger("blivedm").setLevel(logging.WARNING)
 
 UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
       "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")

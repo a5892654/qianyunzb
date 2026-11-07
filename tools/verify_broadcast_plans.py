@@ -65,7 +65,8 @@ class Harness(unittest.IsolatedAsyncioTestCase):
         app = types.SimpleNamespace(
             broadcast=br, livehime=lh, connect=AsyncMock(),
             pipe=Mock(say_job_id=Mock(return_value=1), spoken_done=Mock(return_value=True)),
-            pushes=[], ensure_game_and_dt=AsyncMock(return_value={"ok": True, "launched": False}),
+            pushes=[], notify_live_started=Mock(), sync_room_title=AsyncMock(),
+            ensure_game_and_dt=AsyncMock(return_value={"ok": True, "launched": False}),
             dt=types.SimpleNamespace(running=False), stop_dt=AsyncMock(),
             game=types.SimpleNamespace(sync=Mock()),
             cfg={"bili_cookie": "FAKE", "room_id": 0, "audio": {},
@@ -115,6 +116,20 @@ class ValidationTests(Harness):
                 DailyBroadcastSchedule._clean_plans(rows)
             self.assertIn(want, str(ctx.exception))
 
+    def test_clean_plans_normalizes_playlist(self):
+        plans = DailyBroadcastSchedule._clean_plans([
+            {"start": "20:00", "stop": "23:00", "game": "demontower",
+             "playlist": "https://music.163.com/playlist?id=18536518586", "playlist_name": "zb"},
+            {"start": "23:00", "stop": "01:00", "game": "stardew"},
+        ])
+        self.assertEqual((plans[0]["playlist"], plans[0]["playlist_name"]), ("18536518586", "zb"))
+        self.assertEqual((plans[1]["playlist"], plans[1]["playlist_name"]), ("", ""))
+        for value in ("晴天", "https://music.163.com/song?id=123"):
+            with self.subTest(playlist=value), self.assertRaises(ValueError) as ctx:
+                DailyBroadcastSchedule._clean_plans([
+                    {"start": "20:00", "stop": "22:00", "game": "demontower", "playlist": value}])
+            self.assertIn("歌单", str(ctx.exception))
+
     async def test_save_plans_requires_login_and_plans(self):
         scheduler, app, _ = self.make()
         cases = [
@@ -137,12 +152,15 @@ class ValidationTests(Harness):
     async def test_save_plans_persists_schedule_copy(self):
         scheduler, app, _ = self.make()
         payload = {"enabled": True, "authorized": True, "mode": "managed",
-                   "plans": [{"id": "a", "start": "20:00", "stop": "23:00", "game": "demontower"},
+                   "plans": [{"id": "a", "start": "20:00", "stop": "23:00", "game": "demontower",
+                              "playlist": "18536518586", "playlist_name": "zb"},
                              {"id": "b", "start": "23:00", "stop": "01:00", "game": "stardew"}]}
         status = await scheduler.save_plans(payload)
         saved = SAVED[-1]["broadcast"]["schedule"]
         self.assertTrue(saved["enabled"] and saved["plans_enabled"])
         self.assertEqual(len(saved["plans"]), 2)
+        self.assertEqual(saved["plans"][0]["playlist"], "18536518586")
+        self.assertEqual(saved["plans"][1]["playlist"], "")
         self.assertEqual(status["plans"][1]["game"], "stardew")
         self.assertTrue(status["next_start"] and status["next_stop"])
         self.assertNotIn("hwnd", saved["plans"][0])
@@ -150,7 +168,7 @@ class ValidationTests(Harness):
         app.broadcast.capture.previewing = True
         app.broadcast.capture.hwnd = 1111
         app.broadcast.capture.audio_device = 2222
-        await scheduler.save({"enabled": True, "authorized": True, "title": "千音", "area_id": 591,
+        await scheduler.save({"enabled": True, "authorized": True,
                               "start_time": "08:00", "stop_time": "18:00", "hwnd": 1111,
                               "audio_device": 2222})
         self.assertFalse(SAVED[-1]["broadcast"]["schedule"]["plans_enabled"])
@@ -172,12 +190,22 @@ class SchedulingTests(Harness):
         self.assertEqual(scheduler.settings["last_starts"]["night"], "2026-10-01")
         self.assertEqual(scheduler.active_plan_id, "night")
         self.assertEqual(app.cfg["game"]["active"], "demontower")
+        app.sync_room_title.assert_awaited_once_with("demontower")
+        app.notify_live_started.assert_called_once_with("")
 
         app.broadcast.running = True
         app.broadcast.sources.return_value = sources((3333, "DemonTower"))
         await self.fire(scheduler, now, "2026-10-01 23:00")
         app.broadcast.stop.assert_awaited_once()
         self.assertEqual(scheduler.settings["last_stops"]["night"], "2026-10-01")
+
+    async def test_plan_start_triggers_plan_playlist(self):
+        plans = [{"id": "night", "start": "20:00", "stop": "23:00", "game": "demontower",
+                  "playlist": "999", "playlist_name": "夜间"}]
+        scheduler, app, now = self.make(plans=plans)
+        app.broadcast.sources.return_value = sources((3333, "DemonTower"))
+        await self.fire(scheduler, now, "2026-10-01 20:00")
+        app.notify_live_started.assert_called_once_with("999")
 
     async def test_plan_switches_game_and_window(self):
         plans = [{"id": "sv", "start": "20:00", "stop": "23:00", "game": "stardew"}]
@@ -188,7 +216,7 @@ class SchedulingTests(Harness):
         await self.fire(scheduler, now, "2026-10-01 20:00")
         app.stop_dt.assert_awaited_once()
         self.assertEqual(app.cfg["game"]["active"], "stardew")
-        self.assertEqual(app.cfg["broadcast"]["title"], "星露谷物语｜AI 游戏直播")
+        self.assertEqual(app.cfg["broadcast"]["title"], "恶魔之塔 ZERO｜AI 游戏直播")
         app.game.sync.assert_called_once()
         preview = app.broadcast.preview.await_args.args[0]
         self.assertEqual(preview, {"hwnd": 4444, "audio_device": 2222})

@@ -50,7 +50,7 @@ class CueTests(unittest.TestCase):
 class ReplyTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.cfg = copy.deepcopy(DEFAULTS)
-        self.cfg["ai"]["persona"] = "自定义：温和沉稳的电台主持人。"
+        self.cfg["ai"].update(style="custom", persona="自定义：温和沉稳的电台主持人。")
         self.brain = Brain()
 
     async def test_both_backends_receive_current_feeling_without_extra_generation(self):

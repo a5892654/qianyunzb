@@ -47,6 +47,24 @@ def battle_state(estus=None, potions=None, hp=20, max_hp=40):
             "run": {"character": "灰烬骑士", "hp": hp, "max_hp": max_hp, "souls": 120}}
 
 
+def shop_state():
+    return {"screen": "shop", "shop": {
+        "souls": 120,
+        "tiles": [
+            {"slot": 0, "kind": "card", "id": "steel_slash", "name": "钢斩", "desc": "造成 7 伤害。",
+             "rarity": "common", "element": "steel", "type": "attack", "price": 47,
+             "sold": False, "affordable": True},
+            {"slot": 1, "kind": "relic", "id": "parasite", "name": "寄生样本",
+             "desc": "每3场战斗随机获得1张诅咒牌，但胜利时额外获得随机遗物",
+             "rarity": "rare", "element": "", "type": "", "price": 200,
+             "sold": False, "affordable": False},
+            {"slot": 2, "kind": "item", "id": "venom_pot", "name": "毒壶", "desc": "施加 6 层中毒。",
+             "rarity": "common", "element": "", "type": "", "price": 48,
+             "sold": True, "affordable": True},
+        ],
+    }}
+
+
 def campfire_state():
     return {"screen": "campfire", "campfire": {"options": [
         {"slot": 0, "text": "休息：回复 30% 生命", "enabled": True, "action": True},
@@ -56,11 +74,16 @@ def campfire_state():
 
 def soul_forge_state(**over):
     body = {"window_id": "forge1", "revision": "f1", "souls": 150, "free": False,
-            "cards": [{"slot": 0, "id": "slash", "name": "横斩", "cost": 1, "type": "攻击", "forge_count": 0},
-                      {"slot": 1, "id": "guard", "name": "铁壁", "cost": 2, "type": "技能", "forge_count": 1}],
-            "selected": {"slot": 0, "id": "slash", "name": "横斩"},
-            "options": [{"slot": 0, "name": "强化伤害", "cost": 80, "affordable": True},
-                        {"slot": 1, "name": "附加格挡", "cost": 300, "affordable": False}],
+            "cards": [{"slot": 0, "id": "slash", "name": "横斩", "cost": 1, "type": "attack",
+                       "damage": 8, "block": 0, "desc": "造成 8 点伤害。", "forge_count": 0, "count": 2},
+                      {"slot": 1, "id": "guard", "name": "铁壁", "cost": 2, "type": "skill",
+                       "damage": 0, "block": 5, "desc": "获得 5 点格挡。", "forge_count": 1, "count": 1}],
+            "selected": {"slot": 0, "id": "slash", "name": "横斩", "type": "attack", "cost": 1,
+                         "damage": 8, "block": 0, "desc": "造成 8 点伤害。", "forge_count": 0},
+            "options": [{"slot": 0, "name": "淬炼锋刃", "type": "strengthen", "cost": 80,
+                         "preview": "伤害 8 → 11", "affordable": True},
+                        {"slot": 1, "name": "加固壁垒", "type": "strengthen_block", "cost": 300,
+                         "preview": "格挡 5 → 8", "affordable": False}],
             "selected_option": 0, "can_forge": True}
     body.update(over)
     return {"screen": "soul_forge", "window_id": "forge1", "soul_forge": body}
@@ -158,15 +181,27 @@ class ContractTests(unittest.TestCase):
         self.assertIn("[0] 休息：回复 30% 生命", text)
         self.assertNotIn("[0] 休息：回复 30% 生命（离开篝火）", text)
 
+    def test_view_shop_shows_names_effects_and_affordability(self):
+        text = view.render(shop_state())
+        self.assertIn("[0] 卡牌「钢斩」 普通/攻击 价 47", text)
+        self.assertIn("造成 7 伤害。", text)
+        self.assertIn("[1] 遗物「寄生样本」 稀有 价 200 (灵魂不够)", text)
+        self.assertIn("[2] 道具「毒壶」 普通 价 48 (已售出)", text)
+        self.assertIn('"action":"shop","slot":序号', text)
+        self.assertIn('"action":"shop","op":"leave"', text)
+
     def test_view_soul_forge_replaces_generic_overlay_body(self):
         text = view.render(soul_forge_state())
         self.assertIn("灵魂锻造，持有 150 灵魂", text)
         self.assertIn("window_id=forge1 revision=f1", text)
-        self.assertIn("[0] 横斩 费1 [攻击] 已锻0次", text)
-        self.assertIn("[1] 铁壁 费2 [技能] 已锻1次", text)
-        self.assertIn("已选卡: [0] 横斩", text)
-        self.assertIn("强化 [0] 强化伤害 价 80 ←已选", text)
-        self.assertIn("强化 [1] 附加格挡 价 300（灵魂不够）", text)
+        self.assertIn("[0] 横斩 费1 [攻击] 已锻0次 ×2 · 伤害8", text)
+        self.assertIn("[1] 铁壁 费2 [技能] 已锻1次 · 格挡5", text)
+        self.assertIn("造成 8 点伤害。", text)
+        self.assertIn("已选卡: [0] 横斩 费1 [攻击] 已锻0次", text)
+        self.assertIn("强化 [0] 淬炼锋刃 价 80 · 伤害 8 → 11 ★推荐 ←已选", text)
+        self.assertIn("强化 [1] 加固壁垒 价 300 · 格挡 5 → 8（灵魂不够）", text)
+        self.assertIn("【锻造参谋】", text)
+        self.assertIn("界面默认停在第一项", text)
         for shape in ('{"action":"forge","op":"card","slot":卡牌序号}',
                       '{"action":"forge","op":"option","slot":强化项序号}',
                       '{"action":"forge","op":"forge"}',
@@ -261,6 +296,10 @@ class ContractTests(unittest.TestCase):
     def test_system_prompt_protects_settings_and_boss_choice(self):
         self.assertIn("设置窗口只选「关闭」", SYSTEM)
         self.assertIn("Boss魂与章节奖励需要选择奖励", SYSTEM)
+
+    def test_system_prompt_has_battle_order_and_shop_advice(self):
+        for word in ("战斗决策顺序", "作战参谋", "斩杀窗口", "商店决策", "卡牌奖励"):
+            self.assertIn(word, SYSTEM)
 
     def test_system_prompt_uses_current_skin_emotions(self):
         emotions = [{"name": "开心", "motion": "idle", "keywords": "拿下"}]
@@ -406,6 +445,18 @@ class PlayerTests(unittest.IsolatedAsyncioTestCase):
         player._ask.return_value["emotion"] = "期待"
         await player.step()
         speak.assert_called_once_with("领到了", "")
+
+    async def test_battle_play_carries_card_id_from_seen_state(self):
+        bridge = Mock()
+        state = battle_state()
+        state["battle"]["hand"][0]["id"] = "slash"
+        bridge.state.return_value = state
+        bridge.screen.return_value = {"screen": "battle"}
+        bridge.play_card.return_value = {"ok": True}
+        player = Player({}, bridge, narrate=False)
+        player._ask = AsyncMock(return_value={"action": "play", "slot": 0, "target": 0})
+        await player.step()
+        bridge.play_card.assert_called_once_with(0, "slash", 0)
 
     async def test_busy_window_does_not_ask_or_click(self):
         player, bridge, speak = self.make_player()

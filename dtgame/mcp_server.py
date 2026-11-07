@@ -105,7 +105,7 @@ TOOLS = [
     },
     {
         "name": "shop_action",
-        "description": "商店界面操作。slot 购买货架某项；或用 op=leave 离开商店。",
+        "description": "商店界面操作。slot 购买货架某项（游戏内购入确认由桥自动完成）；或用 op=leave 离开商店。",
         "inputSchema": _schema({
             "slot": {"type": "integer", "description": "货架序号"},
             "op": {"type": "string", "description": "填 leave 表示离开商店"},

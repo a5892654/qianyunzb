@@ -120,7 +120,6 @@ class Controller:
         self.begin_calls = []
         self.end_calls = []
         self.account_calls = 0
-        self.areas_calls = 0
         self.preview_calls = []
         self.stop_preview_calls = 0
         self.output_starts = []
@@ -155,12 +154,8 @@ class FakePlatform:
         controller.account_calls += 1
         return dict(controller.account_result)
 
-    async def areas(self):
-        controller.areas_calls += 1
-        return [{"id": 591, "name": "单机游戏", "parent": "游戏"}]
-
-    async def begin(self, title, area_id):
-        controller.begin_calls.append((title, area_id))
+    async def begin(self):
+        controller.begin_calls.append(True)
         if controller.begin_delay:
             await asyncio.sleep(controller.begin_delay)
         if controller.begin_raises is not None:
@@ -436,7 +431,7 @@ def sel(hwnd=1111, audio=2222, **over):
     return d
 
 
-START_ARGS = {"title": "千音直播测试", "area_id": 591, "confirm": True}
+START_ARGS = {"confirm": True}
 
 
 async def ok_preview(b, hwnd=1111, audio=2222):
@@ -459,7 +454,7 @@ async def t_b01_no_confirm():
     r = await b.start({**sel(), **START_ARGS, "confirm": False})
     assert_true(not r.get("ok"), "confirm=False 竟成功开播")
     assert_true("确认" in r.get("error", ""), "错误应提示确认: " + str(r))
-    args = {**sel(), "title": "t", "area_id": 591}
+    args = {**sel()}
     r2 = await b.start(args)
     assert_true(not r2.get("ok"), "缺 confirm 字段竟成功开播")
     no_write(controller, "无确认不得触达平台/输出")
@@ -489,24 +484,6 @@ async def t_b02_bad_selection():
     no_write(controller, "错参数不得触达平台/输出")
     assert_eq(controller.preview_calls, [], "错参数不得触达 capture 预览")
     record("B02 hwnd/audio 非法类型与0值全部拒绝（含 bool）", PASS)
-
-
-async def t_b03_bad_title_area():
-    controller.reset()
-    app, b = fresh_broadcast()
-    await ok_preview(b)
-    bad_titles = [{"title": "", "area_id": 591}, {"title": "   ", "area_id": 591},
-                  {"title": "x" * 61, "area_id": 591}, {"title": 123, "area_id": 591}]
-    for over in bad_titles:
-        r = await b.start({**sel(), **START_ARGS, **over})
-        assert_true(not r.get("ok"), "坏标题被接受 " + str(over) + ": " + str(r))
-    bad_areas = [{"area_id": 0}, {"area_id": -3}, {"area_id": "591"},
-                 {"area_id": True}, {"area_id": None}]
-    for over in bad_areas:
-        r = await b.start({**sel(), **START_ARGS, **over})
-        assert_true(not r.get("ok"), "坏分区被接受 " + str(over) + ": " + str(r))
-    no_write(controller, "标题/分区非法不得触达平台")
-    record("B03 标题(空/超长/非str)与分区(0/负/字符串/bool)拒绝", PASS)
 
 
 async def t_b04_no_preview():
@@ -559,7 +536,7 @@ async def t_b07_live_happy_and_no_leak():
     assert_true(not any(k in r for k in ("url", "rtmp", "key")),
                 "start 返回多余字段: " + str(list(r)))
     assert_no_leak(r, "start 成功返回")
-    assert_eq(controller.begin_calls, [("千音直播测试", 591)], "begin 恰好一次")
+    assert_eq(controller.begin_calls, [True], "begin 恰好一次")
     assert_eq(controller.output_starts, [SECRET_URL], "url 仅内部传给 capture")
     st = b.status()
     assert_eq(st["phase"], "live", "capture ready 后 status 应 live")
@@ -770,7 +747,7 @@ async def t_b18_preview_reuses_same_session():
 
 
 BROADCAST_TESTS = [
-    t_b01_no_confirm, t_b02_bad_selection, t_b03_bad_title_area, t_b04_no_preview,
+    t_b01_no_confirm, t_b02_bad_selection, t_b04_no_preview,
     t_b05_preview_mismatch, t_b06_black_screen, t_b07_live_happy_and_no_leak,
     t_b08_concurrent_start, t_b09_other_stream_never_end, t_b10_encoder_fail,
     t_b11_stop_keeps_game_and_tts, t_b12_stop_fail_retry, t_b13_watch_stops_own_live,
@@ -822,7 +799,7 @@ async def phase_c():
     app.cfg = {"bili_cookie": PLACEHOLDER_COOKIE, "room_id": 0, "songs": {},
                "tts": {}, "ai": {}, "audio": {},
                # /api/broadcast/stop 走 schedule.stop_now，需真实 settings 结构（禁用态，不触发写盘）
-               "broadcast": {"title": "", "area_id": 0, "schedule": {"enabled": False, "start_time": "08:00",
+               "broadcast": {"area_id": 0, "schedule": {"enabled": False, "start_time": "08:00",
                                "stop_time": "18:00", "window_title": "", "audio_name": "",
                                "last_start": "", "last_stop": ""}}}
     app.ws = set()
@@ -965,14 +942,14 @@ async def phase_c():
         assert_true(ck.get("ok"), "停播后 cookie 应可写")
         record("C7 停播后账号路由恢复", PASS)
 
-        # C8 account/areas GET：安全返回、零写
+        # C8 account GET：安全返回、零写；分区读取路由已移除
         controller.reset()
         acc = await (await get(P + "account")).json()
         assert_no_leak(acc, "GET account")
-        ar = await (await get(P + "areas")).json()
-        assert_true(ar.get("ok") and ar.get("areas"), "areas 契约: " + str(ar))
-        no_write(controller, "GET account/areas")
-        record("C8 GET account/areas 安全只读", PASS)
+        ar = await get(P + "areas")
+        assert_eq(ar.status, 404, "GET areas 应已移除")
+        no_write(controller, "GET account")
+        record("C8 GET account 安全只读；areas 路由已移除", PASS)
     finally:
         await client.close()
         config.save, config.load = orig_save, orig_load

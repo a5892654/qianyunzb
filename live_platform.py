@@ -8,26 +8,25 @@ import time
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 
+import aiohttp
+
 from bili import parse_cookie
 from bilibili_api import live as bili_live
 from bilibili_api import user as bili_user
 from bilibili_api.exceptions import NetworkException, ResponseCodeException
 from bilibili_api.utils.network import Api, Credential
-from bilibili_api.utils.picture import Picture
 
 LiveRoom = bili_live.LiveRoom
 
-ROOM_UPDATE_URL = "https://api.live.bilibili.com/room/v1/Room/update"
 START_LIVE_URL = "https://api.live.bilibili.com/room/v1/Room/startLive"
+UPDATE_TITLE_URL = "https://api.live.bilibili.com/room/v1/Room/update"
 LIVE_TS_URL = "https://api.bilibili.com/x/report/click/now"
 # 直播姬通道的开播形态（社区 IHateLivehime 实测可用）：缺 version/build/ts
 # 会被 B站按 60024 拒绝；用静态旧版本走二维码认证，最新版会转 60043 外部验证
 START_CLIENT = {"version": "7.47.0.10269", "build": "10269"}
 START_APPKEY = "aae92bc66f3edfab"
 START_APPSEC = "af125a0d5279fd576c1b4418a3e8276d"
-PRE_LIVE_INFO_URL = "https://api.live.bilibili.com/xlive/app-blink/v1/preLive/UpdatePreLiveInfo"
 TIMEOUT_SECONDS = 15.0
-PICTURE_TIMEOUT_SECONDS = 30.0
 
 
 def _live_started_at(value):
@@ -109,29 +108,6 @@ def _friendly(exc: Exception) -> PlatformError:
             return PlatformError(MANUAL_HINTS[-412], 412)
         return PlatformError("连接 B站失败，请检查网络后重试")
     return PlatformError("B站请求失败，请稍后重试")
-
-
-## B站没有对外的「直播封面上传」接口（x/upload/web/image 一律 -400），
-## 网页直播中心实际走的是动态图床，所以复用库里的 Picture.upload。
-## 它返回的是 http 地址，而直播间只认 https，这里统一升级协议。
-async def _upload_cover_picture(data: bytes, mime: str, cred: Credential) -> str:
-    fmt = {"image/png": "png", "image/webp": "webp"}.get((mime or "").lower(), "jpg")
-    picture = Picture.from_content(data, fmt)
-    try:
-        async with asyncio.timeout(PICTURE_TIMEOUT_SECONDS):
-            await picture.upload(cred)
-    except asyncio.TimeoutError:
-        raise PlatformError("封面图片上传超时，请稍后重试") from None
-    except Exception as exc:
-        raise PlatformError("封面上传失败：%s" % _friendly(exc)) from None
-    url = str(picture.url or "")
-    if url.startswith("//"):
-        url = "https:" + url
-    elif url.startswith("http://"):
-        url = "https://" + url[len("http://"):]
-    if not url.startswith("https://"):
-        raise PlatformError("B站图床没有返回图片地址，请稍后重试")
-    return url
 
 
 def _validate_push_url(addr: str, code: str) -> str:
@@ -231,6 +207,7 @@ class BiliBroadcastPlatform:
                 # room_info.cover 有时指向已清理的动态链（会 404），keyframe 通常还在
                 result["cover_fallback"] = str(info.get("keyframe") or info.get("user_cover") or "")
                 result["notice"] = _notice_text(info)
+                result["area_id"] = int(info.get("area_id") or 0)
                 result["area_name"] = str(info.get("area_name") or "")
             except Exception as error:
                 raise _friendly(error) from None
@@ -238,28 +215,38 @@ class BiliBroadcastPlatform:
             result["error"] = NO_ROOM_HINT
         return result
 
-    async def areas(self) -> list:
-        """公开读取直播分区，无凭证、无写操作。"""
+    async def update_title(self, title: str) -> dict:
+        """按当前游戏改直播间标题；只动标题，不碰分区和封面。"""
+        text = str(title or "").strip()
+        if not 1 <= len(text) <= 60:
+            raise PlatformError("直播间标题需为 1 至 60 个字符")
+        info = await self.account()
+        room_id = int(info.get("room_id") or 0)
+        if not room_id:
+            raise PlatformError(info.get("error") or NO_ROOM_HINT)
+        token = self.credential.bili_jct or ""
+        if not token:
+            raise PlatformError("B站登录状态缺少校验信息，请重新扫码登录")
+        headers = {"User-Agent": "Mozilla/5.0",
+                   "Referer": "https://link.bilibili.com/p/center/index",
+                   "Cookie": self.cookie + "; os=pc"}
+        payload = {"room_id": room_id, "title": text, "csrf": token, "csrf_token": token}
         try:
-            async with asyncio.timeout(TIMEOUT_SECONDS):
-                data = await bili_live.get_area_info()
-        except Exception as exc:
-            raise _friendly(exc) from None
-        out = []
-        for parent in data:
-            for area in parent["list"]:
-                if str(area.get("lock_status", "0")) == "0":
-                    out.append({"id": int(area["id"]), "name": str(area["name"]), "parent": str(parent["name"])})
-        return out
-
-    async def _update_title(self, room_id: int, title: str) -> None:
-        try:
-            async with asyncio.timeout(TIMEOUT_SECONDS):
-                await Api(url=ROOM_UPDATE_URL, method="POST", verify=True,
-                          credential=self.credential).update_data(
-                    room_id=room_id, title=title).result
-        except Exception as exc:
-            raise _friendly(exc) from None
+            async with aiohttp.ClientSession(headers=headers) as session:
+                async with session.post(UPDATE_TITLE_URL, data=payload,
+                                        timeout=aiohttp.ClientTimeout(total=TIMEOUT_SECONDS)) as response:
+                    data = await response.json(content_type=None)
+        except asyncio.TimeoutError:
+            raise PlatformError("修改直播间标题超时，请检查网络后重试") from None
+        except aiohttp.ClientError:
+            raise PlatformError("连接B站修改标题失败，请检查网络后重试") from None
+        if not isinstance(data, dict):
+            raise PlatformError("修改直播间标题失败：B站返回了异常数据")
+        code = int(data.get("code") or 0)
+        if code != 0:
+            message = _CTRL_RE.sub("", str(data.get("message") or data.get("msg") or "")).strip()[:60]
+            raise PlatformError("修改直播间标题失败：" + (message or f"B站返回 {code}"), code)
+        return {"ok": True, "title": text}
 
     async def _stop_started_room(self) -> bool:
         """关闭本实例刚开启的房间；成功 True，失败 False 且保留 started_room_id 供重试。"""
@@ -304,10 +291,8 @@ class BiliBroadcastPlatform:
         except Exception as exc:
             raise _friendly(exc) from None
 
-    async def begin(self, title: str, area_id: int) -> dict:
-        """用户点击开播后调用：改标题 -> 开播，仅内存返回 {room_id, url}。"""
-        if not str(title or "").strip():
-            raise PlatformError("直播标题不能为空")
+    async def begin(self) -> dict:
+        """用户点击开播后调用：只开播，沿用直播间当前分区、标题和封面。"""
         if self.credential.bili_jct is None:
             raise PlatformError("Cookie 缺少 bili_jct 字段，无法执行开播，请重新扫码登录")
         info = await self.account()  # 确认当前账号本人的房间状态
@@ -319,9 +304,11 @@ class BiliBroadcastPlatform:
         room_id = int(info.get("room_id") or 0)
         if not room_id:
             raise PlatformError(info.get("error") or NO_ROOM_HINT)
+        area_id = int(info.get("area_id") or 0)
+        if area_id <= 0:
+            raise PlatformError("读取不到直播间当前分区，请先在直播姬里设置分区后再开播")
         self.room = LiveRoom(room_id, credential=self.credential)
-        await self._update_title(room_id, str(title).strip())
-        resp = await self._start_live(room_id, int(area_id))
+        resp = await self._start_live(room_id, area_id)
         self.started_room_id = room_id  # start 成功即登记，回滚只针对此房间
         data = resp if isinstance(resp, dict) else {}
         if data.get("need_face_auth") or data.get("need_auth"):
@@ -339,37 +326,6 @@ class BiliBroadcastPlatform:
             await self._stop_started_room()
             raise
         return {"room_id": room_id, "url": url}
-
-    async def _session(self):
-        from bili import make_session
-        return make_session(self.cookie)
-
-    async def update_cover(self, data: bytes, filename: str, mime: str) -> dict:
-        if self.credential.bili_jct is None or not self.cookie:
-            raise PlatformError("请先扫码登录主播账号，再修改直播间封面")
-        session = await self._session()
-        try:
-            url = await _upload_cover_picture(data, mime, self.credential)
-            host = (urllib.parse.urlparse(url).hostname or "").lower()
-            if not (host == "hdslb.com" or host.endswith(".hdslb.com")):
-                raise PlatformError("B站图床返回了意料之外的地址，已放弃更新封面")
-            async with asyncio.timeout(TIMEOUT_SECONDS):
-                async with session.post(PRE_LIVE_INFO_URL, data={
-                        "platform": "web", "mobi_app": "web", "build": "1",
-                        "cover": url, "csrf": self.credential.bili_jct,
-                        "csrf_token": self.credential.bili_jct},
-                        headers={"Referer": "https://live.bilibili.com/"}) as response:
-                    result = await response.json(content_type=None)
-            if int(result.get("code") or 0) != 0:
-                raise PlatformError("B站拒绝更新直播间封面（code=%s）：%s" % (
-                    result.get("code"), str(result.get("message") or result.get("msg") or "")[:60]))
-            return {"ok": True, "cover": url, "audit": bool((result.get("data") or {}).get("audit_info"))}
-        except PlatformError:
-            raise
-        except Exception as exc:
-            raise _friendly(exc) from None
-        finally:
-            await session.close()
 
     async def update_notice(self, content: str) -> dict:
         if not self.cookie:

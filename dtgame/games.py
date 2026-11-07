@@ -1,9 +1,10 @@
-"""按 game.active 分派启动器：恶魔之塔（Godot）或星露谷（SMAPI）。"""
+"""按 game.active 分派启动器：恶魔之塔（Godot）、星露谷（SMAPI）或杀戮尖塔 2。"""
 
 from __future__ import annotations
 
 from dtgame.launcher import GameProcess
 from dtgame.stardew import StardewProcess
+from dtgame.sts2 import STS2Process
 
 
 class GameLauncher:
@@ -11,11 +12,13 @@ class GameLauncher:
         self.cfg = cfg
         self.demontower = GameProcess(cfg.get("dtgame", {}))
         self.stardew = StardewProcess(cfg.get("stardew", {}))
+        self.sts2 = STS2Process(cfg.get("sts2", {}))
 
     def sync(self, cfg: dict):
         self.cfg = cfg
         self.demontower.cfg = cfg.get("dtgame", {})
         self.stardew.cfg = cfg.get("stardew", {})
+        self.sts2.cfg = cfg.get("sts2", {})
 
     @property
     def kind(self) -> str:
@@ -25,8 +28,16 @@ class GameLauncher:
     def is_stardew(self) -> bool:
         return self.kind == "stardew"
 
+    @property
+    def is_sts2(self) -> bool:
+        return self.kind == "sts2"
+
     def current(self):
-        return self.stardew if self.is_stardew else self.demontower
+        if self.is_stardew:
+            return self.stardew
+        if self.is_sts2:
+            return self.sts2
+        return self.demontower
 
     def running(self) -> bool:
         return self.current().running()

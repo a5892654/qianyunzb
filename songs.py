@@ -6,7 +6,7 @@ import re
 import time
 
 from brain import fill
-from netease import NetEase
+from netease import NetEase, music_reference
 
 log = logging.getLogger("song")
 
@@ -259,13 +259,26 @@ class SongManager:
         self.push()
         return self.state()["playlist"]
 
-    def notify_live_started(self):
-        """开播后恢复上次「播放全部」的歌单；已在循环或正在启动时不重复。"""
-        if not self.cfg.get("enabled") or not self.cfg.get("auto_play_on_live", True):
+    def notify_live_started(self, playlist=""):
+        """开播后循环歌单：播放计划给了歌单就用它，否则恢复上次「播放全部」的歌单。"""
+        if not self.cfg.get("enabled"):
             return False
-        reference = str(self.cfg.get("auto_playlist_ref") or "").strip()
-        if not reference or self.loop_playlist:
+        override = str(playlist or "").strip()
+        if not override and not self.cfg.get("auto_play_on_live", True):
             return False
+        reference = override or str(self.cfg.get("auto_playlist_ref") or "").strip()
+        if not reference:
+            return False
+        try:
+            parsed = music_reference(reference, "playlist")
+        except ValueError:
+            return False
+        if not parsed or parsed[0] != "playlist":
+            return False
+        if self.loop_playlist:
+            # 计划指定的歌单和正在循环的不同，允许切换；沿用全局设置时保持不重复启动。
+            if not override or str(self.loop_playlist.get("id")) == str(parsed[1]):
+                return False
         if self._auto_task is not None and not self._auto_task.done():
             return False
         if time.monotonic() - self._auto_failed_at < self.AUTO_RETRY_SECONDS:

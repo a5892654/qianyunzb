@@ -150,6 +150,10 @@ class _INPUT(ctypes.Structure):
     _fields_ = [("type", wintypes.DWORD), ("u", _INPUTUNION)]
 
 
+class _TOKEN_ELEVATION(ctypes.Structure):
+    _fields_ = [("TokenIsElevated", wintypes.DWORD)]
+
+
 if _user32 is not None:
     _user32.SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(_INPUT), ctypes.c_int]
     _user32.SendInput.restype = wintypes.UINT
@@ -188,9 +192,16 @@ if _user32 is not None:
     _user32.GetWindowThreadProcessId.restype = wintypes.DWORD
     _user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
     _user32.AttachThreadInput.restype = wintypes.BOOL
+    _user32.keybd_event.argtypes = [wintypes.BYTE, wintypes.BYTE, wintypes.DWORD, _ULONG_PTR]
     _kernel32.GetCurrentThreadId.restype = wintypes.DWORD
     _kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
     _kernel32.OpenProcess.restype = wintypes.HANDLE
+    _advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    _advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.POINTER(wintypes.HANDLE)]
+    _advapi32.OpenProcessToken.restype = wintypes.BOOL
+    _advapi32.GetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
+                                              wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    _advapi32.GetTokenInformation.restype = wintypes.BOOL
     _kernel32.QueryFullProcessImageNameW.argtypes = [
         wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
     _kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
@@ -209,6 +220,33 @@ def _window_text(hwnd: int) -> str:
     buf = ctypes.create_unicode_buffer(max(2, length + 1))
     _user32.GetWindowTextW(hwnd, buf, len(buf))
     return buf.value
+
+
+def _process_elevated(pid: int) -> bool:
+    handle = _kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return False
+    token = wintypes.HANDLE()
+    try:
+        if not _advapi32.OpenProcessToken(handle, 0x0008, ctypes.byref(token)):
+            return False
+        info = _TOKEN_ELEVATION()
+        size = wintypes.DWORD()
+        if not _advapi32.GetTokenInformation(token, 20, ctypes.byref(info),
+                                             ctypes.sizeof(info), ctypes.byref(size)):
+            return False
+        return bool(info.TokenIsElevated)
+    finally:
+        if token:
+            _kernel32.CloseHandle(token)
+        _kernel32.CloseHandle(handle)
+
+
+def elevation_conflict() -> bool:
+    """直播姬比千音权限高时，Windows 会丢弃模拟按键，快捷键永远发不进去。"""
+    if _user32 is None or _process_elevated(os.getpid()):
+        return False
+    return any(_process_elevated(p["pid"]) for p in livehime_processes())
 
 
 def _process_path(pid: int) -> str:
@@ -292,26 +330,42 @@ def _client_rect(hwnd: int) -> tuple[int, int, int, int]:
     return int(origin.x), int(origin.y), int(rect.right - rect.left), int(rect.bottom - rect.top)
 
 
+def _tap_alt() -> None:
+    # 目标窗口刚被游戏抢过焦点时，Windows 会拒绝后台进程切换前台；
+    # 模拟一次 Alt 键让系统把接下来的切换当作用户操作。
+    _user32.keybd_event(0x12, 0, 0, 0)
+    _user32.keybd_event(0x12, 0, _KEYEVENTF_KEYUP, 0)
+
+
 def focus_window(hwnd: int) -> bool:
     if _user32 is None or not hwnd:
         return False
     _user32.ShowWindow(hwnd, _SW_RESTORE)
-    foreground = _user32.GetForegroundWindow()
-    if int(foreground or 0) == int(hwnd):
-        return True
     current = _kernel32.GetCurrentThreadId()
-    target = _user32.GetWindowThreadProcessId(foreground, None) if foreground else 0
-    attached = bool(target and target != current and _user32.AttachThreadInput(current, target, True))
-    try:
-        _user32.BringWindowToTop(hwnd)
-        _user32.SetForegroundWindow(hwnd)
-        _user32.SetFocus(hwnd)
-    finally:
-        if attached:
-            _user32.AttachThreadInput(current, target, False)
-    time.sleep(0.15)
-    root = _user32.GetAncestor(_user32.GetForegroundWindow(), _GA_ROOT)
-    return int(root or 0) == int(hwnd)
+    for _attempt in range(3):
+        if int(_user32.GetForegroundWindow() or 0) == int(hwnd):
+            return True
+        foreground = _user32.GetForegroundWindow()
+        fg_thread = int(_user32.GetWindowThreadProcessId(foreground, None)) if foreground else 0
+        target_thread = int(_user32.GetWindowThreadProcessId(hwnd, None))
+        attached = []
+        for tid in (fg_thread, target_thread):
+            if tid and tid != current and tid not in attached and _user32.AttachThreadInput(current, tid, True):
+                attached.append(tid)
+        try:
+            _user32.BringWindowToTop(hwnd)
+            _user32.SetForegroundWindow(hwnd)
+            _user32.SetFocus(hwnd)
+        finally:
+            for tid in attached:
+                _user32.AttachThreadInput(current, tid, False)
+        time.sleep(0.15)
+        root = _user32.GetAncestor(_user32.GetForegroundWindow(), _GA_ROOT)
+        if int(root or 0) == int(hwnd):
+            return True
+        _tap_alt()
+        time.sleep(0.1)
+    return int(_user32.GetAncestor(_user32.GetForegroundWindow(), _GA_ROOT) or 0) == int(hwnd)
 
 
 def _key_input(vk: int, keyup: bool) -> _INPUT:
@@ -453,7 +507,9 @@ class LivehimeController:
         result = {"ok": bool(path or window), "path": path, "path_source": source,
                   "configured_path": configured, "exists": bool(path), "running": bool(procs),
                   "windows": windows, "window": window, "hotkey": hotkey,
-                  "hotkey_ok": hotkey_ok, "hotkey_error": hotkey_error}
+                  "hotkey_ok": hotkey_ok, "hotkey_error": hotkey_error,
+                  "self_elevated": _process_elevated(os.getpid()),
+                  "elevated": any(_process_elevated(p["pid"]) for p in procs)}
         if source == "config_missing":
             # 已经跑着的窗口能控制，但配置的路径是错的，到点自动启动会失败，界面必须报出来。
             result["ok"] = False
@@ -495,6 +551,10 @@ class LivehimeController:
         return await asyncio.to_thread(self._ensure_running, timeout)
 
     def trigger(self, action: str) -> dict:
+        if elevation_conflict():
+            return {"ok": False, "error": "直播姬以管理员权限运行，千音当前不是管理员，"
+                                          "Windows 会拦截模拟的开播/停播按键；请用管理员身份运行千音，"
+                                          "或取消直播姬的管理员权限后重启直播姬"}
         procs = livehime_processes()
         window = choose_window(windows_for_pids([p["pid"] for p in procs])) if procs else None
         if not window:

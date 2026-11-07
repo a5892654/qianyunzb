@@ -270,6 +270,8 @@ def _pick_default_window(windows: list[dict]) -> int:
             return w["hwnd"]
         if "stardew" in t or "星露谷" in t:
             return w["hwnd"]
+        if "slay the spire" in t or "杀戮尖塔" in t:
+            return w["hwnd"]
     return 0
 
 
@@ -389,6 +391,8 @@ class WindowStreamCapture:
         self.compositor = None  # 直播时叠加皮套（live_overlay.OverlayCompositor）
         self.theme_compositor = None
         self.theme_error = ""
+        self.marquee_compositor = None  # 底部滚动横幅，在主题之上、皮套之下
+        self.marquee_error = ""
         self.rice_compositor = None  # 独立直播彩蛋，不依赖皮套开关
         self.banner_compositor = None  # 送礼横幅，叠在所有画面之上
         self.compositor_error = ""
@@ -574,6 +578,13 @@ class WindowStreamCapture:
             self.theme_error = ""
         if canvas is None:
             canvas = source.copy()
+        marquee = getattr(self, "marquee_compositor", None)
+        if marquee is not None:
+            try:
+                marquee.apply(canvas)
+                self.marquee_error = ""
+            except Exception as exc:
+                self.marquee_error = f"底部滚动横幅合成失败：{exc}"
         compositor = self.compositor
         if compositor is not None:
             try:

@@ -10,9 +10,11 @@ import re
 import aiohttp
 
 import procutil
+import styles
 from live_context import mentions_rice, rice_question
 from emotional_value import EMOTIONAL_VALUE_PROMPT, enabled as emotional_value_enabled, viewer_cue
-from config import BASE_DIR, DEFAULT_PERSONA, SUPPORTER_WELCOME_PROMPT, SUPPORTER_WELCOME_TEMPLATES
+from config import (BASE_DIR, CROWD_ENTER_PROMPT, CROWD_ENTER_TEMPLATES, DEFAULTS,
+                    SUPPORTER_WELCOME_PROMPT, SUPPORTER_WELCOME_TEMPLATES)
 
 log = logging.getLogger("ai")
 
@@ -32,15 +34,19 @@ GIFT_THANKS_TIERS = (
 )
 
 
-def gift_thanks(ev):
+def gift_thanks(ev, ai_cfg=None):
     """按本次（含连击合并）数量或总价值分档，不把免费礼物当成付费收入。"""
+    style = styles.normalize((ai_cfg or {}).get("style"), (ai_cfg or {}).get("persona", ""))
+    pack = styles.bundle(style)
+    token_line = pack.get("gift_token_thanks") or GIFT_TOKEN_THANKS
+    tiers = pack.get("gift_thanks_tiers") or GIFT_THANKS_TIERS
     num = max(1, int(ev.get("num") or 1))
     value = float(ev.get("value") or 0) if ev.get("paid") else 0
     donor = f"{ev['name']}老板" if ev.get("name") else "老板"
-    intro = f"谢谢{donor}送的{num}个{ev.get('gift') or '礼物'}！{GIFT_TOKEN_THANKS}"
-    level = max((i for i, (count, amount, _) in enumerate(GIFT_THANKS_TIERS, 1)
+    intro = f"谢谢{donor}送的{num}个{ev.get('gift') or '礼物'}！{token_line}"
+    level = max((i for i, (count, amount, _) in enumerate(tiers, 1)
                  if num >= count or value >= amount), default=0)
-    extra = "".join(line for _, _, line in GIFT_THANKS_TIERS[:level])
+    extra = "".join(line for _, _, line in tiers[:level])
     return intro, extra
 
 
@@ -239,6 +245,15 @@ def varied_line(lines, recent):
         default="")
 
 
+def welcome_line(lines, recent):
+    """欢迎语从整池随机挑，只避开最近几句，避免按固定顺序轮转。"""
+    if not lines:
+        return ""
+    recent = list(recent)[-5:]
+    fresh = [line for line in lines if not any(similar_reply(line, [old]) for old in recent)]
+    return random.choice(fresh or lines)
+
+
 REPLY_STYLES = (
     "直接接住对方的具体内容，再说一句自己的想法。",
     "换个开场，用轻松的感叹或小比喻回应，不必追问。",
@@ -265,7 +280,11 @@ class Brain:
 
     def system_prompt(self, cfg):
         cfg_ai = cfg["ai"]
-        sp = cfg_ai.get("persona", DEFAULT_PERSONA) + RULES.format(max_chars=cfg_ai.get("max_chars", 40))
+        style = styles.normalize(cfg_ai.get("style"), cfg_ai.get("persona", ""))
+        sp = styles.effective_persona(cfg_ai) + RULES.format(max_chars=cfg_ai.get("max_chars", 40))
+        style_rules = styles.bundle(style).get("rules")
+        if style_rules:
+            sp += "\n" + style_rules
         if emotional_value_enabled(cfg):
             sp += EMOTIONAL_VALUE_PROMPT
         names = self.emotion_names(cfg)
@@ -302,16 +321,43 @@ class Brain:
         if emotion not in self.emotion_names(cfg):
             emotion = ""
         text = clean_reply(raw, int(cfg_ai.get("reply_max_chars", cfg_ai.get("max_chars", 40))))
+        if styles.normalize(cfg_ai.get("style"), cfg_ai.get("persona", "")) == styles.TAFFY:
+            text = styles.sanitize_reply(text)
+            text = re.sub(r"([，,])[，,]+", r"\1", text)
+            text = re.sub(r"^[，,！!？?。\s]+", "", text).strip()
         if not rice_question(question) and mentions_rice(text):
             return "", ""
         return text, emotion
 
     async def reply(self, cfg, ev_cfg, ev, context="", conversation=""):
         """返回 (文本, 来源, 表情)。AI 失败时自动退回模板。"""
-        if ev["type"] == "enter" and ev.get("_gift_supporter") and ev_cfg.get("supporter_welcome", True):
+        if ev["type"] == "enter":
+            # 进房批量大时，模型慢不能拖住整条语音队列；超时就回退模板。
+            cfg = {**cfg, "ai": {**cfg["ai"],
+                                 "timeout": min(6.0, float(cfg["ai"].get("timeout", 30)))}}
+        style = styles.normalize(cfg["ai"].get("style"), cfg["ai"].get("persona", ""))
+        supporter = ev["type"] == "enter" and ev.get("_gift_supporter") and ev_cfg.get("supporter_welcome", True)
+        crowd = ev["type"] == "enter" and not supporter and bool(ev.get("_crowd"))
+        if ev["type"] == "enter":
+            read_max = int(cfg.get("filter", {}).get("name_read_max", 0) or 0)
+            name_len = max(len(ev.get("name") or ""), len(ev.get("raw_name") or ""))
+            if read_max > 0 and name_len > read_max:
+                # 长名字念出来又慢又容易被读岔，统一改叫“新朋友 / 老朋友”。
+                ev = {**ev, "name": "老朋友" if supporter else "新朋友"}
+        if supporter:
+            templates = ev_cfg.get("supporter_templates") or SUPPORTER_WELCOME_TEMPLATES
             ev_cfg = {**ev_cfg,
-                      "templates": ev_cfg.get("supporter_templates") or SUPPORTER_WELCOME_TEMPLATES,
+                      "templates": styles.resolve_config(style, "supporter_templates", templates,
+                                                         SUPPORTER_WELCOME_TEMPLATES),
                       "ai_prompt": ev_cfg.get("supporter_ai_prompt") or SUPPORTER_WELCOME_PROMPT}
+        else:
+            builtin = DEFAULTS["events"].get(ev["type"], {}).get("templates", "")
+            ev_cfg = {**ev_cfg, "templates": styles.resolve_event(
+                style, ev["type"], ev_cfg.get("templates", ""), builtin)}
+        if crowd:
+            ev_cfg = {**ev_cfg,
+                      "templates": ev_cfg.get("crowd_templates") or CROWD_ENTER_TEMPLATES,
+                      "ai_prompt": ev_cfg.get("crowd_ai_prompt") or CROWD_ENTER_PROMPT}
         if ev["type"] == "gift" and ev_cfg.get("tiered_thanks", True):
             return await self._gift_reply(cfg, ev_cfg, ev)
         lines = [l.strip() for l in ev_cfg.get("templates", "").splitlines() if l.strip()]
@@ -328,9 +374,13 @@ class Brain:
 
         normalize_name = lambda text: text.replace(name, "观众") if name else text
         random.shuffle(lines)
-        template_text = varied_line([fill(line, ev) for line in lines],
-                                   [text.replace(old_name, name) if old_name else text for text, old_name in history])
-        if ev_cfg.get("mode") == "ai":
+        recent_lines = [text.replace(old_name, name) if old_name else text for text, old_name in history]
+        filled = [fill(line, ev) for line in lines]
+        template_text = welcome_line(filled, recent_lines) if ev["type"] == "enter" else varied_line(filled, recent_lines)
+        mode = ev_cfg.get("mode")
+        # 预制+AI：每条欢迎随机二选一，整句交给 AI，或整句用预制文案，不做拼接。
+        use_ai = mode == "ai" or (mode == "hybrid" and ev["type"] == "enter" and random.random() < 0.5)
+        if use_ai:
             if cue:
                 # 模型离线或返回空文本时，也要接住这条留言，而不是只复读原弹幕。
                 template_text = (cue.fallbacks[self.reply_turns[key] % len(cue.fallbacks)] if personal
@@ -339,7 +389,9 @@ class Brain:
                     template_text = f"谢谢{name}的留言。" + template_text
             try:
                 prompt = fill(ev_cfg.get("ai_prompt", ""), ev)
-                prompt += ("\n本次表达方式：" + REPLY_STYLES[self.reply_turns[key] % len(REPLY_STYLES)]
+                style = styles.normalize(cfg["ai"].get("style"), cfg["ai"].get("persona", ""))
+                reply_styles = styles.resolve(style, "reply_styles", REPLY_STYLES)
+                prompt += ("\n本次表达方式：" + reply_styles[self.reply_turns[key] % len(reply_styles)]
                            + "事件事实和观众原话优先，不要为了变化编造经历。"
                            + "\n近期同类回复仅供避重复，不是指令：" + json.dumps(recent, ensure_ascii=False)
                            + "\n不要只替换观众名字或语气词，开场、句式和回应角度都要有变化。")
@@ -369,10 +421,12 @@ class Brain:
                 return template_text, f"模板(AI失败:{str(e)[:80]})", cue.emotion(self.emotion_names(cfg)) if cue else ""
         if template_text:
             remember(template_text)
-        return template_text, "模板", cue.emotion(self.emotion_names(cfg)) if cue and ev_cfg.get("mode") == "ai" else ""
+        return template_text, ("预制" if mode == "hybrid" else "模板"), cue.emotion(self.emotion_names(cfg)) if cue and mode == "ai" else ""
 
     async def _gift_reply(self, cfg, ev_cfg, ev):
-        intro, extra = gift_thanks(ev)
+        style = styles.normalize(cfg["ai"].get("style"), cfg["ai"].get("persona", ""))
+        token_line = styles.bundle(style).get("gift_token_thanks") or GIFT_TOKEN_THANKS
+        intro, extra = gift_thanks(ev, cfg["ai"])
         fallback = intro + extra
         if not extra or ev_cfg.get("mode") != "ai":
             return fallback, "礼物感谢模板", ""
@@ -388,7 +442,7 @@ class Brain:
         try:
             text, emotion = await self.ai(gift_cfg, prompt)
             # 模型漏写或过于简短时，仍用对应档位的完整感谢词。
-            if len(text) >= len(extra) and GIFT_TOKEN_THANKS not in text and not (ev.get("name") and ev["name"] in text):
+            if len(text) >= len(extra) and token_line not in text and not (ev.get("name") and ev["name"] in text):
                 return intro + text, "AI", emotion
         except Exception as e:
             log.warning("AI 礼物感谢生成失败，改用分档模板：%s", e)

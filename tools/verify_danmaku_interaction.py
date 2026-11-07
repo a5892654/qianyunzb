@@ -152,15 +152,13 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([c.args[1] for c in app.engine.synth.await_args_list], played)
         self.assertEqual(app.player.play_blocking.call_count, 2)
 
-    async def test_queue_eviction_and_clear_release_game_wait(self):
+    async def test_queue_eviction_and_clear_release_jobs(self):
         app = make_app()
-        player = attach_game(app)
         app.cfg["filter"]["max_queue"] = 1
         job = app.pipe.narrate("继续打牌")
         self.assertFalse(app.pipe.spoken_done(job))
         self.danmaku(app)
         self.assertTrue(app.pipe.spoken_done(job))
-        await asyncio.wait_for(player._wait_spoken(job), 0.1)
         self.assertEqual([j["type"] for j in app.pipe.jobs], ["danmaku"])
         app.pipe.clear()
         job = app.pipe.narrate("下一句")
@@ -175,6 +173,32 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0)
         self.assertTrue(app.pipe.spoken_done(job))
         self.assertTrue(app.pipe.synth_q.empty())
+
+    async def test_stale_narration_is_replaced_by_the_current_scene(self):
+        app = make_app()
+        app.dt = SimpleNamespace(running=True, fresh_commentary=lambda: "能量见底了，这回合先收手。")
+        job = app.pipe.narrate("进房前的旧画面：先把这张打出去。")
+        app.pipe.jobs[0]["ts"] -= 30
+        await self.worker(app)
+        item = await self.take(app)
+        self.assertEqual(item["id"], job)
+        self.assertEqual(item["type"], "narration")
+        self.assertEqual(item["text"], "能量见底了，这回合先收手。")
+
+    async def test_fresh_narration_keeps_the_line_that_matches_its_action(self):
+        app = make_app()
+        app.dt = SimpleNamespace(running=True, fresh_commentary=lambda: "完全不同的一句。")
+        job = app.pipe.narrate("刚打完这张，血稳住了。")
+        await self.worker(app)
+        item = await self.take(app)
+        self.assertEqual((item["id"], item["text"]), (job, "刚打完这张，血稳住了。"))
+
+    async def test_new_game_line_drops_a_pending_stale_narration(self):
+        app = make_app()
+        old = app.pipe.narrate("上一手的旧解说")
+        new = app.pipe.narrate("这一手的最新解说")
+        self.assertTrue(app.pipe.spoken_done(old))
+        self.assertEqual([j["id"] for j in app.pipe.jobs], [new])
 
     async def test_filters_do_not_leak_rejected_chat_to_game(self):
         app = make_app()
@@ -232,6 +256,16 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("小红", second[0])
         self.assertEqual(app.brain.openai.ask.await_count, 2)
         self.assertIn("不要只替换观众名字", app.brain.openai.ask.await_args.args[2])
+
+    async def test_welcome_ai_uses_a_short_timeout_so_a_flood_cannot_stall(self):
+        app = make_app()
+        settings = {**app.cfg["events"]["enter"], "mode": "ai"}
+        app.brain.openai.ask.return_value = "小明来啦，快找个舒服的位置坐！"
+        text, source, _ = await app.brain.reply(app.cfg, settings, {"type": "enter", "name": "小明"})
+        self.assertEqual(source, "AI")
+        self.assertIn("小明", text)
+        self.assertLessEqual(app.brain.openai.ask.await_args.args[0]["timeout"], 6)
+        self.assertEqual(app.cfg["ai"]["timeout"], 30)
 
     async def test_repeated_viewer_reply_stays_relevant_with_one_call_per_message(self):
         app = make_app()

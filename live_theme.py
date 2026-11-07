@@ -166,7 +166,7 @@ class StreamTheme:
         image = Image.alpha_composite(image, glass)
         d = ImageDraw.Draw(image)
         self._text(d, (48, 49), key[0], self.font(32, True), "#f1fcff", 357)
-        self._text(d, (48, 105), key[1], self.font(16), "#c5eaf8", 354)
+        self._follow_badge(d, (48, 99), key[1], 354)
         d.text((64, 177), "海 面 来 信   /   CHAT", font=self.font(15), fill="#ddf8ff")
         d.text((470, 80), "NOW PLAYING", font=self.font(17, True), fill="#ecfcff")
         d.text((627, 80), "／  此刻，冒险正在发生", font=self.font(17), fill="#d5f2ff")
@@ -180,6 +180,25 @@ class StreamTheme:
             d.line(((x, y + sy * 28), (x, y), (x + sx * 28, y)), fill="#efffff", width=4)
         self._base = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGBA2BGRA)
         self._skin_key = key
+
+    def _follow_badge(self, d, xy, text, max_width):
+        """关注引导做成粉色徽章，在深蓝背景和标题下面更显眼。"""
+        font = self.font(16, True)
+        pad, gap, icon = 12, 6, 14
+        text = str(text)
+        limit = max_width - pad * 2 - icon - gap
+        if d.textlength(text, font=font) > limit:
+            while text and d.textlength(text + "…", font=font) > limit:
+                text = text[:-1]
+            text += "…"
+        width = int(d.textlength(text, font=font)) + pad * 2 + icon + gap
+        x, y = xy
+        height = 28
+        d.rounded_rectangle((x, y, x + width, y + height), height / 2,
+                            fill="#fb7299", outline="#ffd6e3", width=1)
+        centre = y + height / 2
+        d.text((x + pad, centre), "♥", font=self.symbol(14), fill="#ffffff", anchor="lm")
+        d.text((x + pad + icon + gap, centre), text, font=font, fill="#ffffff", anchor="lm")
 
     def _chat_replan(self, now, messages):
         current = messages[-CHAT_SLOTS:]
@@ -434,7 +453,7 @@ class StreamTheme:
         return canvas
 
 
-def preview_jpeg(settings):
+def preview_jpeg(settings, marquee=None):
     """Render a local layout sample without starting capture or a broadcast."""
     renderer = StreamTheme(lambda: settings, lambda: {"enabled": True, "song": dict(DEMO_SONG)})
     game = Image.new("RGBA", (1920, 1080), "#10273a")
@@ -450,6 +469,9 @@ def preview_jpeg(settings):
     canvas = renderer.compose(source)
     if canvas is None:
         canvas = source
+    if marquee:
+        from live_marquee import MarqueeBanner
+        MarqueeBanner(lambda: marquee).apply(canvas)
     ok, encoded = cv2.imencode(".jpg", canvas[..., :3], [cv2.IMWRITE_JPEG_QUALITY, 88])
     if not ok:
         raise ValueError("主题预览生成失败")

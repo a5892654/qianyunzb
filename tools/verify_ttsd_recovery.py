@@ -188,6 +188,56 @@ class KillStaleTests(unittest.TestCase):
         self.assertEqual(stale, [222])
 
 
+class OwnStaleEngineTests(unittest.IsolatedAsyncioTestCase):
+    """软件被强杀后旧 ttsd 还占着端口：同脚本的引擎要接管，别把自己锁死。"""
+
+    cfg = {"ttsd_base": "http://127.0.0.1:8899", "ttsd_script": r"C:\gamedata\ttsd\ttsd.py",
+           "ttsd_auto_start": True}
+
+    async def run_ensure(self, owns):
+        order = []
+
+        async def health(_):
+            return {"ok": True, "model": "old"}
+
+        async def alive(_):
+            return False
+
+        def kill(_cfg, _status=None):
+            order.append("kill")
+
+        def spawn(_cfg, _status=None):
+            order.append("spawn")
+            return False
+
+        with patch.object(ttsd, "health", health), patch.object(ttsd, "alive", alive), \
+                patch.object(ttsd, "owned", Mock(return_value=False)), \
+                patch.object(ttsd, "owns_port", Mock(return_value=owns)), \
+                patch.object(ttsd, "kill_stale", kill), patch.object(ttsd, "spawn", spawn):
+            ok = await ttsd._ensure(dict(self.cfg), lambda m: None)
+        return ok, order
+
+    async def test_takes_over_own_stale_engine(self):
+        ok, order = await self.run_ensure(True)
+        self.assertFalse(ok)
+        self.assertEqual(order, ["kill", "spawn"], "遗留引擎要先清掉再按所选模型重拉")
+
+    async def test_leaves_external_engine_alone(self):
+        ok, order = await self.run_ensure(False)
+        self.assertFalse(ok)
+        self.assertEqual(order, [], "别的程序占着端口时不能动它")
+
+    def test_owns_port_matches_same_script_process(self):
+        with patch.object(ttsd, "_listening_pids", return_value={222}), \
+                patch.object(ttsd, "_ttsd_pids", return_value={222, 333}):
+            self.assertTrue(ttsd.owns_port({"ttsd_base": "http://127.0.0.1:8899"}))
+
+    def test_owns_port_rejects_other_program(self):
+        with patch.object(ttsd, "_listening_pids", return_value={111}), \
+                patch.object(ttsd, "_ttsd_pids", return_value={222}):
+            self.assertFalse(ttsd.owns_port({"ttsd_base": "http://127.0.0.1:8899"}))
+
+
 class DecodeTests(unittest.TestCase):
     """中文 Windows 的 PowerShell 输出不是 UTF-8：按 text=True 解会炸。"""
 

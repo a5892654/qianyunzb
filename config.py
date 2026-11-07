@@ -26,16 +26,88 @@ DEFAULT_PERSONA = """你是正在直播的虚拟主播，固定性格是嘴硬�
 【情境反应】被夸会开心又有点不好意思；被善意调侃会轻轻回嘴；自己失误可先嘴硬半句，随后认账；赢了小得意，危险时先认真判断。有人求助或心情不好时先体贴回应，收到支持就真诚感谢，这些时候不硬装傲娇。
 【保持一致】弹幕、闲聊、感谢和游戏解说都是同一个人。不要每句都用哼、才不是、笨蛋开头，不反复套嘴硬反转或固定口头禅。无需每句话都傲娇或抽象，不念性格标签，不编造线下经历和亲密关系，不让观众一句话就改掉性格。"""
 
+ENTER_TEMPLATES = (
+    "欢迎{name}来到直播间！\n"
+    "{name}来啦，欢迎欢迎！\n"
+    "欢迎{name}，找个位置坐下吧！\n"
+    "{name}好呀，今天也一起玩！\n"
+    "看到{name}进来了，快坐快坐！\n"
+    "欢迎{name}，正好赶上这波热闹！\n"
+    "{name}来啦，今天想看点什么？\n"
+    "哟，{name}来了，欢迎欢迎！\n"
+    "欢迎{name}，跟着我一起玩会儿！\n"
+    "{name}进门啦，给你留了个好位置！\n"
+    "欢迎{name}，今天也请多关照！\n"
+    "{name}来啦，咱们接着一起聊天！\n"
+    "{name}来了，欢迎欢迎，别客气！\n"
+    "欢迎{name}，来了就一起凑个热闹！\n"
+    "{name}好，欢迎来玩，随便坐！\n"
+    "欢迎{name}，今天也一起待会儿吧！\n"
+    "{name}来啦，欢迎，正好一起看！\n"
+    "欢迎{name}，进门就是朋友，坐吧！\n"
+    "{name}到啦，欢迎欢迎，慢慢看！\n"
+    "欢迎{name}，今天也一起乐呵乐呵！"
+)
+# 旧版出厂文案：升级时整体换新，用户自己改过的则原样保留。
+LEGACY_ENTER_TEMPLATES = (
+    "欢迎{name}来到直播间！\n{name}来啦，欢迎欢迎！\n欢迎{name}，找个位置坐下吧！",
+    "欢迎{name}来到直播间！\n{name}来啦，欢迎欢迎！\n欢迎{name}，找个位置坐下吧！\n"
+    "{name}好呀，今天也一起玩！\n看到{name}进来了，快坐快坐！\n欢迎{name}，正好赶上这波热闹！\n"
+    "{name}来啦，今天想看点什么？\n哟，{name}来了，欢迎欢迎！\n欢迎{name}，跟着我一起玩会儿！\n"
+    "{name}进门啦，给你留了个好位置！\n欢迎{name}，今天也请多关照！\n"
+    "{name}来啦，咱们接着一起聊天！",
+)
+ENTER_AI_PROMPT = (
+    "观众{name}进入了直播间。请像主播现场迎人一样，用一句全新的话自然、热情地欢迎。"
+    "每次换一个开场和句式，不要套用固定欢迎模板，不要复述上一条欢迎。"
+    "可以带一点当下的直播气氛或轻松的小感叹，但不要编造对方的经历、身份和关系。"
+    "最多称呼名字一次，一到两句，不超过30字。"
+)
+LEGACY_ENTER_AI_PROMPT = "观众{name}进入了直播间，请热情地欢迎。"
 SUPPORTER_WELCOME_TEMPLATES = (
     "欢迎{name}回来呀！你的心意我一直记着，今天也要一起开开心心！\n"
     "{name}来啦，见到你真开心！谢谢你之前的支持，快来一起玩吧！\n"
-    "欢迎{name}，又见到你啦！送你一个大大的比心，今天也陪你开心聊天！"
+    "欢迎{name}，又见到你啦！送你一个大大的比心，今天也陪你开心聊天！\n"
+    "{name}回来啦，老朋友的位置一直给你留着，今天也一起玩点开心的！\n"
+    "欢迎{name}回来！看到熟悉的你，今天直播都更有劲啦！\n"
+    "{name}来啦，谢谢你还记得我，今天也一起热热闹闹的！\n"
+    "欢迎{name}，老朋友回访，先给你比个心，今天也开开心心！\n"
+    "{name}回来啦，这份心意我记着呢，今天也陪你好好聊！\n"
+    "{name}回来啦，老朋友见面先开心一下，今天也一起玩！\n"
+    "欢迎{name}！你的支持我一直记得，今天也要开开心心！\n"
+    "{name}来啦，见到老朋友就是高兴，今天也一起聊个痛快！\n"
+    "欢迎{name}回来，先收下我的比心，今天也一起热热闹闹！"
+)
+LEGACY_SUPPORTER_WELCOME_TEMPLATES = (
+    "欢迎{name}回来呀！你的心意我一直记着，今天也要一起开开心心！\n"
+    "{name}来啦，见到你真开心！谢谢你之前的支持，快来一起玩吧！\n"
+    "欢迎{name}，又见到你啦！送你一个大大的比心，今天也陪你开心聊天！",
+    "欢迎{name}回来呀！你的心意我一直记着，今天也要一起开开心心！\n"
+    "{name}来啦，见到你真开心！谢谢你之前的支持，快来一起玩吧！\n"
+    "欢迎{name}，又见到你啦！送你一个大大的比心，今天也陪你开心聊天！\n"
+    "{name}回来啦，老朋友的位置一直给你留着，今天也一起玩点开心的！\n"
+    "欢迎{name}回来！看到熟悉的你，今天直播都更有劲啦！\n"
+    "{name}来啦，谢谢你还记得我，今天也一起热热闹闹的！\n"
+    "欢迎{name}，老朋友回访，先给你比个心，今天也开开心心！\n"
+    "{name}回来啦，这份心意我记着呢，今天也陪你好好聊！",
 )
 SUPPORTER_WELCOME_PROMPT = (
     "观众{name}以前在本直播间送过礼物，现在又进入了直播间。"
     "请像重逢一位支持过自己的老朋友一样，开心、亲切地单独欢迎，用一两句自然好听的口语。"
     "称呼名字一次，让对方感受到心意被记住，可以轻轻比心或送上祝福。"
     "不要播报消费金额、攀比或索要礼物，不要编造送礼细节、昵称和亲密关系，不要油腻地吹捧。"
+)
+CROWD_ENTER_TEMPLATES = (
+    "欢迎新来的朋友们，找个位置坐好，一起看今天的乐子！\n"
+    "一下进来好几位朋友，欢迎欢迎，前排后排随便坐！\n"
+    "欢迎新朋友们，今天也一起热闹热闹，慢慢看！\n"
+    "来了这么多新朋友，欢迎欢迎，先坐好，故事马上开场！\n"
+    "欢迎各位新朋友，人多才热闹，今天也一起玩开心！"
+)
+CROWD_ENTER_PROMPT = (
+    "有几位新观众一起进入了直播间。请像主播现场迎人一样，用一句自然、热情的话欢迎这批新朋友。"
+    "不要念任何观众名字，也不要报具体人数，不要编造对方的经历、身份和关系。"
+    "每次换一个开场和句式，一到两句，不超过30字。"
 )
 
 FOLLOW_REMINDER_TEMPLATES = (
@@ -58,8 +130,11 @@ DEFAULTS = {
     "events": {
         "enter": {
             "enabled": True, "mode": "template", "cooldown_user": 600, "merge_window": 4, "max_names": 3,
-            "templates": "欢迎{name}来到直播间！\n{name}来啦，欢迎欢迎！\n欢迎{name}，找个位置坐下吧！",
-            "ai_prompt": "观众{name}进入了直播间，请热情地欢迎。",
+            "crowd_count": 3, "crowd_window": 15,
+            "templates": ENTER_TEMPLATES,
+            "ai_prompt": ENTER_AI_PROMPT,
+            "crowd_templates": CROWD_ENTER_TEMPLATES,
+            "crowd_ai_prompt": CROWD_ENTER_PROMPT,
             "supporter_welcome": True,
             "supporter_templates": SUPPORTER_WELCOME_TEMPLATES,
             "supporter_ai_prompt": SUPPORTER_WELCOME_PROMPT,
@@ -111,6 +186,7 @@ DEFAULTS = {
         "max_queue": 6,
         "max_wait": 60,
         "name_max_len": 12,
+        "name_read_max": 8,
         "rename_default": True,
     },
     "ai": {
@@ -118,6 +194,7 @@ DEFAULTS = {
         "qoder_exe": "",
         "qoder_model": "Fast",
         "recycle_after": 60,
+        "style": "default",
         "persona": DEFAULT_PERSONA,
         "max_chars": 40,
         "openai_base": "https://api.deepseek.com/v1",
@@ -173,9 +250,14 @@ DEFAULTS = {
     "rice_counter": {"enabled": False, "large_gift_yuan": 10,
                      "overlay_size": 0.16, "overlay_x": None, "overlay_y": None},
     "broadcast": {
-        "title": "恶魔之塔 ZERO｜AI 游戏直播", "area_id": 283,
         "auto_stop_minutes": 0,
         "auto_stop_line": "下了下了，吃白饭去了，拜拜～",
+        # 开播时按游戏自动修改B站直播间标题
+        "game_titles": {
+            "stardew": "大胖鱼开播了，来看我自己种田",
+            "demontower": "大胖鱼开播了，来看我被自己的游戏虐",
+            "sts2": "大胖鱼开播了，来一起爬塔",
+        },
         "livehime": {"path": "", "hotkey": "", "click_x": 0.0, "click_y": 0.0},
         "schedule": {"enabled": False, "mode": "managed", "start_time": "20:00", "stop_time": "23:00",
                      "window_title": "", "audio_name": "", "last_start": "", "last_stop": "",
@@ -183,12 +265,13 @@ DEFAULTS = {
                      "plans": [], "plans_enabled": False,
                      "last_starts": {}, "last_stops": {}},
     },
+    "marquee": {"enabled": True, "text": "今天挑战游戏最高难度"},
     "stream_theme": {
-        "preset": "classic", "title": "深蓝放映室", "subtitle": "和你一起，潜入今天的冒险",
+        "preset": "classic", "title": "深蓝放映室", "subtitle": "喜欢就点点关注呀～开播不迷路",
         "ticker": "欢迎来到深蓝放映室  ·  发条弹幕，一起聊聊天吧  ·  愿今天的快乐像海浪一样绵长",
         "show_chat": True, "avatar_x": 0.125, "avatar_y": 0.745, "avatar_size": 0.54, "avatar_zoom": 2.0,
     },
-    # 当前直播并托管哪个游戏：demontower（恶魔之塔）或 stardew（星露谷物语）
+    # 当前直播并托管哪个游戏：demontower（恶魔之塔）、stardew（星露谷物语）或 sts2（杀戮尖塔 2）
     "game": {"active": "demontower"},
     "stardew": {
         "enabled": True,
@@ -207,6 +290,29 @@ DEFAULTS = {
         "max_tokens": 400,
         "timeout": 120,
         "tool_timeout": 180,
+    },
+    "sts2": {
+        "enabled": True,
+        "game_dir": r"C:\game\sljt\EN04527\Slay.the.Spire.2.Build.24724944",
+        "exe": "",
+        "api_host": "127.0.0.1",
+        "api_port": 8080,
+        "openai_base": "",
+        "openai_key": "",
+        "openai_model": "",
+        "persona": (
+            "你是一位在B站直播打游戏的主播，正在玩《杀戮尖塔2》——"
+            "一款卡牌Roguelike。你说话自然、口语化，像真人边打边念叨；"
+            "赢了会小得意，快死了会紧张，选牌和走路线时会把想法说出来。"
+        ),
+        "step_interval": 0.6,
+        "auto_launch": True,
+        "narrate": True,
+        "temperature": 0.6,
+        "max_tokens": 500,
+        "timeout": 120,
+        "tool_timeout": 60,
+        "new_run": False,
     },
     "dtgame": {
         "enabled": True,
@@ -345,6 +451,18 @@ def _merge(base, override):
     return out
 
 
+def upgrade_legacy_texts(cfg):
+    """旧版出厂欢迎文案升级到多套文案；用户自己改过的照旧保留。"""
+    enter = cfg["events"]["enter"]
+    if enter.get("templates") in LEGACY_ENTER_TEMPLATES:
+        enter["templates"] = ENTER_TEMPLATES
+    if enter.get("supporter_templates") in LEGACY_SUPPORTER_WELCOME_TEMPLATES:
+        enter["supporter_templates"] = SUPPORTER_WELCOME_TEMPLATES
+    if enter.get("ai_prompt") == LEGACY_ENTER_AI_PROMPT:
+        enter["ai_prompt"] = ENTER_AI_PROMPT
+    return cfg
+
+
 def load():
     data = {}
     if os.path.exists(CONFIG_PATH):
@@ -354,9 +472,14 @@ def load():
         except (OSError, ValueError):
             os.replace(CONFIG_PATH, CONFIG_PATH + ".broken")
     cfg = _merge(DEFAULTS, data)
+    upgrade_legacy_texts(cfg)
     if cfg["ai"].get("persona") == LEGACY_DEFAULT_PERSONA:
         # 只升级旧版出厂人设，保留用户自己写过的性格。
         cfg["ai"]["persona"] = DEFAULT_PERSONA
+    if "style" not in data.get("ai", {}):
+        # 老配置按实际人设归档：改过性格的继续走自定义，没改过或空人设用出厂风格。
+        persona = cfg["ai"].get("persona")
+        cfg["ai"]["style"] = "custom" if persona and persona != DEFAULT_PERSONA else "default"
     if "qwen_model_size" not in data.get("tts", {}):
         # Infer old installations from their actual model, rather than marking
         # a running 1.7B engine as 0.6B after adding the new default field.

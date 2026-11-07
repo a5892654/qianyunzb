@@ -3,9 +3,7 @@ import atexit
 import ctypes
 import hashlib
 import json
-import os
 import socket
-import subprocess
 import sys
 import threading
 import time
@@ -56,12 +54,24 @@ class DesktopController:
         return ("ok", info) if isinstance(info, dict) and info.get("app") == "WhaleTalk" else ("occupied", None)
 
     def start_service(self):
-        python = self.root / ".venv" / "Scripts" / "python.exe"
-        env = dict(os.environ, PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
-        with (self.root / "logs" / "desktop_service.log").open("ab") as logfile:
-            return subprocess.Popen([str(python), "main.py", "--no-ui", "--manual-dt"],
-                                    cwd=str(self.root), env=env, stdout=logfile, stderr=logfile,
-                                    creationflags=0x08000000)
+        # 直播姬要求管理员权限，只有后台服务需要提权；界面保持普通权限，WebView2 才能正常显示。
+        script = self.root / "logs" / "start_service.cmd"
+        script.parent.mkdir(parents=True, exist_ok=True)
+        script.write_text(
+            '@echo off\r\n'
+            'cd /d "%~dp0.."\r\n'
+            'set PYTHONUTF8=1\r\n'
+            'set PYTHONIOENCODING=utf-8\r\n'
+            '".venv\\Scripts\\python.exe" main.py --no-ui --manual-dt >> "logs\\desktop_service.log" 2>&1\r\n',
+            encoding="ascii")
+        shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+        shell32.ShellExecuteW.argtypes = [wintypes.HWND, wintypes.LPCWSTR, wintypes.LPCWSTR,
+                                          wintypes.LPCWSTR, wintypes.LPCWSTR, ctypes.c_int]
+        shell32.ShellExecuteW.restype = ctypes.c_void_p
+        result = shell32.ShellExecuteW(None, "runas", "cmd.exe", f'/c "{script}"', str(self.root), 0)
+        if int(result or 0) <= 32:
+            raise RuntimeError("启动千音后台服务需要管理员授权（用于控制直播姬）。授权被取消，程序无法启动。")
+        return result
 
     def wait_online(self, timeout=30.0):
         deadline = time.monotonic() + timeout
@@ -129,22 +139,81 @@ class SingleInstance:
             self.handle = None
 
 
+_SWP_NOSIZE, _SWP_NOMOVE, _SWP_SHOWWINDOW = 0x0001, 0x0002, 0x0040
+
+
+def _raise_window(user, hwnd):
+    try:
+        user.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                                      ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+        user.SetWindowPos(hwnd, None, 0, 0, 0, 0, _SWP_NOMOVE | _SWP_NOSIZE | _SWP_SHOWWINDOW)
+        user.FlashWindow(hwnd, True)
+    except Exception:
+        pass
+
+
+def _bring_to_front(user, hwnd):
+    user.ShowWindow(hwnd, 9)
+    _raise_window(user, hwnd)
+    current = ctypes.windll.kernel32.GetCurrentThreadId()
+    for _ in range(3):
+        if int(user.GetForegroundWindow() or 0) == int(hwnd):
+            return True
+        foreground = user.GetForegroundWindow()
+        fg_thread = int(user.GetWindowThreadProcessId(foreground, None)) if foreground else 0
+        target_thread = int(user.GetWindowThreadProcessId(hwnd, None))
+        attached = []
+        for tid in (fg_thread, target_thread):
+            if tid and tid != current and tid not in attached and user.AttachThreadInput(current, tid, True):
+                attached.append(tid)
+        try:
+            user.BringWindowToTop(hwnd)
+            user.SetForegroundWindow(hwnd)
+            user.SetFocus(hwnd)
+        finally:
+            for tid in attached:
+                user.AttachThreadInput(current, tid, False)
+        time.sleep(0.15)
+        if int(user.GetAncestor(user.GetForegroundWindow(), 2) or 0) == int(hwnd):
+            return True
+        user.keybd_event(0x12, 0, 0, 0)
+        user.keybd_event(0x12, 0, 2, 0)
+        time.sleep(0.1)
+    # 前台被管理员窗口占着时可能抢不到焦点，至少把千音窗口抬到最上面并闪烁任务栏。
+    _raise_window(user, hwnd)
+    return False
+
+
 def focus_existing_window():
     user = ctypes.windll.user32
     user.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
     user.IsWindowVisible.argtypes = [wintypes.HWND]
     user.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
     user.SetForegroundWindow.argtypes = [wintypes.HWND]
+    user.GetForegroundWindow.restype = wintypes.HWND
+    user.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
+    user.GetAncestor.restype = wintypes.HWND
+    user.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user.GetWindowThreadProcessId.restype = wintypes.DWORD
+    user.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+    user.BringWindowToTop.argtypes = [wintypes.HWND]
+    user.SetFocus.argtypes = [wintypes.HWND]
+    user.keybd_event.argtypes = [wintypes.BYTE, wintypes.BYTE, wintypes.DWORD,
+                                 ctypes.c_ulonglong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_ulong]
     callback = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    found = []
+
     def focus(handle, _):
         title = ctypes.create_unicode_buffer(200)
         user.GetWindowTextW(handle, title, len(title))
         if user.IsWindowVisible(handle) and title.value == APP_TITLE:
-            user.ShowWindow(handle, 9)
-            user.SetForegroundWindow(handle)
+            found.append(int(handle))
+            _bring_to_front(user, handle)
             return False
         return True
+
     user.EnumWindows(callback(focus), 0)
+    return bool(found)
 
 
 class DesktopApi:
@@ -200,8 +269,18 @@ def main(argv=None):
     root = resolve_root(sys.argv[1:] if argv is None else argv)
     lock = SingleInstance(root)
     if not lock.acquire():
-        focus_existing_window()
-        return
+        # 另一个实例可能正在退出；等它释放后重新启动，而不是双击后毫无反应。
+        for _ in range(7):
+            if focus_existing_window():
+                return
+            time.sleep(0.5)
+            if lock.acquire():
+                break
+        else:
+            ctypes.windll.user32.MessageBoxW(
+                None, "千音正在启动或退出，暂时没找到主窗口。\n请等几秒后再双击图标。", APP_TITLE,
+                0x40 | 0x00010000 | 0x00040000)
+            return
     try:
         WebApp(root).run()
     except Exception as error:
