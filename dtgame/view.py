@@ -27,6 +27,7 @@ TYPE_CN = {
 
 SCREEN_CN = {
     "battle": "战斗", "map": "地图", "reward": "卡牌奖励", "campfire": "篝火",
+    "campfire_overlay": "篝火小窗",
     "shop": "商店", "event": "事件", "character_select": "选角", "menu": "主菜单",
     "hall": "出征大厅", "loot": "战利品结算", "other": "其他",
     "fountain": "回响之泉", "arena": "决斗场", "rift": "深渊裂隙", "shrine": "诅咒神殿",
@@ -271,12 +272,65 @@ def _fmt_campfire(c: dict) -> list[str]:
     out = ["篝火，可选:"]
     for o in c.get("options") or []:
         mark = "" if o.get("enabled", True) else " (不可用)"
-        # action=false 那条是「继续前行」：它不是一件事，而是离开篝火，
-        # 不标出来模型会以为还有个隐藏操作，或者压根不敢走。
-        if o.get("action") is False:
+        op = str(o.get("op") or "")
+        # 「继续前行」和最后的「带着火回归」都挂在主菜单上但不在动作按钮里，
+        # 不标出来模型会以为都是同一个“离开”，在最后的篝火选错就提前结束本局。
+        if op == "continue":
+            mark += "（离开篝火，继续前进）"
+        elif op == "leave_with_fire":
+            if "结束本局" not in str(o.get("text") or ""):
+                mark += "（结束本局：登塔已通关）"
+        elif op in ("physick", "rune"):
+            mark += "（进入小窗，按 op 操作）"
+        elif o.get("action") is False:
             mark += "（离开篝火）"
         out.append(f"  [{o['slot']}] {o.get('text')}{mark}")
-    out.append('选一项: {"action":"campfire","slot":序号}')
+    if c.get("final"):
+        out.append("这是最后的篝火：继续前行会去挑战终局；带着火回归会直接结束本局。")
+    out.append('选一项: {"action":"campfire","slot":序号}；也可 op=continue / leave_with_fire')
+    return out
+
+
+def _fmt_campfire_overlay(c: dict) -> list[str]:
+    kind = str(c.get("kind") or "")
+    if kind == "physick":
+        out = ["篝火小窗 · 灵药调和：选 2 种结晶露滴混合，获得一次性战斗增益。"]
+        for d in c.get("dews") or []:
+            mark = "（已选）" if d.get("selected") else ""
+            out.append(f"  [{d.get('slot')}] {d.get('name')}{mark}")
+            desc = str(d.get("desc") or "").strip().replace("\n", " ")
+            if desc:
+                out.append(f"      {desc[:120]}")
+        count = int(c.get("selected_count") or 0)
+        out.append(f"已选 {count} 种；调和需要选满 2 种。")
+        status = str(c.get("status") or "").strip()
+        if status:
+            out.append("提示：" + status)
+        out.append('选露滴: {"action":"campfire","op":"dew","slot":序号}')
+        out.append('调和: {"action":"campfire","op":"mix"}'
+                   + ("（现在可调和）" if c.get("can_mix") else "（选满 2 种再调和）"))
+        out.append('返回主菜单: {"action":"campfire","op":"back"}')
+        return out
+    if kind == "rune":
+        out = ["篝火小窗 · 觉醒大卢恩：选一枚激活，一次只能握有一枚。"]
+        for r in c.get("runes") or []:
+            name = r.get("name") or "卢恩"
+            effect = str(r.get("effect") or "").strip()
+            source = str(r.get("source") or "").strip()
+            line = f"  [{r.get('slot')}] {name}"
+            if effect:
+                line += " — " + effect
+            if source:
+                line += f"（出自 {source}）"
+            out.append(line)
+        out.append('激活: {"action":"campfire","op":"rune","slot":序号}')
+        out.append('返回主菜单: {"action":"campfire","op":"back"}')
+        return out
+    out = ["篝火小窗挡住了主菜单，先处理窗口:"]
+    for b in c.get("buttons") or []:
+        out.append(f"  控件 slot={b['slot']} 「{b.get('text') or b.get('name')}」")
+    out.append('点控件: {"action":"campfire","op":"button","slot":控件序号}')
+    out.append('返回主菜单: {"action":"campfire","op":"back"}')
     return out
 
 
@@ -313,6 +367,9 @@ def _fmt_soul_forge(f: dict) -> list[str]:
     选卡 → 选强化 → 确认，漏一步就停在原地空转。"""
     out = [f"灵魂锻造，持有 {f.get('souls', 0)} 灵魂"
            + ("，本次免费" if f.get("free") else "") + ":"]
+    budget = forge.budget(f)
+    if budget:
+        out.append(budget)
     if f.get("window_id"):
         out.append(f"window_id={f['window_id']} revision={f.get('revision')}")
     cards = f.get("cards") or []
@@ -364,7 +421,9 @@ def _fmt_soul_forge(f: dict) -> list[str]:
 
 
 def _fmt_overlay(screen: str, body: dict) -> list[str]:
-    out = [f"{SCREEN_CN.get(screen, screen)}「{body.get('panel', '')}」挡住了地图，先处理窗口:"]
+    choice = body.get("card_choice") or {}
+    where = "挡住了战场，先选一张牌:" if choice else "挡住了当前操作，先处理窗口:"
+    out = [f"{SCREEN_CN.get(screen, screen)}「{body.get('panel', '')}」{where}"]
     if body.get("window_id"):
         out.append(f"window_id={body['window_id']} revision={body['revision']}")
     shown = set()
@@ -373,6 +432,10 @@ def _fmt_overlay(screen: str, body: dict) -> list[str]:
         if text:
             out.append(text)
             shown.add(text)
+    card_texts = set()
+    for card in choice.get("cards") or []:
+        card_texts.add(str(card.get("name") or ""))
+        card_texts.add(str(card.get("desc") or ""))
     action = "event" if screen == "event" else "overlay"
     for o in body.get("options") or []:
         lock = f" (不可用:{o.get('lock_reason') or '锁定'})" if o.get("locked") else ""
@@ -383,10 +446,34 @@ def _fmt_overlay(screen: str, body: dict) -> list[str]:
             out.append(f"      {desc}")
         shown.update((o.get("name") or "", desc))
     for text in body.get("texts") or []:
+        if text in card_texts:
+            continue
         if text not in shown:
             out.append(text)
             shown.add(text)
+    skip_slots: set[int] = set()
+    if choice:
+        out.append("候选牌（先点卡面控件选中，再点确认控件）:")
+        for card in choice.get("cards") or []:
+            slot = int(card.get("slot", -1))
+            skip_slots.add(slot)
+            mark = " ←已选" if card.get("selected") else ""
+            out.append(f"  控件 slot={slot} {card.get('name')}{mark}")
+            desc = str(card.get("desc") or "").strip().replace("\n", " ")
+            if desc:
+                out.append(f"      {desc[:160]}")
+        confirm = int(choice.get("confirm_slot", -1))
+        if confirm >= 0:
+            skip_slots.add(confirm)
+            out.append(f"  控件 slot={confirm} 「确认所选」")
+        cancel = int(choice.get("cancel_slot", -1))
+        if cancel >= 0:
+            skip_slots.add(cancel)
+            out.append(f"  控件 slot={cancel} 「取消」")
+        out.append('动作：{"action":"overlay","slot":控件序号,"op":"button"}')
     for b in body.get("buttons") or []:
+        if int(b.get("slot", -1)) in skip_slots:
+            continue
         out.append(f"  控件 slot={b['slot']} 「{b.get('text') or b.get('name')}」: action=overlay op=button")
     if any(not option.get("locked") for option in body.get("options") or []):
         out.append(f"选择未锁定选项: action={action} slot=选项序号")
@@ -483,6 +570,8 @@ def render(state: dict) -> str:
         lines.extend(_fmt_reward(body))
     elif screen == "campfire" and body:
         lines.extend(_fmt_campfire(body))
+    elif screen == "campfire_overlay" and body:
+        lines.extend(_fmt_campfire_overlay(body))
     elif screen == "shop" and body:
         lines.extend(_fmt_shop(body))
     elif screen == "soul_forge" and body:

@@ -25,6 +25,9 @@ PRIORITY = {"farewell": -1, "manual": 0, "superchat": 0, "guard": 0, "gift": 1, 
 MERGE_BY_TYPE = ("enter", "follow", "like")
 # 游戏解说描述的只是生成那一刻的画面；排队等欢迎超过这个时间就换说当前局势。
 NARRATION_FRESH_AFTER = 5.0
+# 游戏解说和临场反应会随画面过时；观众消息与手动播报来了就给它们让路。
+GAME_TYPES = ("narration", "reaction")
+CHAT_TYPES = ("manual", "farewell", "superchat", "guard", "gift", "danmaku", "follow", "enter", "like")
 # 正常中文语速约 5 字/秒；TTS 偶发复读时按文本长度给约 2 倍余量的上限，超了就掐断。
 SPEECH_SECONDS_PER_CHAR = 0.35
 SPEECH_CAP_EXTRA = 4.0
@@ -85,6 +88,7 @@ class Pipeline:
         self.merging = {}
         self._enter_times = collections.deque()
         self.current = None
+        self._generating = None
         self._recovering = False
         self._spoken_ids = set()
         self.pending_replies = set()
@@ -235,6 +239,10 @@ class Pipeline:
                     m["names"] = [ev["name"]]
                 elif ev["name"] not in m["names"]:
                     m["names"].append(ev["name"])
+                if t == "enter" and not ev.get("_gift_supporter"):
+                    # 进房高峰会持续几秒：新朋友加入时把合并截止时间往后推，
+                    # 最多比第一位晚一个窗口，避免一波人拆成好几次欢迎。
+                    m["deadline"] = min(now + win, m["first"] + win * 2)
             else:
                 self.merging[key] = {"ev": dict(ev), "names": [ev["name"]], "deadline": now + win, "first": now}
             return
@@ -281,16 +289,42 @@ class Pipeline:
                     self._flush_merge(key, m)
             self.interaction.tick()
 
+    def _drop_pending(self, types):
+        """取消还没开始播的指定任务；正在播的那句不动，让它自然说完。"""
+        for job in [j for j in self.jobs if j["type"] in types]:
+            self.jobs.remove(job)
+            self._mark_done(job["id"])
+        if self._generating is not None and self._generating["type"] in types:
+            # 模型还在生成的这句也别播了；生成完发现 id 已作废会自己丢掉。
+            self._mark_done(self._generating["id"])
+        for queue in (self.synth_q, self.play_q):
+            kept = []
+            while True:
+                try:
+                    item = queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+                if item.get("type") in types:
+                    self._mark_done(item["id"])
+                else:
+                    kept.append(item)
+            for item in kept:
+                queue.put_nowait(item)
+        if not self.jobs:
+            self.has_job.clear()
+
     def _enqueue(self, ev, text=None):
         if ev["type"] == "gift":
             banner = getattr(self.app, "gift_banner", None)
             if banner is not None:
                 banner.trigger(ev)
         if ev["type"] == "narration":
-            # 解说跟着画面走：新的一句已经在排队时，旧的绝不能再补播。
-            for old in [j for j in self.jobs if j["type"] == "narration"]:
-                self.jobs.remove(old)
-                self._mark_done(old["id"])
+            # 解说跟着画面走：新的一句已经在排队时，旧的绝不能再从合成/播放队列里补播。
+            self._drop_pending(("narration",))
+        elif ev["type"] in CHAT_TYPES:
+            # 观众消息、点歌播报和手动通知优先：还没开口的游戏解说/反应直接作废，
+            # 否则回复会排在几句过时的游戏台词后面。
+            self._drop_pending(GAME_TYPES)
         job = {"id": next(_seq), "type": ev["type"], "ev": ev, "text": text, "ts": time.time(),
                "prio": PRIORITY.get(ev["type"], 3)}
         self.jobs.append(job)
@@ -322,23 +356,8 @@ class Pipeline:
         return self.say(text, emotion, kind="narration")
 
     def narrate_fresh(self, text, emotion=""):
-        """游戏解说最新优先：丢掉排队/正在播的旧游戏解说，直接接当前这句。"""
-        for job in [j for j in self.jobs if j["type"] in ("narration", "reaction")]:
-            self.jobs.remove(job)
-            self._mark_done(job["id"])
-        keep = []
-        while True:
-            try:
-                item = self.play_q.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-            if item.get("type") in ("narration", "reaction"):
-                self._mark_done(item["id"])
-            else:
-                keep.append(item)
-        for item in keep:
-            self.play_q.put_nowait(item)
-        # 正在播的那句让它说完，只丢弃排队中的旧游戏解说；否则会频繁切句。
+        """游戏解说最新优先：丢掉排队中的旧游戏解说/反应，当前这句说完再接最新一句。"""
+        self._drop_pending(GAME_TYPES)
         self.react(text, emotion)
 
     def react(self, text, emotion=""):
@@ -392,7 +411,13 @@ class Pipeline:
         return time.monotonic() >= item.get("expires_at", float("inf"))
 
     def _refresh_narration(self, job):
-        """排队太久的解说改说当前画面，避免欢迎结束后播出进房前的旧局势。"""
+        """排队太久的解说改说当前画面，避免欢迎结束后播出进房前的旧局势。
+
+        只改游戏解说：手动播报、点歌/关注提醒和游戏反应都有各自的时效，
+        不能被局势句顶掉。
+        """
+        if job["type"] != "narration":
+            return
         waited = time.time() - job["ts"]
         if waited < NARRATION_FRESH_AFTER or job["text"] is None:
             return
@@ -435,6 +460,7 @@ class Pipeline:
             self._refresh_narration(job)
             dt = getattr(self.app, "dt", None)
             dt = dt if dt is not None and dt.running else None
+            self._generating = job
             try:
                 emotion = ""
                 rule = job["ev"].get("fixed_rule")
@@ -470,6 +496,11 @@ class Pipeline:
                 self.app.push("log", {"level": "error", "msg": f"生成回复失败：{e}"})
                 self._mark_done(job["id"])
                 continue
+            finally:
+                self._generating = None
+            if job["id"] in self._spoken_ids:
+                # 生成期间被观众消息/最新解说取代，这句不再播。
+                continue
             if not text:
                 self._mark_done(job["id"])
                 continue
@@ -493,7 +524,11 @@ class Pipeline:
                 item["audio_file"] = job["ev"]["audio_file"]
                 item["src"] = "心愿单音频"
             self.app.push("reply", item)
-            await self.synth_q.put(item)
+            self._generating = job
+            try:
+                await self.synth_q.put(item)
+            finally:
+                self._generating = None
 
     def _stream_mode(self):
         """流式：边生成边播，积累短缓冲后开口，不用等整句合成完。"""
@@ -504,6 +539,8 @@ class Pipeline:
         while True:
             item = await self.synth_q.get()
             await self.tts_ready.wait()
+            if item["id"] in self._spoken_ids:
+                continue
             if self._during_farewell(item) or self._expired(item):
                 self._mark_done(item["id"])
                 continue
@@ -643,6 +680,8 @@ class Pipeline:
         while True:
             item = await self.play_q.get()
             await self.tts_ready.wait()
+            if item["id"] in self._spoken_ids:
+                continue
             if self._during_farewell(item) or self._expired(item):
                 self._mark_done(item["id"])
                 continue

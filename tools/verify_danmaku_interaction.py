@@ -73,11 +73,14 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         # 通过真实 step 更新缓存，弹幕回复不能另外阻塞查询游戏桥。
         player._ask = AsyncMock(return_value={"action": "end", "say": "这回合有点险"})
         await player.step()
+        reaction_job = next((j["id"] for j in app.pipe.jobs if j["type"] == "reaction"), None)
+        self.assertIsNotNone(reaction_job)
         self.danmaku(app)
+        # 观众消息优先：排队中的游戏反应给回复让路，不再排在回复后补播。
+        self.assertTrue(app.pipe.spoken_done(reaction_job))
         await self.worker(app)
         first = await self.take(app)
-        second = await self.take(app)
-        self.assertEqual([first["type"], second["type"]], ["danmaku", "reaction"])
+        self.assertEqual(first["type"], "danmaku")
         self.assertEqual(first["text"], "先把血回上来，多谢提醒！")
         prompt = app.brain.openai.ask.call_args.args[2]
         for expected in ("记得回血", "奈尔", "12/60", "这回合有点险"):
@@ -114,14 +117,15 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
     async def test_manual_announcement_keeps_priority(self):
         app = make_app()
         attach_game(app)
-        app.pipe.narrate("继续打牌")
+        narration = app.pipe.narrate("继续打牌")
         self.danmaku(app)
+        self.assertTrue(app.pipe.spoken_done(narration))
         app.pipe.say("主播手动通知")
         await self.worker(app)
-        types = [(await self.take(app))["type"] for _ in range(3)]
-        self.assertEqual(types, ["manual", "danmaku", "narration"])
+        types = [(await self.take(app))["type"] for _ in range(2)]
+        self.assertEqual(types, ["manual", "danmaku"])
 
-    async def test_reply_reaches_synthesis_and_playback_before_narration(self):
+    async def test_reply_preempts_narration_before_synthesis_and_playback(self):
         app = make_app()
         attach_game(app)
         app.cfg["tts"].update(qwen_enabled=False)
@@ -137,7 +141,7 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
             push(kind, data)
             if kind == "speak":
                 played.append(data["text"])
-            if kind == "speak_end" and len(played) == 2:
+            if kind == "speak_end" and played:
                 done.set()
 
         app.push = record
@@ -148,9 +152,9 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
             task = asyncio.create_task(worker())
             self.addAsyncCleanup(self.stop_worker, task)
         await asyncio.wait_for(done.wait(), 2)
-        self.assertEqual(played, ["先把血回上来，多谢提醒！", "继续打牌"])
+        self.assertEqual(played, ["先把血回上来，多谢提醒！"])
         self.assertEqual([c.args[1] for c in app.engine.synth.await_args_list], played)
-        self.assertEqual(app.player.play_blocking.call_count, 2)
+        self.assertEqual(app.player.play_blocking.call_count, 1)
 
     async def test_queue_eviction_and_clear_release_jobs(self):
         app = make_app()
@@ -199,6 +203,68 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         new = app.pipe.narrate("这一手的最新解说")
         self.assertTrue(app.pipe.spoken_done(old))
         self.assertEqual([j["id"] for j in app.pipe.jobs], [new])
+
+    async def test_new_game_line_drops_old_narration_already_in_play_queue(self):
+        app = make_app()
+        old = app.pipe.narrate("上一手的旧解说")
+        app.pipe.jobs.clear()
+        app.pipe.has_job.clear()
+        app.pipe.play_q.put_nowait({"id": old, "type": "narration", "text": "上一手的旧解说"})
+        new = app.pipe.narrate("这一手的最新解说")
+        self.assertTrue(app.pipe.spoken_done(old))
+        self.assertTrue(app.pipe.play_q.empty())
+        self.assertEqual([j["id"] for j in app.pipe.jobs], [new])
+
+    async def test_chat_reply_drops_queued_game_audio_but_keeps_current_line(self):
+        app = make_app()
+        attach_game(app)
+        app.pipe.current = {"id": 1, "type": "narration", "text": "正在播的这一句"}
+        old = app.pipe.narrate("排队中的旧解说")
+        app.pipe.jobs.clear()
+        app.pipe.has_job.clear()
+        app.pipe.play_q.put_nowait({"id": old, "type": "narration", "text": "排队中的旧解说"})
+        self.danmaku(app)
+        self.assertTrue(app.pipe.spoken_done(old))
+        self.assertTrue(app.pipe.play_q.empty())
+        self.assertEqual([j["type"] for j in app.pipe.jobs], ["danmaku"])
+        self.assertEqual(app.pipe.current["text"], "正在播的这一句")
+
+    async def test_stale_manual_announcement_is_not_replaced_by_the_game_scene(self):
+        app = make_app()
+        app.dt = SimpleNamespace(running=True, fresh_commentary=lambda: "能量见底了，这回合先收手。")
+        job = app.pipe.say("收到小明点的《晴天》，排在第1首！")
+        app.pipe.jobs[0]["ts"] -= 30
+        await self.worker(app)
+        item = await self.take(app)
+        self.assertEqual(item["id"], job)
+        self.assertEqual(item["type"], "manual")
+        self.assertEqual(item["text"], "收到小明点的《晴天》，排在第1首！")
+
+    async def test_stale_reaction_keeps_its_own_line(self):
+        app = make_app()
+        app.dt = SimpleNamespace(running=True, fresh_commentary=lambda: "先看清眼前这一步。")
+        job = app.pipe.react("魂核到手，来张传说卡吧。")
+        app.pipe.jobs[0]["ts"] -= 30
+        await self.worker(app)
+        item = await self.take(app)
+        self.assertEqual(item["id"], job)
+        self.assertEqual(item["text"], "魂核到手，来张传说卡吧。")
+
+    def test_fresh_commentary_describes_the_latest_action_without_old_panel(self):
+        app = make_app()
+        player = attach_game(app)
+        player._last_state = game_state()
+        player._state_time = time.monotonic()
+        player._remember_fresh_action(game_state(), {"ok": True, "action": {"action": "play"}})
+        line = player.fresh_commentary()
+        self.assertIn(line, ("这一手先打出去，看看对面怎么接。", "牌打完了，盯着这次结算。",
+                             "刚出完手，接着看它怎么动。"))
+        self.assertNotRegex(line, r"\d")
+        self.assertNotIn("手里还有", line)
+        player._fresh_action = ("battle", "play", time.monotonic() - 30)
+        self.assertIn(player.fresh_commentary(), ("先看清眼前这一步。", "这手得看仔细再动。"))
+        player._state_time = time.monotonic() - 30
+        self.assertEqual(player.fresh_commentary(), "")
 
     async def test_filters_do_not_leak_rejected_chat_to_game(self):
         app = make_app()

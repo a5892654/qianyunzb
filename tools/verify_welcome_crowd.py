@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from brain import Brain
+from brain import Brain, WELCOME_REPLY_STYLES
 from config import DEFAULTS
 from pipeline import Pipeline, speech_cap
 from supporters import GiftSupporters
@@ -56,6 +56,51 @@ class WelcomeCrowdTests(unittest.IsolatedAsyncioTestCase):
         ev, = self.flush_enters()
         self.assertFalse(ev["_crowd"])
         self.assertEqual((await self.reply(ev))[0], "普通欢迎小明")
+
+    async def test_welcome_prompt_skips_story_style_and_old_history(self):
+        self.cfg["ai"]["style"] = "taffy"
+        self.cfg["events"]["enter"]["mode"] = "ai"
+        self.app.brain.openai.ask = AsyncMock(return_value="欢迎小明，今天也一起玩！")
+        old = "事故标题是新手撞上围殴。前情是四个敌人堵着我。"
+        key = (self.cfg.get("room_id"), "enter", False, False)
+        self.app.brain.recent_replies[key].append((old, "旧观众"))
+        ev = {"type": "enter", "uid": 1, "name": "小明"}
+        text, source, _ = await self.reply(ev)
+        prompt = self.app.brain.openai.ask.await_args.args[2]
+        self.assertEqual((text, source), ("欢迎小明，今天也一起玩！", "AI"))
+        self.assertIn("这次只欢迎这位观众", prompt)
+        self.assertNotIn("把这件事说成一个小事故现场", prompt)
+        self.assertNotIn("四个敌人", prompt)
+        self.assertTrue(any(style in prompt for style in WELCOME_REPLY_STYLES))
+
+    async def test_welcome_ai_old_content_falls_back_to_template(self):
+        self.cfg["events"]["enter"]["mode"] = "ai"
+        self.app.brain.openai.ask = AsyncMock(return_value="事故标题是新手撞上围殴。前情是四个敌人堵着我，这一幕刚好开场。")
+        ev = {"type": "enter", "uid": 1, "name": "小明"}
+        text, source, _ = await self.reply(ev)
+        self.assertEqual(text, "普通欢迎小明")
+        self.assertNotIn("敌人", text)
+        self.assertIn("模板", source)
+
+    async def test_enter_burst_extends_merge_deadline_and_uses_crowd(self):
+        self.cfg["events"]["enter"]["crowd_count"] = 2
+        stamps = iter([100.0, 103.0])
+
+        def fake_time():
+            try:
+                return next(stamps)
+            except StopIteration:
+                return 103.0
+
+        with patch("pipeline.time.time", fake_time):
+            self.enter(1, "小明")
+            self.enter(2, "小红")
+        pending = next(iter(self.pipe.merging.values()))
+        self.assertEqual(pending["deadline"], 107.0)
+        self.assertEqual(pending["names"], ["小明", "小红"])
+        ev, = self.flush_enters()
+        self.assertTrue(ev["_crowd"])
+        self.assertEqual((await self.reply(ev))[0], "大家好呀，欢迎新朋友！")
 
     async def test_three_quick_entries_switch_to_nameless_crowd_welcome(self):
         for uid, name in ((1, "小明"), (2, "小红"), (3, "小刚")):

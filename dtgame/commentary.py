@@ -25,7 +25,7 @@ def scene(state):
         mode, label = "tense", "战况紧张，用简短有反应的一句话解说，保持和观众交流"
     elif screen == "battle" and not settled:
         mode, label = "battle", "正在打牌，先专注操作；开场可以来一句，之后单句和连招总结穿插着说，优先回应观众"
-    elif screen in ("reward", "campfire", "shop", "map", "event", "loot", "hall", "run_end") or settled:
+    elif screen in ("reward", "campfire", "campfire_overlay", "shop", "map", "event", "loot", "hall", "run_end") or settled:
         mode, label = "rest", "正在选择或结算，可以顺着聊天自然多说一两句"
     else:
         mode, label = "neutral", "自然闲聊，句子有长有短，不必每次追问"
@@ -196,6 +196,7 @@ class GameCommentary:
             "map": "下一条路得挑稳一点。",
             "shop": "先看看钱够不够，别乱花。",
             "campfire": "先喘口气，再决定怎么强化。",
+            "campfire_overlay": "篝火边这几个选择，得想清楚再用。",
             "event": "这个事件得看清楚再选。",
             "hall": "先确认这一局怎么开，再出发。",
         }.get(screen, "先看清眼前这一步。")

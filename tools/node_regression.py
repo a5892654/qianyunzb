@@ -5,7 +5,7 @@ import time
 
 HOST, PORT = "127.0.0.1", 9787
 OVERLAYS = {"fountain", "arena", "rift", "shrine", "chest", "soul_forge", "dungeon",
-            "dialog", "event", "campfire", "shop", "loot", "reward",
+            "dialog", "event", "campfire", "campfire_overlay", "shop", "loot", "reward",
             "death", "death_analysis", "run_end"}
 STUCK_S = 25
 
@@ -25,7 +25,8 @@ def call(cmd, timeout=8):
 
 def readable(body):
     return isinstance(body, dict) and any(body.get(key) for key in
-        ("options", "buttons", "texts", "title", "desc", "cards", "choices", "items", "offers", "tiles"))
+        ("options", "buttons", "texts", "title", "desc", "cards", "choices", "items", "offers", "tiles",
+         "dews", "runes"))
 
 
 def main():

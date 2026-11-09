@@ -36,7 +36,7 @@ def _schema(props: dict, required: list[str] | None = None) -> dict:
 TOOLS = [
     {
         "name": "game_screen",
-        "description": "查询游戏当前停在哪个界面（battle/map/reward/campfire/shop/event/menu）以及是否正在播动画。",
+        "description": "查询游戏当前停在哪个界面（battle/map/reward/campfire/campfire_overlay/shop/event/menu 等）以及是否正在播动画。",
         "inputSchema": _schema({}),
     },
     {
@@ -97,10 +97,10 @@ TOOLS = [
     },
     {
         "name": "campfire_action",
-        "description": "篝火界面操作。slot 选择某个选项；或用 op=continue 直接离开篝火继续前进。",
+        "description": "篝火操作。slot 选择主菜单某项；op=continue 离开篝火，op=leave_with_fire 在最后的篝火结束本局。篝火小窗里用 op=dew 选露滴、mix 调和灵药、rune 激活大卢恩、back 返回。",
         "inputSchema": _schema({
-            "slot": {"type": "integer", "description": "选项序号"},
-            "op": {"type": "string", "description": "填 continue 表示离开篝火"},
+            "slot": {"type": "integer", "description": "主菜单选项序号；dew/rune 时为露滴/卢恩序号；button 时为控件序号"},
+            "op": {"type": "string", "description": "continue / leave_with_fire / dew / mix / rune / back / button"},
         }),
     },
     {

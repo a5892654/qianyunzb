@@ -119,13 +119,33 @@ def recommend(state: dict):
     return _int(option.get("slot")), _score(option, state.get("selected") or {})[1]
 
 
+def budget(state: dict) -> str:
+    """灵魂花不出去等于没拿到：这里只给预算提醒，具体锻哪张仍由模型按牌面决定。"""
+    souls = _int(state.get("souls"))
+    act = _int(state.get("act"))
+    floor = _int(state.get("floor"))
+    if state.get("free"):
+        return "本次锻造免费：能锻就直接锻，不要浪费这次机会。"
+    parts = []
+    if act >= 4 or floor >= 13:
+        parts.append(f"已经到第{act}幕第{floor}层：灵魂本局结束就作废，这次篝火尽量花光。")
+    elif souls >= 500:
+        parts.append(f"持有 {souls} 灵魂：灵魂是消耗品，够就多锻，别只锻一次就收手。")
+    cheapest = _int(state.get("cheapest"))
+    if cheapest > 0 and souls >= cheapest:
+        parts.append(f"当前最便宜强化 {cheapest} 魂：锻完这张后灵魂仍够，就继续换牌再锻。")
+        if act >= 4 or floor >= 13 or souls >= 500:
+            parts.append(f"按当前最低价粗算还能锻 {souls // cheapest} 次，别只锻一张就走。")
+    return " ".join(parts)
+
+
 def notes(state: dict) -> list[str]:
     selected = state.get("selected") or {}
     if not selected:
         cards = state.get("cards") or []
         if not cards:
             return ["没有可锻造的卡，直接离开。"]
-        return ["先选一张卡：优先核心输出/防御牌；灵魂有限时别把每张卡都摸一遍。"]
+        return ["先选一张卡：优先核心输出/防御牌；灵魂是消耗品、本局结束带不走，别只摸一遍就离开。"]
 
     out = []
     free = bool(state.get("free"))
@@ -148,5 +168,20 @@ def notes(state: dict) -> list[str]:
     if forge_count and not free:
         mult = 1.6 if forge_count == 1 else 2.5
         out.append(f"这张已锻 {forge_count} 次，本次费用 ×{mult:g}；除非它是绝对核心，否则换一张更划算。")
+    if forge_count >= 2 and not free:
+        fresh = [c for c in state.get("cards") or []
+                 if _int(c.get("slot")) != _int(selected.get("slot"))
+                 and _int(c.get("forge_count")) < forge_count]
+        if fresh:
+            nxt = min(fresh, key=lambda c: (_int(c.get("forge_count")),
+                                            -(_int(c.get("damage")) + _int(c.get("block"))),
+                                            _int(c.get("slot"))))
+            times = _int(nxt.get("forge_count"))
+            hint = "还没锻过" if times == 0 else f"只锻过{times}次"
+            out.append(f"这张已经锻过 2 次，别继续加价；用 op=card 改选 "
+                       f"[{_int(nxt.get('slot'))}] {nxt.get('name')}（{hint}）把灵魂花到有用的地方。")
+    souls = _int(state.get("souls"))
+    if souls > 0 and not free:
+        out.append(f"手里还有 {souls} 灵魂：锻完一张后只要还够最便宜的强化，就继续换牌锻，别把灵魂留到本局结束。")
     out.append("界面默认停在第一项，不代表最优；确认前先比较全部强化项。")
     return out

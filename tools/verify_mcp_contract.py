@@ -30,6 +30,21 @@ def boss_dialog_state(window="boss1", revision="r1", panel="Panel"):
         "texts": ["战斗胜利", "◆ 兑换遗物"], "can_back": False}}
 
 
+def card_choice_dialog_state():
+    return {"screen": "dialog", "window_id": "cc1", "dialog": {
+        "panel": "EldenCardChoice", "window_id": "cc1", "revision": "c1",
+        "options": [], "buttons": [
+            {"slot": 0, "text": ""}, {"slot": 1, "text": ""},
+            {"slot": 2, "text": "确　认　置　顶 [ 命运终结 ]"}, {"slot": 3, "text": "✕ 取　消"}],
+        "texts": ["◈ 秘传手札 ◈　从牌库挑选一张"],
+        "card_choice": {
+            "cards": [
+                {"slot": 0, "name": "命运终结", "desc": "造成 12 点伤害。", "selected": True},
+                {"slot": 1, "name": "星辉流斩", "desc": "造成 8 点伤害并抽 1 张牌。", "selected": False}],
+            "confirm_slot": 2, "cancel_slot": 3},
+        "can_back": False}}
+
+
 def battle_state(estus=None, potions=None, hp=20, max_hp=40):
     """战斗假状态：只填渲染要用的字段，estus/potions 按桥的新契约给。"""
     battle = {"turn": 3, "energy": 1, "max_energy": 3, "hp": hp, "max_hp": max_hp,
@@ -70,6 +85,42 @@ def campfire_state():
         {"slot": 0, "text": "休息：回复 30% 生命", "enabled": True, "action": True},
         {"slot": 1, "text": "灵魂锻造：升级一张卡", "enabled": True, "action": True},
         {"slot": 2, "text": "继续前行", "enabled": True, "action": False}]}}
+
+
+def campfire_final_state():
+    return {"screen": "campfire", "campfire": {
+        "final": True,
+        "options": [
+            {"slot": 0, "text": "在篝火旁休息  ✓ 已休息 (+20 HP)", "enabled": False, "action": True, "op": "rest"},
+            {"slot": 1, "text": "觉醒大卢恩  (选择一个激活)", "enabled": True, "action": True, "op": "rune"},
+            {"slot": 2, "text": "带着火回归  (结束本局：登塔已通关)", "enabled": True,
+             "action": False, "op": "leave_with_fire"},
+            {"slot": 3, "text": "继续前行", "enabled": True, "action": False, "op": "continue"},
+        ]}}
+
+
+def campfire_overlay_state(kind="physick", **over):
+    if kind == "rune":
+        body = {"kind": "rune", "window_id": "rune1", "revision": "r1",
+                "dews": [], "selected_count": 0, "can_mix": False, "status": "",
+                "runes": [
+                    {"slot": 0, "name": "巨人之卢恩", "effect": "最大生命 +25%，敌人也更强。",
+                     "source": "巨人", "selected": True},
+                    {"slot": 1, "name": "命运之卢恩", "effect": "每场战斗可重抽一次手牌。",
+                     "source": "命运", "selected": False}],
+                "buttons": [], "can_back": True}
+    else:
+        body = {"kind": "physick", "window_id": "dew1", "revision": "d1",
+                "dews": [
+                    {"slot": 0, "name": "阳炎露滴", "desc": "回复 20 生命。", "selected": True},
+                    {"slot": 1, "name": "铁壁露滴", "desc": "获得 10 格挡。", "selected": False},
+                    {"slot": 2, "name": "碎星露滴", "desc": "首次攻击伤害翻倍。", "selected": False}],
+                "runes": [], "selected_count": 1, "can_mix": False, "status": "",
+                "buttons": [{"slot": 0, "text": "选择"}, {"slot": 1, "text": "选择"},
+                            {"slot": 2, "text": "调和灵药"}, {"slot": 3, "text": "返回篝火"}],
+                "can_back": True}
+    body.update(over)
+    return {"screen": "campfire_overlay", "window_id": body["window_id"], "campfire_overlay": body}
 
 
 def soul_forge_state(**over):
@@ -181,6 +232,25 @@ class ContractTests(unittest.TestCase):
         self.assertIn("[0] 休息：回复 30% 生命", text)
         self.assertNotIn("[0] 休息：回复 30% 生命（离开篝火）", text)
 
+    def test_view_final_campfire_separates_leave_run_from_continue(self):
+        text = view.render(campfire_final_state())
+        self.assertIn("[2] 带着火回归  (结束本局：登塔已通关)", text)
+        self.assertIn("[3] 继续前行（离开篝火，继续前进）", text)
+        self.assertIn("最后的篝火", text)
+
+    def test_view_campfire_overlay_reads_dews_and_rune(self):
+        text = view.render(campfire_overlay_state())
+        self.assertIn("灵药调和", text)
+        self.assertIn("[0] 阳炎露滴（已选）", text)
+        self.assertIn("已选 1 种", text)
+        self.assertIn('"action":"campfire","op":"dew","slot":序号', text)
+        self.assertIn('"action":"campfire","op":"mix"', text)
+        self.assertIn('"action":"campfire","op":"back"', text)
+        rune = view.render(campfire_overlay_state("rune"))
+        self.assertIn("[0] 巨人之卢恩 — 最大生命 +25%", rune)
+        self.assertIn("（出自 巨人）", rune)
+        self.assertIn('"action":"campfire","op":"rune","slot":序号', rune)
+
     def test_view_shop_shows_names_effects_and_affordability(self):
         text = view.render(shop_state())
         self.assertIn("[0] 卡牌「钢斩」 普通/攻击 价 47", text)
@@ -215,6 +285,20 @@ class ContractTests(unittest.TestCase):
         self.assertIn("还不能确认锻造", locked)
         self.assertIn("还没选卡", locked)
         self.assertNotIn("已选卡: [", locked)
+
+    def test_view_soul_forge_pushes_late_game_spending(self):
+        text = view.render(soul_forge_state(souls=900, act=4, floor=14, cheapest=80))
+        self.assertIn("第4幕第14层", text)
+        self.assertIn("灵魂本局结束就作废", text)
+        self.assertIn("当前最便宜强化 80 魂", text)
+        self.assertIn("手里还有 900 灵魂", text)
+        overforged = soul_forge_state(
+            souls=900, act=4, floor=14, cheapest=80,
+            selected={"slot": 0, "id": "slash", "name": "横斩", "type": "attack", "cost": 1,
+                      "damage": 8, "block": 0, "desc": "造成 8 点伤害。", "forge_count": 2})
+        swapped = view.render(overforged)
+        self.assertIn("这张已经锻过 2 次", swapped)
+        self.assertIn("[1] 铁壁", swapped)
 
     def test_view_renders_death_analysis(self):
         text = view.render(panel_state("death_analysis"))
@@ -293,9 +377,29 @@ class ContractTests(unittest.TestCase):
             self.assertIn(expected, text)
         self.assertIn("不要猜 op=back", text)
 
+    def test_view_card_choice_maps_empty_buttons_to_cards(self):
+        text = view.render(card_choice_dialog_state())
+        self.assertIn("挡住了战场", text)
+        self.assertIn("控件 slot=0 命运终结 ←已选", text)
+        self.assertIn("控件 slot=1 星辉流斩", text)
+        self.assertIn("控件 slot=2 「确认所选」", text)
+        self.assertIn("控件 slot=3 「取消」", text)
+        self.assertIn("先点卡面控件选中", text)
+        self.assertNotIn("控件 slot=0 「」", text)
+
     def test_system_prompt_protects_settings_and_boss_choice(self):
         self.assertIn("设置窗口只选「关闭」", SYSTEM)
         self.assertIn("Boss魂与章节奖励需要选择奖励", SYSTEM)
+
+    def test_system_prompt_teaches_campfire_overlay_and_spending_souls(self):
+        for shape in ('{"action":"campfire","op":"dew","slot":露滴序号}',
+                      '{"action":"campfire","op":"mix"}',
+                      '{"action":"campfire","op":"rune","slot":卢恩序号}',
+                      '{"action":"campfire","op":"back"}',
+                      '{"action":"campfire","op":"leave_with_fire"}'):
+            self.assertIn(shape, SYSTEM)
+        self.assertIn("别囤灵魂", SYSTEM)
+        self.assertIn("锻完一张后如果灵魂还够", SYSTEM)
 
     def test_system_prompt_has_battle_order_and_shop_advice(self):
         for word in ("战斗决策顺序", "作战参谋", "斩杀窗口", "商店决策", "卡牌奖励"):
@@ -348,6 +452,13 @@ class ContractTests(unittest.TestCase):
         # 继续前行也是篝火的 slot，动作侧要原样转给 campfire
         self.assertTrue(player._do(campfire_state(), {"action": "campfire", "slot": 2})["ok"])
         bridge.campfire.assert_called_once_with("", 2)
+        # 篝火小窗必须走 campfire 命令，不能落回“界面不支持 overlay”的拒单
+        self.assertTrue(player._do(campfire_overlay_state(), {"action": "campfire", "op": "dew", "slot": 1})["ok"])
+        bridge.campfire.assert_called_with("dew", 1)
+        self.assertTrue(player._do(campfire_overlay_state("rune"), {"action": "campfire", "op": "rune", "slot": 0})["ok"])
+        bridge.campfire.assert_called_with("rune", 0)
+        self.assertTrue(player._do(campfire_final_state(), {"action": "campfire", "slot": 2})["ok"])
+        bridge.campfire.assert_called_with("", 2)
         # 界面白名单：越界动作照样被拒，不能拿锻造动作去撞战斗界面
         self.assertFalse(player._do(soul_forge_state(), {"action": "estus"})["ok"])
         self.assertFalse(player._do(battle_state(), {"action": "forge", "op": "back"})["ok"])

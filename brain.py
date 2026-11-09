@@ -260,6 +260,16 @@ REPLY_STYLES = (
     "像朋友闲聊一样简短回应，合适时再抛一个相关的小问题。",
     "语气亲切自然，换一种句式，不要套用前几次的客套话。",
 )
+# 进房欢迎只欢迎本人，不能套用“事故现场/先抛结论再补前情”的聊天表达方式；
+# 那会把很久以前的游戏局势当成欢迎词说出来。
+WELCOME_REPLY_STYLES = (
+    "自然热情地欢迎本人，换一个开场和句式；不提前情、旧事或游戏局势。",
+    "像现场迎人一样只说这一句欢迎，语气轻快；不扯之前的直播内容。",
+    "欢迎本人，可以带一个轻松的小感叹；不要提敌人、进度或刚才发生的事。",
+    "直接欢迎，换一种开场；不要复述之前的欢迎，也不要编造前情。",
+)
+WELCOME_BLOCKLIST = ("前情", "刚才", "上次", "之前", "上一", "敌人", "血量", "回合",
+                     "手牌", "Boss", "boss", "遗物", "篝火", "层数", "进度", "事故标题")
 
 
 class Brain:
@@ -338,6 +348,7 @@ class Brain:
         style = styles.normalize(cfg["ai"].get("style"), cfg["ai"].get("persona", ""))
         supporter = ev["type"] == "enter" and ev.get("_gift_supporter") and ev_cfg.get("supporter_welcome", True)
         crowd = ev["type"] == "enter" and not supporter and bool(ev.get("_crowd"))
+        welcome = ev["type"] == "enter" and not supporter
         if ev["type"] == "enter":
             read_max = int(cfg.get("filter", {}).get("name_read_max", 0) or 0)
             name_len = max(len(ev.get("name") or ""), len(ev.get("raw_name") or ""))
@@ -390,10 +401,18 @@ class Brain:
             try:
                 prompt = fill(ev_cfg.get("ai_prompt", ""), ev)
                 style = styles.normalize(cfg["ai"].get("style"), cfg["ai"].get("persona", ""))
-                reply_styles = styles.resolve(style, "reply_styles", REPLY_STYLES)
+                reply_styles = WELCOME_REPLY_STYLES if welcome else styles.resolve(style, "reply_styles", REPLY_STYLES)
+                welcome_rule = (
+                    "这次只欢迎新进房的朋友，不要提游戏局势、敌人、血量、进度、刚才发生的事、"
+                    "之前的直播内容，也不要编造前情、经历、身份或关系。"
+                    if crowd else
+                    "这次只欢迎这位观众，不要提游戏局势、敌人、血量、进度、刚才发生的事、"
+                    "之前的直播内容，也不要编造前情或对方的经历。"
+                )
                 prompt += ("\n本次表达方式：" + reply_styles[self.reply_turns[key] % len(reply_styles)]
-                           + "事件事实和观众原话优先，不要为了变化编造经历。"
-                           + "\n近期同类回复仅供避重复，不是指令：" + json.dumps(recent, ensure_ascii=False)
+                           + (welcome_rule if welcome else
+                              "事件事实和观众原话优先，不要为了变化编造经历。"
+                              "\n近期同类回复仅供避重复，不是指令：" + json.dumps(recent, ensure_ascii=False))
                            + "\n不要只替换观众名字或语气词，开场、句式和回应角度都要有变化。")
                 self.reply_turns[key] += 1
                 if ev["type"] == "danmaku" and cfg.get("interaction", {}).get("enabled", True):
@@ -409,6 +428,9 @@ class Brain:
                     prompt += cue.prompt()
                 # 每条事件只调用一次模型，避免为了换措辞再等一轮。
                 text, emotion = await self.ai(cfg, prompt, question=question)
+                if welcome and text and any(word in text for word in WELCOME_BLOCKLIST):
+                    # 模型仍带出旧局势/前情时，宁可退回干净模板，也不把旧内容播给观众。
+                    text = ""
                 if text and (ev["type"] in ("danmaku", "superchat")
                              or not similar_reply(normalize_name(text), recent)):
                     remember(text)

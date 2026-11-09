@@ -39,6 +39,39 @@ COMBO_STEPS = 2
 # 冷场兜底：整整这么久没有开口，才强制接一句和当前局面有关的话。
 SILENCE_SECONDS = 12.0
 
+# 排队解说被当前画面淘汰时，改说最近一步真实操作；不再报“手里还有几张牌”这类过时面板。
+FRESH_ACTION_LINES = {
+    "play": ("这一手先打出去，看看对面怎么接。", "牌打完了，盯着这次结算。", "刚出完手，接着看它怎么动。"),
+    "end": ("这回合先交出去，看对面怎么动。", "先过回合，稳住别急。", "回合交出去了，等它出招。"),
+    "estus": ("先补一口，把血线稳住。", "回口血，接着来。"),
+    "potion": ("道具先用了，看看能不能扳回来。", "先把这道具交了，稳住。"),
+    "radiance": ("光焰放出去了，看看这一下够不够。", "大招先交，等它落地。"),
+    "node": ("这条路先走，看看下一格。", "先按这条线推进。"),
+    "reward": ("奖励先收着，后面看能不能用上。", "这张先拿，别急着定打法。"),
+    "shop": ("先挑能补短板的，别乱花。", "商店先看到这儿，钱得花在刀刃上。"),
+    "campfire": ("先喘口气，再决定怎么强化。",),
+    "forge": ("这一下锻完，看看值不值。", "强化先落下去，后面试试手感。"),
+    "event": ("这个事件得看清楚再选。",),
+    "overlay": ("先把眼前这个窗口处理掉。",),
+    "revive": ("还能再站起来，这局没完。",),
+    "confirm_result": ("结算先点掉，接着往下走。",),
+    "close_loot": ("战利品先收好，继续走。",),
+    "confirm_death_analysis": ("先把阵亡分析看完，再想下一把。",),
+    "return_to_hall": ("这局先回大厅，咱们开新的。",),
+    "character": ("这局换个角色试试。",),
+    "expedition": ("这一局先这么开，出发。",),
+}
+FRESH_SCREEN_LINES = {
+    "battle": ("先看清眼前这一步。", "这手得看仔细再动。"),
+    "reward": ("这几张奖励得挑一张真能用的。",),
+    "map": ("下一条路得挑稳一点。",),
+    "shop": ("先看看钱够不够，别乱花。",),
+    "campfire": ("先喘口气，再决定怎么强化。",),
+    "campfire_overlay": ("篝火边这几个选择，得想清楚再用。",),
+    "event": ("这个事件得看清楚再选。",),
+    "hall": ("先确认这一局怎么开，再出发。",),
+}
+
 _SAY_STRIP = re.compile(r"[\"'“”‘’「」『』【】\[\]{}()（）#*_`>|]")
 
 
@@ -68,7 +101,14 @@ SYSTEM = """你在直播玩《恶魔之塔 Zero》——一款类杀戮尖塔的
   {"action":"reward","slot":序号}   或   {"action":"reward","skip":true}
 
 篝火（"op" 是子动作）：
-  {"action":"campfire","slot":序号}  或  {"action":"campfire","op":"continue"}
+  {"action":"campfire","slot":序号}  选主菜单的一项
+  {"action":"campfire","op":"continue"}  离开篝火继续前进
+  {"action":"campfire","op":"leave_with_fire"}  最后的篝火「带着火回归」，结束本局
+  进入灵药调和 / 觉醒大卢恩后，界面会变成「篝火小窗」，必须先把小窗处理完：
+  {"action":"campfire","op":"dew","slot":露滴序号}     选一种露滴（选满 2 种）
+  {"action":"campfire","op":"mix"}                      调和灵药
+  {"action":"campfire","op":"rune","slot":卢恩序号}     激活一枚大卢恩
+  {"action":"campfire","op":"back"}                     关掉小窗回篝火主菜单
 
 商店（"op" 是子动作）：
   {"action":"shop","slot":序号}      或  {"action":"shop","op":"leave"}
@@ -147,12 +187,14 @@ SYSTEM = """你在直播玩《恶魔之塔 Zero》——一款类杀戮尖塔的
 - 参考状态里的牌组摘要补短板，稀有度不等于强度；没有合适的就跳过。
 
 灵魂锻造：
+- 别囤灵魂：灵魂是消耗品，本局结束不会变成下一局的优势；篝火能锻就锻，不要只看一眼就走。
 - 先看卡牌数值和每个强化项的前→后预览，别只按名字猜。
 - 优先强化核心牌：高费核心牌先降费；关键输出/防御牌再考虑加数值。
 - 附魔·重奏、角色专属强化、专属路线通常比通用的「伤害+3」更值，灵魂够就优先。
-- 同一张卡锻得越多越贵；不是绝对核心就别反复锻，换一张可能更划算。
-- 诅咒铭刻、元素质变、记忆强化只在牌组明确围绕它们时才选。
-- 界面默认停在第一项，不代表最优；确认前先比较全部强化项。
+- 同一张卡锻得越多越贵；同一张锻到 2 次就换下一张核心牌，不要对着同一张牌反复撞价格。
+- 锻完一张后如果灵魂还够最便宜的强化，继续用 op=card 换牌再锻；一次篝火尽量把灵魂花到不够为止。
+- 到第4幕或深层后段（状态显示幕数/层数已经接近终局）时灵魂更该花光：留着不会带出本局。
+- 诅咒铭刻、元素质变、记忆强化只在牌组明确围绕它们时才选；所有剩余强化都明显不值或灵魂不够时才停。
 """
 
 
@@ -194,6 +236,7 @@ class Player:
         self.last_say = ""
         self._last_state = None
         self._state_time = 0.0
+        self._fresh_action = ("", "", 0.0)
         self.live_chat = collections.deque(maxlen=6)
         self.commentary = GameCommentary()
         self.chars: list[str] = []   # 最近几局的角色（短名），用来逼她换人
@@ -229,10 +272,26 @@ class Player:
         return text
 
     def fresh_commentary(self) -> str:
-        """解说排队太久时，用最新读到的局面补一句，别让观众听到进房前的画面。"""
+        """解说排队太久时，用最近一步真实操作补一句，别让观众听到进房前的画面。"""
         if not self._last_state or time.monotonic() - self._state_time > 20:
             return ""
-        return self.commentary.context_line(self._last_state)
+        screen, action, at = self._fresh_action
+        if time.monotonic() - at > 20:
+            action = ""
+        lines = FRESH_ACTION_LINES.get(action) if action else None
+        if not lines:
+            current = str(self._last_state.get("screen") or "")
+            lines = FRESH_SCREEN_LINES.get(current or screen, ("先看清眼前这一步。",))
+        recent = list(self.commentary.recent)
+        return min(lines, key=lambda line: max(
+            (i + 1 for i, old in enumerate(recent) if old == line), default=0))
+
+    def _remember_fresh_action(self, state: dict, result: dict) -> None:
+        action = result.get("action")
+        name = str(action.get("action") or "") if isinstance(action, dict) else ""
+        if not name or name.startswith("wait"):
+            return
+        self._fresh_action = (str(state.get("screen") or ""), name, time.monotonic())
 
     def speech_state(self):
         return scene(self._last_state if time.monotonic() - self._state_time < 30 else None)
@@ -603,6 +662,8 @@ class Player:
                 return self.bridge.pick_reward(int(act.get("slot", -1)), bool(act.get("skip", False)))
             elif screen == "campfire" and a == "campfire":
                 return self.bridge.campfire(str(act.get("op", "")), int(act.get("slot", -1)))
+            elif screen == "campfire_overlay" and a == "campfire":
+                return self.bridge.campfire(str(act.get("op", "")), int(act.get("slot", -1)))
             elif screen == "shop" and a == "shop":
                 return self.bridge.shop(str(act.get("op", "buy")), int(act.get("slot", -1)))
             elif screen == "soul_forge" and a == "forge":
@@ -730,6 +791,8 @@ class Player:
         result = await self._step(state)
         emotion = result.pop("_emotion", "")
         action = (result.get("action") or {}).get("action", "")
+        if result.get("ok") and not result.get("stale") and not result.get("recovering"):
+            self._remember_fresh_action(state, result)
         if (not result.get("ok") or result.get("stale") or result.get("recovering")
                 or action.startswith("wait") or action == "abandon_run"):
             return result
@@ -801,7 +864,7 @@ class Player:
         # 代打只看深层：读档落进浅层/教学局时先放弃回大厅，下一轮 _boot 会开深层。
         mode = str((state.get("run") or {}).get("mode") or "")
         if mode and mode != "deep" and screen in (
-                "battle", "map", "reward", "campfire", "shop", "event", "dialog", "loot",
+                "battle", "map", "reward", "campfire", "campfire_overlay", "shop", "event", "dialog", "loot",
                 "character_select", *view.OVERLAY_SCREENS):
             r = await asyncio.to_thread(self.bridge.abandon_run)
             label = {"shallow": "浅层/教学"}.get(mode, mode)
