@@ -145,6 +145,22 @@ class RecoverTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(pipe._recovering)
 
 
+class PrivateCommitTests(unittest.IsolatedAsyncioTestCase):
+    cfg = {"ttsd_base": "http://127.0.0.1:8899"}
+
+    async def test_legacy_health_tracks_the_owned_listener_instead_of_the_venv_launcher(self):
+        proc = Mock(pid=10)
+        proc.poll.return_value = None
+        with patch.multiple(ttsd, _proc=proc, _memory_pid=None, _signature=ttsd._desired(self.cfg)), \
+             patch.object(ttsd, "_listening_pids", return_value={11}), \
+             patch.object(ttsd.procutil, "private_commit_bytes", return_value=3000 * ttsd.MIB) as read:
+            await ttsd._remember_memory_pid(self.cfg, {}, ttsd._generation)
+            self.assertEqual(ttsd._memory_pid, 11)
+            self.assertEqual(ttsd.private_commit_mib(self.cfg), 3000)
+        self.assertEqual(read.call_count, 2)
+        read.assert_called_with(11, require_app_job=True)
+
+
 class KillStaleTests(unittest.TestCase):
     def test_kills_only_foreign_ttsd_processes(self):
         killed = []

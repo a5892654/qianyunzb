@@ -1485,6 +1485,7 @@ def build_web(app: App):
                   ready=bool(state.get("ok")) and bool(actual) and actual == desired, actual=state.get("model", ""),
                   error=speech_switch_error or state.get("error", "") or mismatch,
                   memory_mib=state.get("vram_reserved_mib"),
+                  private_commit_mib=ttsd.private_commit_mib(settings),
                   runtime_ready=os.path.isfile(py) and os.path.isfile(script),
                   reference_ready=os.path.isfile(ttsd._resolve_ref(settings)))
 

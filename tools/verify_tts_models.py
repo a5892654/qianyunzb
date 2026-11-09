@@ -63,8 +63,8 @@ class OwnershipTests(unittest.IsolatedAsyncioTestCase):
         async def sleep(seconds):
             clock[0] += 250
         with patch.object(ttsd, "_proc", None), patch.object(ttsd, "spawn", return_value=True), \
-             patch.object(ttsd, "health", AsyncMock(side_effect=[{}, {"phase": "downloading"}, {"phase": "ready"}])), \
-             patch.object(ttsd, "alive", AsyncMock(side_effect=[False, True])), \
+             patch.object(ttsd, "health", AsyncMock(side_effect=[
+                 {}, {"phase": "downloading"}, {"ok": True, "model": config.DEFAULTS["tts"]["ttsd_model"]}])), \
              patch.object(ttsd, "time", SimpleNamespace(monotonic=lambda: clock[0])), \
              patch.object(ttsd.asyncio, "sleep", sleep):
             self.assertTrue(await ttsd._ensure(config.DEFAULTS["tts"], Mock()))
@@ -126,8 +126,8 @@ class OwnershipTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(ttsd, "_proc", old), patch.object(ttsd, "_signature", ("old",)), \
              patch.object(ttsd, "stop", side_effect=stop), patch.object(ttsd, "spawn", side_effect=spawn), \
-             patch.object(ttsd, "health", AsyncMock(return_value={})), \
-             patch.object(ttsd, "alive", AsyncMock(return_value=True)), \
+             patch.object(ttsd, "health", AsyncMock(side_effect=[{}, {"ok": True, "model": cfg["ttsd_model"]}])), \
+             patch.object(ttsd, "_remember_memory_pid", AsyncMock()), \
              patch.object(ttsd.asyncio, "sleep", AsyncMock()):
             self.assertTrue(await ttsd._ensure(cfg, Mock()))
         self.assertEqual(events, ["stop", "spawn"])
@@ -147,6 +147,7 @@ class OwnershipTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(ttsd, "_proc", SimpleNamespace(poll=lambda: None)), \
              patch.object(ttsd, "_signature", ttsd._desired(cfg)), \
              patch.object(ttsd, "health", AsyncMock(return_value={"ok": True, "model": cfg["ttsd_model"]})), \
+             patch.object(ttsd, "_remember_memory_pid", AsyncMock()), \
              patch.object(ttsd, "stop") as stop, patch.object(ttsd, "spawn") as spawn:
             self.assertTrue(await ttsd._ensure(cfg, Mock()))
         stop.assert_not_called()

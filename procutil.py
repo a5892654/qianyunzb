@@ -8,6 +8,7 @@ CREATE_NO_WINDOW = 0x08000000
 _k32 = ctypes.WinDLL("kernel32", use_last_error=True)
 _k32.CreateJobObjectW.restype = wintypes.HANDLE
 _k32.OpenProcess.restype = wintypes.HANDLE
+_k32.IsProcessInJob.argtypes = (wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL))
 
 
 class _BASIC(ctypes.Structure):
@@ -53,6 +54,36 @@ def bind_to_app(pid):
     if h:
         _k32.AssignProcessToJobObject(_get_job(), h)
         _k32.CloseHandle(h)
+
+
+class _PROCESS_MEMORY(ctypes.Structure):
+    _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD)] + [
+        (name, ctypes.c_size_t) for name in (
+            "PeakWorkingSetSize", "WorkingSetSize", "QuotaPeakPagedPoolUsage",
+            "QuotaPagedPoolUsage", "QuotaPeakNonPagedPoolUsage", "QuotaNonPagedPoolUsage",
+            "PagefileUsage", "PeakPagefileUsage", "PrivateUsage")
+    ]
+
+
+_k32.K32GetProcessMemoryInfo.argtypes = (wintypes.HANDLE, ctypes.POINTER(_PROCESS_MEMORY), wintypes.DWORD)
+
+
+def private_commit_bytes(pid, *, require_app_job=False):
+    """Windows Private Bytes. Venv 的实际服务进程须属于本应用的 Job。"""
+    handle = _k32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return None
+    try:
+        if require_app_job:
+            member = wintypes.BOOL()
+            if not _job or not _k32.IsProcessInJob(handle, _job, ctypes.byref(member)) or not member.value:
+                return None
+        counters = _PROCESS_MEMORY(cb=ctypes.sizeof(_PROCESS_MEMORY))
+        if _k32.K32GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+            return counters.PrivateUsage
+        return None
+    finally:
+        _k32.CloseHandle(wintypes.HANDLE(handle))
 
 
 def clean_env(extra=None):

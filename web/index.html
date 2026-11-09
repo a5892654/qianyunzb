@@ -1286,7 +1286,9 @@ async function pollSpeechModel() {
     $('#qwenModelApply').disabled = speechModelBusy || r.loading;
     $('#qwenVoice').disabled = speechModelBusy || r.loading;
     const voice = r.voice_name || voiceLabel(r.voice);
-    $('#qwenModelState').textContent = r.error || (r.phase === 'downloading' ? '首次使用正在下载模型…' : r.loading ? '正在切换并加载模型或音色…' : r.ready ? `正在运行：${r.actual.split(/[\\/]/).pop()} · ${voice}${Number.isFinite(r.memory_mib) ? ' · 模型预留显存 ' + (r.memory_mib / 1024).toFixed(2) + ' GiB' : ''}` : !r.runtime_ready ? '语音环境未安装' : !r.reference_ready ? '请先选择克隆参考音频' : `已选择 ${r.selected} · ${voice}，引擎未启动`);
+    const vram = Number.isFinite(r.memory_mib) ? ` · 模型预留显存 ${(r.memory_mib / 1024).toFixed(2)} GiB` : '';
+    const commit = Number.isFinite(r.private_commit_mib) ? ` · 引擎私有提交 ${(r.private_commit_mib / 1024).toFixed(2)} GiB` : '';
+    $('#qwenModelState').textContent = r.error || (r.phase === 'downloading' ? '首次使用正在下载模型…' : r.loading ? '正在切换并加载模型或音色…' : r.ready ? `正在运行：${r.actual.split(/[\\/]/).pop()} · ${voice}${vram}${commit}` : !r.runtime_ready ? '语音环境未安装' : !r.reference_ready ? '请先选择克隆参考音频' : `已选择 ${r.selected} · ${voice}，引擎未启动`);
   } catch {}
 }
 $('#qwenModelApply').onclick = async () => {

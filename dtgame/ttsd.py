@@ -18,14 +18,17 @@ from config import LOG_DIR, BASE_DIR
 log = logging.getLogger("ttsd")
 
 DEFAULT_BASE = "http://127.0.0.1:8899"
+MIB = 1024**2
 _proc = None
 _signature = None
 _generation = 0
+_memory_pid = None
 _ensure_lock = asyncio.Lock()
 
 
 def owned():
-    return _proc is not None and _proc.poll() is None
+    proc = _proc
+    return proc is not None and proc.poll() is None
 
 
 def owned_model():
@@ -44,7 +47,8 @@ def runtime_paths(cfg_tts):
 
 def _desired(cfg):
     return (str(cfg.get("ttsd_model", "Qwen/Qwen3-TTS-12Hz-0.6B-Base")),
-            _resolve_ref(cfg), str(cfg.get("qwen_language", "Chinese")), int(cfg.get("ttsd_chunk_size", 8)))
+            _resolve_ref(cfg), str(cfg.get("qwen_language", "Chinese")),
+            int(cfg.get("ttsd_chunk_size", 8)), _base(cfg))
 
 
 def _base(cfg_tts):
@@ -76,7 +80,10 @@ async def health(cfg_tts):
 
 
 async def alive(cfg_tts):
-    data = await health(cfg_tts)
+    return _ready(cfg_tts, await health(cfg_tts))
+
+
+def _ready(cfg_tts, data):
     if not data.get("ok"):
         return False
     if owned() and _signature != _desired(cfg_tts):
@@ -84,6 +91,45 @@ async def alive(cfg_tts):
     actual = str(data.get("model", "")).replace("\\", "/").rstrip("/").split("/")[-1]
     desired = _desired(cfg_tts)[0].replace("\\", "/").rstrip("/").split("/")[-1]
     return actual == desired if actual else owned() and _signature == _desired(cfg_tts)
+
+
+def _private_commit(cfg_tts):
+    proc, pid = _proc, _memory_pid
+    if pid is None or proc is None or proc.poll() is not None or _signature != _desired(cfg_tts):
+        return None
+    return procutil.private_commit_bytes(pid, require_app_job=pid != proc.pid)
+
+
+def private_commit_mib(cfg_tts):
+    used = _private_commit(cfg_tts)
+    return round(used / MIB, 1) if used is not None else None
+
+
+async def _remember_memory_pid(cfg_tts, state, generation):
+    global _memory_pid
+    if not owned() or _memory_pid is not None:
+        return
+    pid = state.get("pid")
+    if type(pid) is int and pid > 0:
+        candidates = [pid]
+    else:
+        # 旧引擎的 /health 没有 PID。实际监听进程可能是 venv 启动器的子进程。
+        port = int(_base(cfg_tts).rsplit(":", 1)[-1])
+        candidates = await asyncio.to_thread(_listening_pids, port)
+    if generation != _generation:
+        raise asyncio.CancelledError
+    proc = _proc
+    if proc is None or proc.poll() is not None:
+        return
+    for pid in candidates:
+        used = procutil.private_commit_bytes(pid, require_app_job=pid != proc.pid)
+        if generation != _generation:
+            raise asyncio.CancelledError
+        if used is not None:
+            _memory_pid = pid
+            log.info("流式语音引擎 PID %d 热身后私有提交 %.0f MiB", pid, used / MIB)
+            return
+    log.warning("无法读取自管流式语音引擎的私有提交内存")
 
 
 def _run_bytes(argv, timeout):
@@ -177,7 +223,7 @@ def kill_stale(cfg_tts, on_status=None):
 
 def spawn(cfg_tts, on_status=None):
     """拉起 ttsd 常驻进程；模型首次上卡要几十秒，调用方自己等 alive()。"""
-    global _proc, _signature, _generation
+    global _proc, _signature, _generation, _memory_pid
     if _proc is not None and _proc.poll() is None:
         return True
     kill_stale(cfg_tts, on_status)
@@ -198,13 +244,17 @@ def spawn(cfg_tts, on_status=None):
            "--chunk-size", str(int(cfg_tts.get("ttsd_chunk_size", 8))),
            "--port", _base(cfg_tts).rsplit(":", 1)[-1]]
     os.makedirs(LOG_DIR, exist_ok=True)
-    logf = open(os.path.join(LOG_DIR, "ttsd.log"), "wb")
     env = procutil.clean_env({"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1", "USE_TF": "0", "NO_PROXY": "127.0.0.1,localhost"})
-    _proc = subprocess.Popen(cmd, cwd=os.path.dirname(script), stdout=logf, stderr=subprocess.STDOUT,
-                             env=env, creationflags=procutil.CREATE_NO_WINDOW)
+    # 直播请求反复遇到不同形状。限制 cuDNN 执行计划缓存，保留常用计划供复用。
+    env.setdefault("TORCH_CUDNN_V8_API_LRU_CACHE_LIMIT", "1024")
+    if os.name == "nt" and "AuthenticAMD" in env.get("PROCESSOR_IDENTIFIER", ""):
+        env.setdefault("CUBLASLT_DISABLE_CPU_INSTRUCTIONS_MASK", "1")
+    with open(os.path.join(LOG_DIR, "ttsd.log"), "wb") as logf:
+        _proc = subprocess.Popen(cmd, cwd=os.path.dirname(script), stdout=logf, stderr=subprocess.STDOUT,
+                                 env=env, creationflags=procutil.CREATE_NO_WINDOW)
     _signature = _desired(cfg_tts)
     _generation += 1
-    logf.close()
+    _memory_pid = None
     procutil.bind_to_app(_proc.pid)
     if on_status:
         on_status("正在启动流式语音引擎（模型常驻显存，首次约 40~90 秒）…")
@@ -212,12 +262,14 @@ def spawn(cfg_tts, on_status=None):
 
 
 def stop():
-    global _proc, _signature, _generation
+    global _proc, _signature, _generation, _memory_pid
     _generation += 1
-    if _proc is not None and _proc.poll() is None:
-        procutil.kill_tree(_proc.pid)
+    proc = _proc
+    if proc is not None and proc.poll() is None:
+        procutil.kill_tree(proc.pid)
     _proc = None
     _signature = None
+    _memory_pid = None
 
 
 async def ensure(cfg_tts, on_status):
@@ -236,7 +288,8 @@ async def _ensure(cfg_tts, on_status):
     state = await health(cfg_tts)
     if generation != _generation:
         raise asyncio.CancelledError
-    if state.get("ok") and await alive(cfg_tts):
+    if _ready(cfg_tts, state):
+        await _remember_memory_pid(cfg_tts, state, generation)
         return True
     if state and not owned():
         if not await asyncio.to_thread(owns_port, cfg_tts):
@@ -274,7 +327,8 @@ async def _ensure(cfg_tts, on_status):
         elif last_phase == "downloading":
             deadline = time.monotonic() + 240
         last_phase = phase
-        if await alive(cfg_tts):
+        if _ready(cfg_tts, state):
+            await _remember_memory_pid(cfg_tts, state, generation)
             on_status("流式 Qwen3-TTS 已就绪（边说边合成）")
             return True
     on_status("流式语音引擎启动超时")
@@ -295,7 +349,6 @@ async def synth_stream(text, cfg_tts, timeout_first: float = 25.0):
     # 只约束首块：后续块由服务端生成速度决定，设总超时会长句被掐断。
     to = aiohttp.ClientTimeout(total=None, connect=5, sock_read=timeout_first)
     buf = bytearray()
-    floor = 0
     async with aiohttp.ClientSession(trust_env=False) as s:
         async with s.post(url, json=body, timeout=to) as r:
             if r.status != 200:

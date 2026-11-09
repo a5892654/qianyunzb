@@ -30,6 +30,11 @@ class SpeechService:
         self.torch = None
 
     def load(self):
+        # 直接启动服务时也限制 cuDNN 缓存，须在导入 PyTorch 前设置。
+        os.environ.setdefault("TORCH_CUDNN_V8_API_LRU_CACHE_LIMIT", "1024")
+        if os.name == "nt" and "AuthenticAMD" in os.environ.get("PROCESSOR_IDENTIFIER", ""):
+            # 规避 Windows 上 cuBLASLt 主机启发式代码的 AVX-512 非法指令。
+            os.environ.setdefault("CUBLASLT_DISABLE_CPU_INSTRUCTIONS_MASK", "1")
         import torch
         from faster_qwen3_tts import FasterQwen3TTS
         if not torch.cuda.is_available():
@@ -59,10 +64,22 @@ class SpeechService:
                     xvec_only=True, chunk_size=self.args.chunk_size, max_new_tokens=48):
                 pass
         self.torch = torch
+        self.memory = self.cuda_memory()
         self.phase = "ready"
-        self.memory = {"vram_allocated_mib": round(torch.cuda.memory_allocated() / 1024**2, 1),
-                       "vram_reserved_mib": round(torch.cuda.memory_reserved() / 1024**2, 1)}
         log.info("Speech model ready: %s", self.args.model)
+
+    def cuda_memory(self):
+        cuda = self.torch.cuda
+        memory = {"vram_allocated_mib": round(cuda.memory_allocated() / 1024**2, 1),
+                  "vram_reserved_mib": round(cuda.memory_reserved() / 1024**2, 1)}
+        host_stats = getattr(cuda, "host_memory_stats", None)
+        if host_stats is not None:
+            stats = host_stats()
+            for field, key in (("pinned_host_reserved_mib", "allocated_bytes.current"),
+                               ("pinned_host_active_mib", "active_bytes.current")):
+                if key in stats:
+                    memory[field] = round(stats[key] / 1024**2, 1)
+        return memory
 
     async def startup(self, app):
         async def load():
@@ -80,8 +97,7 @@ class SpeechService:
 
     async def health(self, request):
         if self.phase == "ready" and self.torch is not None:
-            self.memory = {"vram_allocated_mib": round(self.torch.cuda.memory_allocated() / 1024**2, 1),
-                           "vram_reserved_mib": round(self.torch.cuda.memory_reserved() / 1024**2, 1)}
+            self.memory = self.cuda_memory()
         return web.json_response({"ok": self.phase == "ready", "phase": self.phase,
                                   "model": self.args.model, "error": self.error,
                                   "service": "whaletalk-tts", "pid": os.getpid(), **self.memory})
@@ -122,7 +138,8 @@ class SpeechService:
                         stream.close()
             except Exception as error:
                 log.exception("Speech synthesis failed")
-                put(error)
+                # 只在线程之间传错误文本，避免队列经由 traceback 留住推理栈和张量。
+                put(str(error))
             finally:
                 put(None)
 
@@ -137,9 +154,9 @@ class SpeechService:
                         if future.done():
                             break
                         continue
-                    if isinstance(item, Exception):
+                    if isinstance(item, str):
                         if response is None:
-                            return web.json_response({"error": str(item)}, status=500)
+                            return web.json_response({"error": item}, status=500)
                         # Abort a partial stream so clients can distinguish a
                         # truncated utterance from a successful complete one.
                         if request.transport:
@@ -180,7 +197,7 @@ def main():
     app.router.add_post("/say", service.say)
     app.on_startup.append(service.startup)
     app.on_cleanup.append(service.cleanup)
-    web.run_app(app, host="127.0.0.1", port=args.port, print=None)
+    web.run_app(app, host="127.0.0.1", port=args.port, print=None, handler_cancellation=True)
 
 
 if __name__ == "__main__":
