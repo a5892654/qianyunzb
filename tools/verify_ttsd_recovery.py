@@ -15,7 +15,7 @@ from pipeline import Pipeline
 from tts import Player
 
 
-def chunk(frames=2400, sr=1000):
+def chunk(frames=1000, sr=1000):
     return np.full((frames, 1), 8192, np.int16), sr
 
 

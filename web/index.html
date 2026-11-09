@@ -1184,24 +1184,29 @@ $$('[data-pick]').forEach(b => b.onclick = async () => {
 
 // ---------- 实时消息 ----------
 const feedEv = $('#feedEv'), feedRe = $('#feedRe');
-function addLine(box, html, cls = '') {
+function addLine(box, html, cls = '', replyId) {
   const stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 30;
-  const d = document.createElement('div'); d.className = 'it ' + cls; d.innerHTML = html; box.appendChild(d);
+  const d = document.createElement('div'); d.className = 'it ' + cls; d.innerHTML = html;
+  if (replyId !== undefined) d.dataset.replyId = replyId;
+  box.appendChild(d);
   while (box.children.length > 400) box.firstChild.remove();
   if (stick) box.scrollTop = box.scrollHeight;
-  return d;
 }
-const replyEls = {};
+function highlightReply(id, speaking) {
+  for (const row of feedRe.querySelectorAll(`[data-reply-id="${CSS.escape(String(id))}"]`)) {
+    row.classList.toggle('speaking', speaking);
+  }
+}
 function handle(m) {
   switch (m.kind) {
     case 'hello': m.history.forEach(handle); if (m.status) setStatus(m.status); break;
     case 'status': setStatus(m.status); break;
     case 'event': addLine(feedEv, `<span class="t">${m.t}</span><span class="tag ${m.type}">${esc(m.tname)}</span><span>${esc(m.desc)}${m.test ? ' <span class="hint">[模拟]</span>' : ''}${m.skip ? ` <span class="hint">· ${esc(m.skip)}</span>` : ''}</span>`, m.skip ? 'skip' : ''); break;
-    case 'reply': replyEls[m.id] = addLine(feedRe, `<span class="t">${m.t}</span><span class="tag ${m.type}">${m.type === 'manual' ? '手动' : '回复'}</span><span><span class="txt">${esc(m.text)}</span><br><span class="src">${esc(m.desc)} · ${esc(m.src)}${m.emotion ? ' · 表情：' + esc(m.emotion) : ''}</span></span>`, 'reply'); break;
+    case 'reply': addLine(feedRe, `<span class="t">${m.t}</span><span class="tag ${m.type}">${m.type === 'manual' ? '手动' : '回复'}</span><span><span class="txt">${esc(m.text)}</span><br><span class="src">${esc(m.desc)} · ${esc(m.src)}${m.emotion ? ' · 表情：' + esc(m.emotion) : ''}</span></span>`, 'reply', m.id); break;
     case 'log': addLine(feedRe, `<span class="t">${m.t}</span><span class="tag ${m.level === 'info' ? 'log' : m.level}">${m.level === 'error' ? '错误' : m.level === 'warn' ? '提示' : '系统'}</span><span>${esc(m.msg)}</span>`); break;
     case 'queue': $('#queueList').innerHTML = m.items.length ? '待回复：<br>' + m.items.map(esc).join('<br>') : ''; $('#s_queue').textContent = m.items.length; break;
-    case 'speak': $('#nowSpeaking').innerHTML = `🔊 ${esc(m.text)}${m.synth_s ? ` <span class="dim">（合成 ${m.synth_s}s）</span>` : ''}`; replyEls[m.id]?.classList.add('speaking'); break;
-    case 'speak_end': $('#nowSpeaking').innerHTML = '<span class="dim">当前没有在说话</span>'; replyEls[m.id]?.classList.remove('speaking'); break;
+    case 'speak': $('#nowSpeaking').innerHTML = `🔊 ${esc(m.text)}${m.synth_s ? ` <span class="dim">（合成 ${m.synth_s}s）</span>` : ''}`; highlightReply(m.id, true); break;
+    case 'speak_end': $('#nowSpeaking').innerHTML = '<span class="dim">当前没有在说话</span>'; highlightReply(m.id, false); break;
     case 'songs': renderSongs(m); break;
     case 'wishlist': renderWishlist(m); break;
     case 'rice': renderRice(m); break;

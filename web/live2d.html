@@ -445,7 +445,8 @@ function onSpeak(m) {
 function onSpeakEnv(m) {
   // 流式播报：口型帧随着音频一块块补进来，长度不够时嘴先闭着，等下一批
   if (m.id !== speakId || !m.env || !m.env.length) return;
-  env = (env || []).concat(m.env);
+  if (!env) env = [];
+  env.push(...m.env);
   fakeMouth = false;
 }
 function onSpeakPos(m) {

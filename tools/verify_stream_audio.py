@@ -3,6 +3,7 @@ import asyncio
 import copy
 import sys
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -10,7 +11,7 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
-from tts import Player
+from tts import Player, STREAM_CAPACITY_SECONDS
 
 
 def pcm(frames):
@@ -132,6 +133,46 @@ class StreamingBufferTests(unittest.TestCase):
         player.feed_stream(pcm(100), 1000)
         self.assertTrue(np.any(self.tick(player)))
 
+    def test_full_buffer_waits_and_preserves_sample_order_across_wrap(self):
+        player = self.player(3)
+        capacity = STREAM_CAPACITY_SECONDS * player.sr
+        initial = np.arange(capacity, dtype=np.int16).reshape(-1, 1)
+        extra = initial[-200:] + 5000
+        self.assertTrue(player.feed_stream(initial, player.sr))
+        with ThreadPoolExecutor(max_workers=1) as producer:
+            try:
+                feeding = producer.submit(player.feed_stream, extra, player.sr)
+                with self.assertRaises(TimeoutError):
+                    feeding.result(timeout=0.05)
+                first = self.tick(player, 333)
+                self.assertTrue(feeding.result(timeout=1))
+                player.end_stream()
+                rest = self.tick(player, capacity)
+                expected = np.repeat(np.concatenate((initial, extra)), 2, axis=1) / 32768.0
+                np.testing.assert_array_equal(np.concatenate((first, rest[:len(expected) - 333])), expected)
+                self.assertFalse(np.any(rest[len(expected) - 333:]))
+                self.assertTrue(player.voice_done.is_set())
+                self.assertIsNone(player.voice)
+            finally:
+                player.skip()
+
+    def test_skip_and_close_wake_producer_waiting_for_space(self):
+        for method in ("skip", "close"):
+            with self.subTest(method=method):
+                player = self.player()
+                capacity = STREAM_CAPACITY_SECONDS * player.sr
+                with ThreadPoolExecutor(max_workers=1) as producer:
+                    try:
+                        feeding = producer.submit(player.feed_stream, pcm(capacity + 1), player.sr)
+                        with self.assertRaises(TimeoutError):
+                            feeding.result(timeout=0.05)
+                        getattr(player, method)()
+                        self.assertFalse(feeding.result(timeout=1))
+                        self.assertIsNone(player.voice)
+                        self.assertTrue(player.voice_done.is_set())
+                    finally:
+                        player.skip()
+
 
 class PipelineStreamTests(unittest.IsolatedAsyncioTestCase):
     async def test_buffer_setting_reaches_player_and_diagnostics_reach_log(self):
@@ -145,13 +186,16 @@ class PipelineStreamTests(unittest.IsolatedAsyncioTestCase):
         pipe = object.__new__(Pipeline)
         pipe.app = app
         async def chunks(*args):
-            yield pcm(100), 1000
-            yield pcm(200), 1000
+            yield pcm(32), 1000
+            yield pcm(1), 1000
+            yield pcm(67), 1000
         with patch('dtgame.ttsd.synth_stream', chunks):
             await pipe._play_stream({'id': 123, 'text': '缓冲测试'}, asyncio.get_running_loop())
         player.begin_stream.assert_called_once_with('', 130.0, 1.2)
-        self.assertEqual(player.feed_stream.call_count, 2)
+        self.assertEqual(player.feed_stream.call_count, 3)
         player.end_stream.assert_called_once()
+        envelopes = [call.args[1]['env'] for call in app.push.call_args_list if call.args[0] == 'speak_env']
+        self.assertEqual(envelopes, [[1.0], [1.0, 1.0]])
         warnings = [call.args[1]['msg'] for call in app.push.call_args_list if call.args[0] == 'log']
         self.assertTrue(any('语音缓冲耗尽 2 次' in message for message in warnings))
         self.assertTrue(any('音频设备输出欠载 1 次' in message for message in warnings))

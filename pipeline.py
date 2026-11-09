@@ -567,44 +567,52 @@ class Pipeline:
                     item["pcm"] = None
             await self.play_q.put(item)
 
-    def _push_env(self, item, acc, sr, emitted):
-        """在已收到的音频上算口型包络，只推新增的帧；口型因此跟着声音一起长。"""
-        env = envelope(np.concatenate(acc), sr)
-        if len(env) > emitted:
-            self.app.push("speak_env", {"id": item["id"], "env": env[emitted:]})
-            return len(env)
-        return emitted
-
     async def _play_stream(self, item, loop):
         from dtgame import ttsd
         a = self.cfg["audio"]
         text, dev, vol = item["text"], a.get("device", ""), float(a.get("volume", 80))
         self.app.push("speak", {"text": text, "id": item["id"], "emotion": item.get("emotion", ""),
                                "fps": ENV_FPS, "env": [], "dur": None, "stream": True})
-        t0, acc, env_n, sr = time.monotonic(), [], 0, None
+        t0 = time.monotonic()
+        env_tail = None
         audio_s = 0.0
-        generated_s = 0.0
+        read_s = 0.0
         cap = speech_cap(text)
         error = None
         runaway = False
         stream = None
         try:
-            await loop.run_in_executor(None, self.app.player.begin_stream, dev, vol,
-                                       self.cfg["tts"].get("stream_buffer_seconds", 0.8))
+            begin = loop.run_in_executor(None, self.app.player.begin_stream, dev, vol,
+                                         self.cfg["tts"].get("stream_buffer_seconds", 0.8))
+            await asyncio.shield(begin)
             stream = ttsd.synth_stream(text, self.cfg["tts"])
+            read_at = time.monotonic()
             async for pcm, r in stream:
-                sr = r
-                if not acc:
-                    item["synth_s"] = round(time.monotonic() - t0, 2)  # 首块延迟；开口还含预缓冲与设备延迟
-                acc.append(pcm)
+                now = time.monotonic()
+                read_s += now - read_at
+                if not audio_s:
+                    item["synth_s"] = round(now - t0, 2)
                 audio_s += len(pcm) / r
                 if audio_s > cap:
                     # 一句话生成出几倍长度的音频，通常是模型在复读；继续喂会把整条队列堵死。
                     runaway = True
                     break
-                env_n = self._push_env(item, acc, sr, env_n)
-                await loop.run_in_executor(None, self.app.player.feed_stream, pcm, r)
-            generated_s = time.monotonic() - t0
+                # 只保留不足一个口型帧的采样，下个音频块接着算。
+                env_pcm = np.concatenate((env_tail, pcm)) if env_tail is not None else pcm
+                hop = max(1, r // ENV_FPS)
+                end = len(env_pcm) // hop * hop
+                env_tail = env_pcm[end:].copy() if end < len(env_pcm) else None
+                if end:
+                    self.app.push("speak_env", {"id": item["id"], "env": envelope(env_pcm[:end], r)})
+                if await loop.run_in_executor(None, self.app.player.feed_stream, pcm, r) is False:
+                    break
+                read_at = time.monotonic()
+            else:
+                read_s += time.monotonic() - read_at
+        except asyncio.CancelledError:
+            await asyncio.gather(begin, return_exceptions=True)
+            self.app.player.skip()
+            raise
         except Exception as e:
             error = e
         finally:
@@ -618,9 +626,9 @@ class Pipeline:
                 await loop.run_in_executor(None, self.app.player.skip)
             await loop.run_in_executor(None, self.app.player.end_stream)
             stats = self.app.player.stream_stats()
-            if audio_s and generated_s:
-                log.info("流式语音：音频 %.2fs，生成 %.2fs，生成/音频 %.2f，缺音 %d 次 / %dms，设备欠载 %d 次",
-                         audio_s, generated_s, generated_s / audio_s,
+            if audio_s and read_s:
+                log.info("流式语音：音频 %.2fs，取流等待 %.2fs，等待/音频 %.2f，缺音 %d 次 / %dms，设备欠载 %d 次",
+                         audio_s, read_s, read_s / audio_s,
                          stats["gaps"], stats["gap_ms"], stats["output_underflows"])
             if stats["gaps"]:
                 self.app.push("log", {"level": "warn", "msg":
@@ -635,7 +643,7 @@ class Pipeline:
             return
         if error is None:
             return
-        if acc:
+        if audio_s:
             # 半句已经放出去了，整句重放会重复词。
             log.warning("流式语音中途断流：%s", error)
             self.app.push("log", {"level": "warn", "msg": f"流式语音中途断流：{error}"})

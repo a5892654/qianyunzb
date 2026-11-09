@@ -37,6 +37,7 @@ def _abs(gsv_dir, p):
 
 
 ENV_FPS = 30
+STREAM_CAPACITY_SECONDS = 4  # 最多预缓冲 3 秒，额外留 1 秒接收余量。
 
 
 def envelope(pcm, sr):
@@ -377,6 +378,7 @@ class Player:
 
     def __init__(self):
         self.lock = threading.Lock()
+        self._stream_space = threading.Condition(self.lock)
         self.open_lock = threading.Lock()
         self.stream = None
         self.dev_name = None
@@ -390,6 +392,7 @@ class Player:
         self.voice_done = threading.Event()
         self.voice_done.set()
         self.streaming = False
+        self._stream_frames = None  # None 表示非流式，否则为环形缓冲内未播的帧数。
         self._stream_buffer_frames = 0
         self._stream_waiting = False
         self._stream_started = False
@@ -397,7 +400,7 @@ class Player:
         self._stream_gaps = 0
         self._stream_gap_frames = 0
         self._output_underflows = 0
-        self._abort = threading.Event()
+        self._aborted = False
         self.duck_pids = set()
         self.duck_level = 1.0
         self.music = None
@@ -452,8 +455,7 @@ class Player:
                     self.music = _resample(self.music, self.sr, sr)
                     self.mpos = int(pos * sr / self.sr)
                 if self.voice is not None:
-                    self.voice = None
-                    self.voice_done.set()
+                    self._clear_voice()
             self.sr = sr
         self.stream = sd.OutputStream(samplerate=sr, channels=2, dtype="float32", device=idx,
                                       callback=self._callback, latency="high")
@@ -462,15 +464,12 @@ class Player:
         self.dev_name = device_name
 
     def _callback(self, outdata, frames, _time, _status):
-        out = np.zeros((frames, 2), np.float32)
+        out = outdata
+        out.fill(0)
         ended = None
         with self.lock:
             if getattr(_status, "output_underflow", False):
                 self._output_underflows += 1
-            if self._abort.is_set() and self.voice is not None:
-                self.voice, self.streaming = None, False
-                self._stream_waiting = False
-                self.voice_done.set()
             target = self.duck if self.voice is not None else 1.0
             g0 = self.mgain
             g1 = g0 + (target - g0) * min(1.0, frames / (self.sr * 0.25))
@@ -484,7 +483,8 @@ class Player:
                     ended, self.on_music_end = self.on_music_end, None
             self.mgain = g1
             if self.voice is not None:
-                available = len(self.voice) - self.vpos
+                ring = self._stream_frames is not None
+                available = self._stream_frames if ring else len(self.voice) - self.vpos
                 if self.streaming and self._stream_waiting and available >= self._stream_buffer_frames:
                     self._stream_waiting = False
                 n = 0 if self.streaming and self._stream_waiting else min(frames, available)
@@ -495,21 +495,26 @@ class Player:
                         self._stream_gap_frames += self._stream_gap_pending
                         self._stream_gap_pending = 0
                     self._stream_started = True
-                out[:n] += self.voice[self.vpos:self.vpos + n] * self.voice_vol
-                self.vpos += n
-                # feed_stream 会把已播掉的部分丢掉并重置 vpos，所以口型要另计累计量。
-                # 缓冲区被抽空时 n=0，这个钟也会停住——正是我们想要的：声音卡住嘴也别往前跑。
+                    first = min(n, len(self.voice) - self.vpos)
+                    out[:first] += self.voice[self.vpos:self.vpos + first] * self.voice_vol
+                    self.vpos += n
+                    if ring:
+                        if first < n:
+                            out[first:n] += self.voice[:n - first] * self.voice_vol
+                        self.vpos %= len(self.voice)
+                        self._stream_frames -= n
+                        if available == len(self.voice):
+                            self._stream_space.notify()
+                # 口型按实际输出的累计帧数走，等缓冲时钟也停住。
                 self.vheard += n
                 if self.streaming and n < frames:
                     if self._stream_started:
                         self._stream_gap_pending += frames - n
                     self._stream_waiting = self._stream_buffer_frames > 0
                 # 流式时缓冲区被抽空只是「暂时没到货」，不算播完；真正收尾由 end_stream 决定。
-                if self.vpos >= len(self.voice) and not self.streaming:
-                    self.voice = None
-                    self.voice_done.set()
+                if available == n and not self.streaming:
+                    self._clear_voice()
         np.clip(out, -1, 1, out=out)
-        outdata[:] = out
         if ended:
             ended()
 
@@ -522,8 +527,8 @@ class Player:
 
     def _setup_voice(self, device_name, volume):
         self.ensure(device_name)
-        self._abort.clear()
         with self.lock:
+            self._aborted = False
             self.voice_vol = max(0, min(200, volume)) / 100.0
             self.voice_done.clear()
             self.vheard = 0
@@ -563,48 +568,74 @@ class Player:
         return float(lat[1] if isinstance(lat, tuple) else lat)
 
     def _wait_done(self):
-        while not self.voice_done.wait(0.05):
-            if self._abort.is_set():
-                with self.lock:
-                    self.voice, self.streaming = None, False
-                    self.voice_done.set()
+        self.voice_done.wait()
         if self.duck_pids:
             duckaudio.restore(self.duck_pids)
+
+    def _clear_voice(self):
+        """释放当前语音，唤醒等待空间的生产者。调用方持有 self.lock。"""
+        self.voice, self.streaming = None, False
+        self._stream_frames = None
+        self._stream_waiting = False
+        self._stream_space.notify_all()
+        self.voice_done.set()
 
     def play_blocking(self, pcm, sr, device_name, volume):
         self._setup_voice(device_name, volume)
         data = _stereo(_resample(pcm.astype(np.float32) / 32768.0, sr, self.sr))
         with self.lock:
-            self.streaming = False
-            self.voice, self.vpos = data, 0
+            if not self._aborted:
+                self.streaming = False
+                self._stream_frames = None
+                self.voice, self.vpos = data, 0
         self._wait_done()
 
     # ---------- 流式语音：留一点预缓冲，吸收生成速度的短暂波动 ----------
     def begin_stream(self, device_name, volume, buffer_seconds=0.8):
         self._setup_voice(device_name, volume)
         with self.lock:
+            if self._aborted:
+                return
+            self.voice, self.vpos = np.empty((self.sr * STREAM_CAPACITY_SECONDS, 2), np.float32), 0
             self._stream_buffer_frames = round(self.sr * max(0.0, min(3.0, float(buffer_seconds))))
             self._stream_waiting = self._stream_buffer_frames > 0
             self.streaming = True
-            self.voice, self.vpos = np.zeros((0, 2), np.float32), 0
+            self._stream_frames = 0
 
     def feed_stream(self, pcm, sr):
-        """追加一段音频。已播掉的部分顺手丢掉，缓冲区不会随着句子变长而膨胀。"""
-        data = _stereo(_resample(pcm.astype(np.float32) / 32768.0, sr, self.sr))
+        """按播放速度喂音频。缓冲满时在工作线程等待，跳过或关闭时返回 False。"""
         with self.lock:
-            if self.voice is None or self._abort.is_set():
-                return
-            self.voice = np.concatenate((self.voice[self.vpos:], data))
-            self.vpos = 0
+            if not self.streaming:
+                return False
+            ring, output_rate = self.voice, self.sr
+        data = _stereo(_resample(pcm.astype(np.float32) / 32768.0, sr, output_rate))
+        capacity = len(ring)
+
+        def stopped():
+            return not self.streaming or self.voice is not ring
+
+        written = 0
+        with self._stream_space:
+            while written < len(data):
+                self._stream_space.wait_for(lambda: stopped() or self._stream_frames < capacity)
+                if stopped():
+                    return False
+                end = (self.vpos + self._stream_frames) % capacity
+                n = min(len(data) - written, capacity - self._stream_frames, capacity - end)
+                ring[end:end + n] = data[written:written + n]
+                self._stream_frames += n
+                written += n
+            return not stopped()
 
     def end_stream(self):
         """生成结束：此后播到缓冲区尾部才算真的说完。"""
         with self.lock:
             self.streaming = False
             self._stream_waiting = False
-            if self.voice is not None and self.vpos >= len(self.voice):
-                self.voice = None
-                self.voice_done.set()
+            if self._stream_frames == 0:
+                self._clear_voice()
+            else:
+                self._stream_space.notify_all()
         self._wait_done()
 
     def stream_stats(self):
@@ -614,7 +645,9 @@ class Player:
                     "output_underflows": self._output_underflows}
 
     def skip(self):
-        self._abort.set()
+        with self.lock:
+            self._aborted = True
+            self._clear_voice()
 
     @property
     def playing(self):
@@ -687,6 +720,7 @@ class Player:
         return self._music_levels
 
     def close(self):
+        self.skip()
         if self.stream is not None:
             try:
                 self.stream.close()
