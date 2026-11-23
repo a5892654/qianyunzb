@@ -83,6 +83,7 @@ class Broadcast:
         self.source_hwnd = 0
         self.source_owns_preview = False
         self.source_hidden = False
+        self._program_kind = None
 
     @property
     def source_open(self) -> bool:
@@ -99,6 +100,8 @@ class Broadcast:
 
     def overlay_settings(self) -> tuple[str, float, float, float | None, float | None] | None:
         """每帧调用：开关关掉时返回 None，合成器据此跳过叠加。"""
+        if getattr(self.app, "_is_climb", lambda: False)():
+            return None
         l2d = self.app.cfg.get("live2d", {})
         if not l2d.get("enabled") or not l2d.get("overlay_in_broadcast", True):
             return None
@@ -126,6 +129,8 @@ class Broadcast:
 
     def overlay_problem(self) -> str:
         """空串表示要叠加皮套；"off" 表示不需要；其余为不可用原因。"""
+        if getattr(self.app, "_is_climb", lambda: False)():
+            return "off"
         l2d = self.app.cfg.get("live2d", {})
         if not l2d.get("enabled") or not l2d.get("overlay_in_broadcast", True):
             return "off"
@@ -274,9 +279,12 @@ class Broadcast:
             if self.running:
                 return {"ok": False, "error": "直播期间不能切换采集源，请先停止直播"}
             try:
-                if getattr(self.app, "_is_wage", lambda: False)():
+                program = self._program_source()
+                if program is not None:
+                    kind = "climb" if getattr(self.app, "_is_climb", lambda: False)() else "wage"
                     audio = self.program_audio(data)
                     if (self.capture.previewing and self.capture.program is not None
+                            and self._program_kind == kind
                             and self.capture.audio_device == audio):
                         await self.prepare_overlay()
                         self.phase, self.error = "preview", ""
@@ -284,8 +292,8 @@ class Broadcast:
                     self.error = ""
                     if self.capture.previewing:
                         await asyncio.to_thread(self.capture.stop_preview)
-                    await asyncio.to_thread(self.capture.start_program,
-                                            lambda: self.app.wage.frame(), audio)
+                    await asyncio.to_thread(self.capture.start_program, program, audio)
+                    self._program_kind = kind
                     await self.prepare_overlay()
                     self.phase = "preview"
                     return {"ok": True, "program": True}
@@ -312,6 +320,13 @@ class Broadcast:
                 self.error = str(error)
                 self.phase = "error"
                 return {"ok": False, "error": self.error}
+
+    def _program_source(self):
+        if getattr(self.app, "_is_climb", lambda: False)():
+            return self.app.climb_scene.frame
+        if getattr(self.app, "_is_wage", lambda: False)():
+            return lambda: self.app.wage.frame()
+        return None
 
     async def stop_preview(self):
         async with self.lock:
@@ -461,17 +476,17 @@ class Broadcast:
             if self.source_open:
                 return {"ok": False, "error": "源画面窗口还开着（直播姬在用），请先点「关闭源画面」再用千音开播"}
             try:
-                wage = bool(getattr(self.app, "_is_wage", lambda: False)())
-                if wage:
+                program = self._program_source()
+                if program is not None:
                     hwnd, audio = 0, self.program_audio(data)
                 else:
                     hwnd, audio = self.selection(data)
                 if data.get("confirm") is not True:
                     raise ValueError("开播前需要确认公开直播")
-                if wage:
+                if program is not None:
                     if (not self.capture.previewing or self.capture.program is None
                             or self.capture.audio_device != audio):
-                        raise ValueError("请先预览上班摸鱼画面和声音，再开始直播")
+                        raise ValueError("请先预览节目画面和声音，再开始直播")
                 elif (not self.capture.previewing or self.capture.hwnd != hwnd
                       or self.capture.audio_device != audio):
                     raise ValueError("请先预览当前窗口和声音，再开始直播")

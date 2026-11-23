@@ -4,6 +4,7 @@ import os
 import sys
 import threading
 from wage_play import OFFICE_DEFAULTS
+from climb import DEFAULTS as CLIMB_DEFAULTS
 
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -262,6 +263,7 @@ DEFAULTS = {
             "demontower": "大胖鱼开播了，来看我被自己的游戏虐",
             "sts2": "大胖鱼开播了，来一起爬塔",
             "wage": "大胖鱼开播了，来陪我上班摸鱼",
+            "climb": "大肥鱼爬出海｜弹幕一起攀岩",
         },
         "livehime": {"path": "", "hotkey": "", "click_x": 0.0, "click_y": 0.0},
         "schedule": {"enabled": False, "mode": "managed", "start_time": "20:00", "stop_time": "23:00",
@@ -279,6 +281,7 @@ DEFAULTS = {
     # 当前直播并托管哪个内容：demontower（恶魔之塔）、stardew（星露谷物语）、
     # sts2（杀戮尖塔 2）或 wage（上班摸鱼·虚拟区互动节目）
     "game": {"active": "demontower"},
+    "climb": dict(CLIMB_DEFAULTS),
     "wage": {
         "enabled": True,
         "target": 6000,

@@ -55,7 +55,7 @@ class GameLauncher:
         return self.kind == "sts2"
 
     def current(self):
-        if self.kind == "wage":
+        if self.kind in ("wage", "climb"):
             return self.program
         if self.is_stardew:
             return self.stardew

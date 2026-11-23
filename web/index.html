@@ -165,6 +165,7 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
           <option value="stardew">星露谷物语</option>
           <option value="sts2">杀戮尖塔 2</option>
           <option value="wage">上班摸鱼 · 互动直播</option>
+          <option value="climb">大肥鱼爬出海</option>
         </select>
       </label>
       <label class="f" style="max-width:200px;margin:0">AI 直播风格
@@ -273,7 +274,7 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
   </div>
   <div class="card">
     <div class="row">
-      <label class="f" style="max-width:260px">播放类型<select id="broadcastGameSelect" data-k="game.active"><option value="demontower">恶魔之塔 Zero</option><option value="stardew">星露谷物语</option><option value="sts2">杀戮尖塔 2</option><option value="wage">上班摸鱼 · 互动直播</option></select></label>
+      <label class="f" style="max-width:260px">播放类型<select id="broadcastGameSelect" data-k="game.active"><option value="demontower">恶魔之塔 Zero</option><option value="stardew">星露谷物语</option><option value="sts2">杀戮尖塔 2</option><option value="wage">上班摸鱼 · 互动直播</option><option value="climb">大肥鱼爬出海</option></select></label>
       <button class="btn b" id="broadcastDtStart" style="margin-top:18px">启动代打</button>
       <button class="btn" id="broadcastDtStop" style="margin-top:18px">暂停代打</button>
       <span class="hint" id="broadcastDtState" style="margin-top:18px">代打未启动</span>
@@ -281,6 +282,7 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
     <div class="hint" id="broadcastTitleHint">分区和封面请在直播姬里改；直播间标题会在开播时按当前播放类型自动修改。</div>
     <div class="row" id="broadcastWindowRow"><label class="f">要直播的游戏窗口<select id="broadcastWindow"><option value="">请先启动游戏，再刷新窗口</option></select></label><button class="btn" id="broadcastLaunchGame" style="margin-top:18px">启动游戏</button><button class="btn" id="broadcastRefreshSources" style="margin-top:18px">刷新窗口</button></div>
     <div class="hint" id="broadcastProgramHint" style="display:none">上班摸鱼不需要游戏窗口：预览时由千音直接渲染工资条、WageSlave 代码窗口和工位画面，再叠加 Live2D 皮套。分区请在直播姬里选「虚拟主播 / 虚拟日常」。</div>
+    <div class="row" id="broadcastClimbRow" style="display:none"><a class="btn" href="/climb" target="_blank" rel="noopener">打开攀爬画面</a><span class="hint">出画后自动攀爬，也可在页面里模拟观众互动。</span></div>
     <div class="row" id="broadcastSharkSoundRow" style="display:none;margin-top:10px">
       <label class="c"><input id="broadcastSharkSound" type="checkbox" data-k="wage.boss_sfx_enabled">鲨总声音</label>
       <span class="hint" id="broadcastSharkSoundState">已开启 · 查岗、派活时播放搞怪音效</span>
@@ -555,6 +557,7 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
           <option value="stardew">星露谷物语</option>
           <option value="sts2">杀戮尖塔 2</option>
           <option value="wage">上班摸鱼 · 互动直播</option>
+          <option value="climb">大肥鱼爬出海</option>
         </select>
       </label>
     </div>
@@ -635,6 +638,20 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
         <label class="f">本游戏人设（留空沿用 AI 设置）<textarea data-k="sts2.persona" rows="2"></textarea></label>
       </div>
       <p class="hint">需要游戏 mods 目录里已放 STS2-Agent（STS2AIAgent.dll / .pck / mod_id.json）。第一次启动若游戏问是否加载 Mod，选择加载并重启；之后千音会自动开 MCP 并接管。建议用窗口/无边框窗口运行，独占全屏抓不到窗口。</p>
+    </div>
+    <div data-game="climb" style="display:none">
+      <div class="row">
+        <label class="f">「指路」人数<input type="number" min="1" max="20" data-k="climb.guidance"></label>
+        <label class="f">「打气」人数<input type="number" min="1" max="20" data-k="climb.air"></label>
+        <label class="f">「接住」人数<input type="number" min="1" max="20" data-k="climb.net"></label>
+      </div>
+      <div class="row">
+        <label class="f">打捞艇对应礼物<input maxlength="40" data-k="climb.boat_gift"></label>
+        <label class="f">泡泡踏板对应礼物<input maxlength="40" data-k="climb.step_gift"></label>
+        <label class="f">鱼群跟拍对应礼物<input maxlength="40" data-k="climb.school_gift"></label>
+      </div>
+      <p class="hint">填入 B 站实际付费礼物的完整名称。留空时这项效果仍可在攀爬控制台模拟。</p>
+      <label class="c"><input type="checkbox" data-k="climb.narrate">播报登顶、落水和救援台词</label>
     </div>
     <div data-game="wage" style="display:none">
       <p class="hint">参考大肥鱼的上班摸鱼节目，分区「虚拟主播 → 虚拟日常」。主播在蓝色工位上写代码，倒计时走完结算工资。弹幕「摸鱼 / 偷懒」让本轮白干；摸鱼期间发「老板来了 / 抓包」触发鲨总查岗、扣薪，工资不足时显示倒欠公司。真实礼物、醒目留言和上舰增加工资与手速。工资达标后下班，稍后重新打卡。直接生成画面，不需要游戏窗口；在「一键开播 → 皮套上镜」开启 Live2D。节目字幕独立显示，暂停摸鱼会冻结进度。</p>
@@ -1201,6 +1218,9 @@ function renderAiStyle() {
 function isWageType(game) {
   return ((game ?? (CFG.game && CFG.game.active)) || '') === 'wage';
 }
+function isProgramType(game = CFG.game?.active) {
+  return game === 'wage' || game === 'climb';
+}
 function renderSharkSound() {
   const enabled = CFG.wage?.boss_sfx_enabled !== false;
   $('#broadcastSharkSoundState').textContent = enabled
@@ -1213,7 +1233,7 @@ function renderGameSettings() {
   $$('[data-game]').forEach(el => { el.style.display = el.dataset.game === game ? '' : 'none'; });
   const title = $('#dtTitle');
   const titles = {stardew: '星露谷物语 · 自动托管', sts2: '杀戮尖塔 2 · 自动托管',
-                  wage: '上班摸鱼 · 互动直播'};
+                  wage: '上班摸鱼 · 互动直播', climb: '大肥鱼爬出海'};
   if (title) title.textContent = titles[game] || '恶魔之塔 Zero · 自动托管';
   const dashboard = $('#dtGameSelect');
   if (dashboard && document.activeElement !== dashboard) dashboard.value = game;
@@ -1222,15 +1242,17 @@ function renderGameSettings() {
   const broadcast = $('#broadcastGameSelect');
   if (broadcast && document.activeElement !== broadcast) broadcast.value = game;
   const wage = game === 'wage';
+  const program = isProgramType(game);
+  $('#broadcastClimbRow').style.display = game === 'climb' ? '' : 'none';
   $('#broadcastSharkSoundRow').style.display = wage ? '' : 'none';
   renderSharkSound();
   const windowRow = $('#broadcastWindowRow');
-  if (windowRow) windowRow.style.display = wage ? 'none' : '';
+  if (windowRow) windowRow.style.display = program ? 'none' : '';
   const programHint = $('#broadcastProgramHint');
   if (programHint) programHint.style.display = wage ? '' : 'none';
   for (const id of ['broadcastTitleHint', 'broadcastCaptureHint', 'broadcastStardewHint']) {
     const hint = $('#' + id);
-    if (hint) hint.style.display = wage ? 'none' : '';
+    if (hint) hint.style.display = program ? 'none' : '';
   }
 }
 let saveTimer = null, pending = {}, saveQueue = Promise.resolve();
@@ -1485,6 +1507,7 @@ async function pollDt() {
     const isStardew = r.game_kind === 'stardew';
     const isSts2 = r.game_kind === 'sts2';
     const isWage = r.game_kind === 'wage';
+    const isClimb = r.game_kind === 'climb';
     const office = r.wage?.office;
     if (isWage && office) {
       const round = office.round;
@@ -1519,7 +1542,7 @@ async function pollDt() {
       arcade.textContent = bits.length ? bits.join(' · ')
         : '暂无进行中的挑战：发「摸鱼钓鱼 / 工位撸猫 / 冲咖啡 / 抽屉寻宝」开玩，再发「提竿 / 摸摸 / 加奶 / 加糖 / 加冰 / 加浓 / 抽屉1-3」参与，「摸鱼图鉴」查收集。';
     }
-    const isApiGame = isStardew || isSts2 || isWage;
+    const isApiGame = isStardew || isSts2 || isWage || isClimb;
     if (r.game_kind && CFG.game) CFG.game.active = r.game_kind;
     renderGameSettings();
     const scr = r.game && r.game.screen ? r.game.screen : '';
@@ -1534,10 +1557,10 @@ async function pollDt() {
         : (scr ? (names[scr] || scr) : (r.game_running ? '启动中' : '未启动')));
     $('#dtTurns').textContent = r.turns || 0;
 
-    $('#dtStart').textContent = isWage ? '上班 / 开始摸鱼' : '启动 / 继续代打';
+    $('#dtStart').textContent = isWage ? '上班 / 开始摸鱼' : (isClimb ? '继续攀爬' : '启动 / 继续代打');
     $('#dtStop').textContent = isWage ? '暂停摸鱼' : '暂停';
-    $('#dtLaunch').style.display = isWage ? 'none' : '';
-    $('#dtStopGame').style.display = isWage ? 'none' : '';
+    $('#dtLaunch').style.display = isWage || isClimb ? 'none' : '';
+    $('#dtStopGame').style.display = isWage || isClimb ? 'none' : '';
     $('#dtStart').disabled = dtBusy || (r.running && r.ready);
     $('#dtStop').disabled = dtBusy || !r.running;
     $('#dtLaunch').disabled = dtBusy || r.game_running;
@@ -1548,6 +1571,8 @@ async function pollDt() {
     } else if (r.running && r.ready) {
       $('#dtHint').textContent = isWage
         ? '摸鱼节目运行中：弹幕「摸鱼」「老板来了」和礼物都会改变工资；开播页预览后即可把画面播出去。'
+        : isClimb
+          ? '画面运行时大肥鱼会自动攀爬，登顶后继续下一局。'
         : isStardew
           ? '正在托管星露谷，台词自动配音；暂停会保留游戏和语音。'
           : isSts2
@@ -1555,6 +1580,8 @@ async function pollDt() {
             : '正在代打，台词自动配音；暂停会保留游戏和语音。';
     } else if (r.running) {
       $('#dtHint').textContent = '连接中断，可点「启动 / 继续代打」恢复。';
+    } else if (isClimb) {
+      $('#dtHint').textContent = '攀爬已暂停。点击「继续攀爬」恢复。';
     } else if (isWage) {
       $('#dtHint').textContent = '点「上班 / 开始摸鱼」让主播开口和回应弹幕；画面在「一键开播」预览或开启源画面后出现。';
     } else if (r.game_running) {
@@ -1569,13 +1596,15 @@ async function pollDt() {
     const bStart = $('#broadcastDtStart'), bStop = $('#broadcastDtStop'), bState = $('#broadcastDtState');
     if (bStart) {
       bStart.disabled = broadcastDtBusy || (r.running && r.ready);
-      bStart.textContent = isWage ? '开始摸鱼' : '启动代打';
+      bStart.textContent = isWage ? '开始摸鱼' : (isClimb ? '继续攀爬' : '启动代打');
     }
     if (bStop) {
       bStop.disabled = broadcastDtBusy || !r.running;
-      bStop.textContent = isWage ? '暂停摸鱼' : '暂停代打';
+      bStop.textContent = isWage ? '暂停摸鱼' : (isClimb ? '暂停攀爬' : '暂停代打');
     }
-    if (bState) bState.textContent = r.running
+    if (bState) bState.textContent = isClimb
+      ? (r.running ? r.game_text || '自动攀爬' : '攀爬已暂停')
+      : r.running
       ? (isWage ? `节目运行中 · ${r.game_text || ''}` : (isApiGame ? `代打运行中 · ${r.game_text || ''}` : '代打运行中'))
       : (isWage ? '摸鱼托管未启动' : (r.ready ? '代打未启动，游戏已就绪' : (r.game_running ? '游戏已启动，等待连接' : '游戏未启动')));
   } catch (e) {}
@@ -2373,8 +2402,8 @@ async function refreshBroadcastSources() {
   if (r.error) { $('#broadcastError').textContent = r.error; toast(r.error); }
   const picked = r.windows.find(w => String(w.hwnd) === $('#broadcastWindow').value);
   if (picked && picked.minimized) $('#broadcastError').textContent = '所选游戏窗口已最小化，请先恢复游戏窗口再预览。';
-  else if (!isWageType() && !r.default_window && !picked) $('#broadcastError').textContent = '没有检测到可用的游戏窗口，请先启动并按需恢复游戏窗口，再点刷新窗口。';
-  else if (isWageType()) $('#broadcastError').textContent = '';
+  else if (!isProgramType() && !r.default_window && !picked) $('#broadcastError').textContent = '没有检测到可用的游戏窗口，请先启动并按需恢复游戏窗口，再点刷新窗口。';
+  else if (isProgramType()) $('#broadcastError').textContent = '';
 }
 function updateBroadcastButtons() {
   const finishing = broadcastInfo.finishing || scheduleInfo.active_action === 'farewell';
@@ -2405,7 +2434,7 @@ async function broadcastAction(fn) {
   finally { broadcastBusy = false; await pollBroadcast(); }
 }
 function broadcastSelection() {
-  return {hwnd: isWageType() ? 0 : Number($('#broadcastWindow').value),
+  return {hwnd: isProgramType() ? 0 : Number($('#broadcastWindow').value),
           audio_device: $('#broadcastAudio').value === '' ? NaN : Number($('#broadcastAudio').value)};
 }
 $('#broadcastRefreshAccount').onclick = () => broadcastAction(refreshBroadcastAccount);
@@ -2430,7 +2459,7 @@ $('#broadcastLaunchGame').onclick = () => broadcastAction(async () => {
 });
 $('#broadcastGameSelect').addEventListener('change', () => {
   $('#broadcastWindow').value = '';
-  if (!isWageType()) setTimeout(() => refreshBroadcastSources().catch(() => {}), 900);
+  if (!isProgramType()) setTimeout(() => refreshBroadcastSources().catch(() => {}), 900);
 });
 const wageOfficeFraming = $('#wageOfficeFraming');
 $('#wageSfxTest').onclick = async () => {
@@ -2528,7 +2557,7 @@ $('#broadcastDtStop').onclick = () => broadcastDtAction(async () => {
 // 开预览和开源画面都要先确定采集目标：窗口列表为空时自动刷新，游戏没开就自动拉起。
 async function ensureBroadcastSelection() {
   let selection = broadcastSelection();
-  if (isWageType()) {
+  if (isProgramType()) {
     if (!Number.isInteger(selection.audio_device)) {
       await refreshBroadcastSources();
       selection = broadcastSelection();
@@ -2562,7 +2591,7 @@ $('#broadcastPreview').onclick = () => broadcastAction(async () => {
   $('#broadcastPreview').textContent = '正在启动预览…';
   try {
     const selection = await ensureBroadcastSelection();
-    $('#broadcastStatus').textContent = isWageType() ? '正在生成上班摸鱼画面…' : '正在启动画面和声音采集…';
+    $('#broadcastStatus').textContent = isProgramType() ? '正在生成节目画面…' : '正在启动画面和声音采集…';
     const r = await api('/api/broadcast/preview', selection);
     if (!r.ok) throw new Error(r.error);
   } finally { $('#broadcastPreview').textContent = '预览画面和声音'; }
@@ -2666,8 +2695,8 @@ async function pollSchedule(fill = false) {
       : r.enabled ? (stopOnly ? `直播姬 / OBS 每日 ${r.stop_time} 停播；下次停播 ${r.next_stop}。` : livehimeMode ? `直播姬每日 ${r.start_time} 开播、${r.stop_time} 停播${r.stop_time < r.start_time ? '（次日）' : ''}；下次开播 ${r.next_start}，下次停播 ${r.next_stop}。` : `每日 ${r.start_time} 开播、${r.stop_time} 停播${r.stop_time < r.start_time ? '（次日）' : ''}；下次开播 ${r.next_start}，下次停播 ${r.next_stop}。`) : '定时直播未启用。';
     $('#scheduleSource').textContent = stopOnly
       ? `仅停止已登录主播的直播间${r.external_room_id ? ' ' + r.external_room_id : ''}，无需采集源预览。`
-      : isWageType()
-        ? `上班摸鱼：画面由千音生成；声音：${r.audio_name || '系统默认'}。启用前请先在上方预览一次节目画面和声音。`
+      : isProgramType()
+        ? `节目画面由千音生成；声音：${r.audio_name || '系统默认'}。启用前请先在上方预览一次节目画面和声音。`
         : livehimeMode
           ? `${r.window_title ? `已保存窗口：${r.window_title}；声音：${r.audio_name}。` : '启用前请先预览上方选中的窗口和声音。'}直播姬：${r.livehime?.path || '自动查找 livehime.exe'}；快捷键 ${r.livehime?.hotkey || '未设置'}。`
           : r.window_title ? `已保存窗口：${r.window_title}；声音：${r.audio_name}` : '启用前请先预览上方选中的窗口和声音。';
@@ -2721,7 +2750,7 @@ $('#scheduleSave').onclick = () => saveSchedule();
 $('#scheduleDisable').onclick = () => saveSchedule(true);
 
 // ---------- 播放计划 ----------
-const PLAN_GAMES = {demontower: '恶魔之塔', stardew: '星露谷', sts2: '杀戮尖塔2', wage: '上班摸鱼'};
+const PLAN_GAMES = {demontower: '恶魔之塔', stardew: '星露谷', sts2: '杀戮尖塔2', wage: '上班摸鱼', climb: '大肥鱼爬出海'};
 function renderPlanSummary(r) {
   const plans = Array.isArray(r.plans) ? r.plans : [];
   const active = !!(r.plans_enabled && plans.length);
@@ -2762,7 +2791,7 @@ function planRow(plan = {}) {
   row.dataset.id = plan.id || `plan-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   row.innerHTML = '<label class="f">开始时间<input type="time" class="plan-start" step="60"></label>'
     + '<label class="f">结束时间<input type="time" class="plan-stop" step="60"></label>'
-    + '<label class="f">播放类型<select class="plan-game"><option value="demontower">恶魔之塔 Zero</option><option value="stardew">星露谷物语</option><option value="sts2">杀戮尖塔 2</option><option value="wage">上班摸鱼</option></select></label>'
+    + '<label class="f">播放类型<select class="plan-game"><option value="demontower">恶魔之塔 Zero</option><option value="stardew">星露谷物语</option><option value="sts2">杀戮尖塔 2</option><option value="wage">上班摸鱼</option><option value="climb">大肥鱼爬出海</option></select></label>'
     + '<button class="btn r sm plan-del" type="button">删除</button>'
     + '<label class="f plan-music">开播歌单（留空=沿用「点歌」页记住的歌单）<input class="plan-playlist" list="planPlaylistOptions" placeholder="网易云歌单链接或 ID" autocomplete="off"></label>'
     + '<div class="f plan-cover">本次直播封面（留空=沿用直播间当前封面）'

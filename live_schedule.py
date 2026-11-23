@@ -10,7 +10,8 @@ _CLOCK = re.compile(r"(?:[01]\d|2[0-3]):[0-5]\d\Z")
 _COVER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}\Z")
 
 GAME_NAMES = {"demontower": "恶魔之塔 Zero", "stardew": "星露谷物语", "sts2": "杀戮尖塔 2",
-              "wage": "上班摸鱼"}
+              "wage": "上班摸鱼", "climb": "大肥鱼爬出海"}
+PROGRAM_GAMES = {"wage", "climb"}
 
 
 def _minutes(hhmm: str) -> int:
@@ -28,7 +29,7 @@ def _segments(start: str, stop: str) -> list[tuple[int, int]]:
 
 
 def _game_window(game: str, title: str) -> bool:
-    if game == "wage":
+    if game in PROGRAM_GAMES:
         return False
     text = title.lower()
     if game == "stardew":
@@ -293,12 +294,13 @@ class DailyBroadcastSchedule:
         livehime["path"] = path
 
     async def _source_names(self, data):
-        if getattr(self.app, "_is_wage", lambda: False)():
+        if (getattr(self.app, "_is_wage", lambda: False)()
+                or getattr(self.app, "_is_climb", lambda: False)()):
             audio = data.get("audio_device")
             capture = self.app.broadcast.capture
             if (type(audio) is not int or not capture.previewing or capture.program is None
                     or capture.audio_device != audio or capture.error):
-                raise ValueError("请先预览上班摸鱼画面和声音，再保存启用计划")
+                raise ValueError("请先预览节目画面和声音，再保存启用计划")
             sources = await self.app.broadcast.sources()
             devices = [a for a in sources.get("audio", []) if a["id"] == audio]
             if not sources.get("ok") or len(devices) != 1:
@@ -519,6 +521,7 @@ class DailyBroadcastSchedule:
             self.active_action = action
             dt_player = getattr(self.app, "dt", None) if action == "start" else None
             dt_was_running = bool(dt_player is not None and getattr(dt_player, "running", False))
+            climb_was_running = action == "start" and self._climb_running()
             try:
                 if action == "stop":
                     self.cancel_external_timer()
@@ -546,19 +549,26 @@ class DailyBroadcastSchedule:
                     await self._sync_room_cover(plan)
                     self._notify_music_started(plan.get("playlist", "") if plan else "")
                 elif action == "start":
-                    await self._pause_failed_start_autoplay(dt_player, dt_was_running)
+                    await self._pause_failed_start_autoplay(dt_player, dt_was_running, climb_was_running)
             except Exception:
                 self.last_result = {"action": action, "time": self.clock().strftime("%Y-%m-%d %H:%M"),
                                     "ok": False, "message": "定时直播执行失败，请检查账号与采集源"}
                 self.app.push("log", {"level": "warn", "msg": self.last_result["message"]})
                 if action == "start":
-                    await self._pause_failed_start_autoplay(dt_player, dt_was_running)
+                    await self._pause_failed_start_autoplay(dt_player, dt_was_running, climb_was_running)
             finally:
                 self.active_action = ""
 
-    async def _pause_failed_start_autoplay(self, dt_player, dt_was_running):
+    def _climb_running(self):
+        return (getattr(self.app, "_is_climb", lambda: False)()
+                and self.app.climb.snapshot()["auto"])
+
+    async def _pause_failed_start_autoplay(self, dt_player, dt_was_running, climb_was_running=False):
         try:
             if self.app.broadcast.running:
+                return
+            if self._climb_running() and not climb_was_running:
+                await self.app.stop_dt()
                 return
             dt = getattr(self.app, "dt", None)
             if dt is None or not getattr(dt, "running", False):
@@ -578,7 +588,7 @@ class DailyBroadcastSchedule:
         current = str((self.app.cfg.get("game") or {}).get("active", "demontower"))
         if game == current:
             return False
-        if getattr(self.app, "dt", None) is not None and getattr(self.app.dt, "running", False):
+        if self._climb_running() or getattr(getattr(self.app, "dt", None), "running", False):
             await self.app.stop_dt()
         self.app.cfg.setdefault("game", {})["active"] = game
         config.save(self.app.cfg)
@@ -594,12 +604,12 @@ class DailyBroadcastSchedule:
     async def _plan_selection(self, plan):
         """按计划里的游戏找窗口和声音；窗口刚启动时等它出现。"""
         game = plan["game"]
-        if game == "wage":
+        if game in PROGRAM_GAMES:
             data = await self.app.broadcast.sources()
             audio = self._plan_audio(data)
             if data.get("ok") and audio is not None:
                 return {"hwnd": 0, "audio_device": audio, "program": True}
-            return {"error": "没有可用的系统声音输出设备，上班摸鱼无法采集配音"}
+            return {"error": f"没有可用的系统声音输出设备，{GAME_NAMES[game]}无法采集配音"}
         tries = self.WINDOW_TRIES if plan.get("launched") else 1
         last_error = f"没找到{GAME_NAMES[game]}的游戏窗口"
         for attempt in range(tries):
@@ -649,7 +659,7 @@ class DailyBroadcastSchedule:
             if selection.get("error"):
                 return {"ok": False, "error": selection["error"]}
         else:
-            if str((self.app.cfg.get("game") or {}).get("active")) == "wage":
+            if str((self.app.cfg.get("game") or {}).get("active")) in PROGRAM_GAMES:
                 sources = await self.app.broadcast.sources()
                 audio = self._plan_audio(sources)
                 if not sources.get("ok") or audio is None:
@@ -858,7 +868,7 @@ class DailyBroadcastSchedule:
         return None
 
     async def _stop_autoplay(self):
-        if not (getattr(self.app, "dt", None) or getattr(self.app, "dt_task", None)):
+        if not (getattr(self.app, "dt", None) or getattr(self.app, "dt_task", None) or self._climb_running()):
             return
         try:
             await self.app.stop_dt()

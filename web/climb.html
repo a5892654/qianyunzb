@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>大肥鱼爬出海 · 千音</title>
+<style>
+  :root {color-scheme:dark; --ink:#eeeadb; --muted:#aeab9f; --line:#393931; --base:#20211e; --gold:#dfb984; --sage:#aac5ad}
+  * {box-sizing:border-box}
+  body {margin:0; background:#181a17; color:var(--ink); font:14px/1.55 "Microsoft YaHei UI","Microsoft YaHei",system-ui,sans-serif}
+  main {max-width:1464px; margin:auto; padding:24px 36px 30px}
+  header {display:flex; justify-content:space-between; align-items:center; gap:16px; margin:0 0 13px}
+  p,h1,h2 {margin:0}
+  h1 {font-size:23px; letter-spacing:.035em; line-height:1.25}
+  h2 {font-size:14px}
+  a {color:var(--gold); text-underline-offset:4px}
+  #status {color:var(--sage); text-align:right}
+  figure {position:relative; margin:0; background:#303630; border:1px solid #545349; border-radius:8px; overflow:hidden}
+  #game {display:block; width:100%; aspect-ratio:16/9}
+  .tools {display:flex; flex-wrap:wrap; align-items:center; gap:8px; margin-top:12px}
+  .tools .spacer {flex:1}
+  .tools button, .tools select {font:inherit; color:var(--ink); border:1px solid #595649; background:#30312a; border-radius:5px; min-height:36px; padding:4px 11px}
+  .tools button {cursor:pointer}
+  .tools button:hover,.tools button:focus-visible {background:#454135; border-color:var(--gold)}
+  .tools button[aria-pressed="true"] {color:var(--sage); background:#333d33; border-color:#677b68}
+  .tools button:disabled {opacity:.5; cursor:default}
+  .tools .simulation {color:var(--muted); margin-right:2px}
+  .settings {color:var(--muted); margin-top:12px; font-size:13px}
+  .view {overflow:hidden; background:#000}
+  .view main {padding:0; max-width:none}
+  .view header,.view .tools,.view .settings {display:none}
+  .view figure {border:0; border-radius:0}
+  .view #game {height:100dvh; width:100vw; object-fit:contain; cursor:default}
+  @media(max-width:740px) {main {padding:14px} h1 {font-size:18px} .tools .spacer {display:none} .settings {font-size:12px}}
+</style>
+</head>
+<body>
+<main>
+  <header><h1>大肥鱼爬出海</h1><p id="status" role="status">正在连接千音</p></header>
+  <figure>
+    <img id="game" alt="大肥鱼正在峡谷自动攀爬" draggable="false" width="1280" height="720">
+  </figure>
+  <div class="tools">
+    <button id="auto" type="button" aria-pressed="false" disabled>暂停攀爬</button>
+    <button id="restart" type="button">重新开始</button>
+    <span class="spacer"></span>
+    <label class="simulation" for="effect">试播互动</label>
+    <select id="effect">
+      <option>指路</option><option>打气</option><option>接住</option>
+      <option value="boat">打捞艇</option><option value="step">泡泡踏板</option>
+      <option value="school">鱼群跟拍</option>
+    </select>
+    <button id="simulate" type="button">模拟一次</button>
+  </div>
+  <p class="settings">房间弹幕与礼物在千音选择本节目后接入。礼物映射在 AI 设置中配置。<a href="/climb?view=1" target="_blank" rel="noopener">打开干净画面</a></p>
+</main>
+<script>
+  const isolated = new URLSearchParams(location.search).get('view') === '1';
+  const game = document.getElementById('game');
+  const status = document.getElementById('status');
+  const auto = document.getElementById('auto');
+  const restart = document.getElementById('restart');
+  const simulate = document.getElementById('simulate');
+  let socket, autoEnabled = false, guest = 0;
+  document.body.classList.toggle('view', isolated);
+  function loadImage() { game.src = '/api/climb/stream.mjpg?t=' + Date.now(); }
+  game.onerror = () => setTimeout(loadImage, 1100);
+  loadImage();
+  function send(action, data = {}) {
+    if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({action, ...data}));
+  }
+  function connect() {
+    socket = new WebSocket('ws://' + location.host + '/api/climb/control');
+    socket.onopen = () => { refresh(); simulate.disabled = restart.disabled = false; };
+    socket.onclose = () => {
+      status.textContent = '正在重连';
+      auto.disabled = simulate.disabled = restart.disabled = true;
+      setTimeout(connect, 1300);
+    };
+  }
+  async function refresh() {
+    try {
+      const response = await fetch('/api/climb/state', {cache:'no-store'});
+      if (!response.ok || socket?.readyState !== WebSocket.OPEN) return;
+      const state = await response.json();
+      autoEnabled = state.auto;
+      auto.textContent = autoEnabled ? '暂停攀爬' : '继续攀爬';
+      auto.disabled = false;
+      auto.setAttribute('aria-pressed', String(!autoEnabled));
+      status.textContent = !state.auto ? '已暂停' : state.finished
+        ? `已登顶 · ${state.result_left} 秒后续局` : `自动攀爬 · 第 ${state.round} 局`;
+    } catch (_) {}
+  }
+  if (!isolated) {
+    connect();
+    setInterval(refresh, 600);
+    auto.onclick = () => send('auto', {enabled:!autoEnabled});
+    restart.onclick = () => { if (window.confirm('重新开始本局攀爬？')) send('reset'); };
+    simulate.onclick = () => send('simulate', {label:document.getElementById('effect').value, viewer:guest++ % 20});
+  }
+</script>
+</body>
+</html>

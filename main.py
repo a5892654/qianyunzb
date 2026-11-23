@@ -43,6 +43,9 @@ from netease import CAPTCHA_ID, DEVICE_APP_ID
 from tts import GsvEngine, Player
 from wage import WageEngine, WagePlayer, preview_jpeg as wage_preview_jpeg, validate_settings as validate_wage_settings
 from wage_audio import WageSfx, SOUNDS as WAGE_SOUNDS
+from climb import Climb, TITLE as CLIMB_TITLE, validate_settings as validate_climb_settings
+from climb_web import bind_climb, run_climb
+from live_climb import ClimbScene
 from wishlist import WishlistActions, validate_settings as validate_wishlist_settings
 
 os.makedirs(config.LOG_DIR, exist_ok=True)
@@ -129,6 +132,8 @@ class App:
         self.wage = WageEngine(lambda: self.cfg.get("wage", {}), room_id=self.cfg.get("room_id"),
                                persist_path=os.path.join(config.BASE_DIR, "wage_state.json"))
         self.wage_sfx = WageSfx(self)
+        self.climb = Climb(lambda: self.cfg.get("climb", {}))
+        self.climb_scene = ClimbScene(self.climb, config.WEB_DIR)
         self.gift_banner = GiftBanner()
         self.broadcast = Broadcast(self)
         self.livehime = LivehimeController(self)
@@ -167,6 +172,10 @@ class App:
                 self.wage.on_event(ev)
             except Exception as error:
                 log.warning("上班摸鱼互动处理失败：%s", error)
+        climb = getattr(self, "climb", None)
+        if (climb is not None and self._is_climb()
+                and (climb.watchers or self.broadcast.capture.previewing)):
+            climb.on_event(ev)
         self.pipe.on_event(ev)
 
     # ---------- 后台任务 ----------
@@ -323,7 +332,12 @@ class App:
     def _is_wage(self) -> bool:
         return self._active_game() == "wage"
 
+    def _is_climb(self) -> bool:
+        return self._active_game() == "climb"
+
     def _game_name(self) -> str:
+        if self._is_climb():
+            return CLIMB_TITLE
         if self._is_wage():
             return "上班摸鱼"
         if self._is_stardew():
@@ -367,6 +381,8 @@ class App:
         return result
 
     def _game_cfg(self) -> dict:
+        if self._is_climb():
+            return self.cfg.get("climb", {})
         if self._is_wage():
             return self.cfg.get("wage", {})
         if self._is_stardew():
@@ -376,6 +392,8 @@ class App:
         return self.cfg.get("dtgame", {})
 
     def _autoplay_enabled(self) -> bool:
+        if self._is_climb():
+            return False
         if self._is_wage():
             return bool(self.cfg.get("wage", {}).get("enabled", True))
         return bool(self._game_cfg().get("enabled", True))
@@ -521,7 +539,7 @@ class App:
         return await asyncio.to_thread(self._sts2_alive)
 
     def _game_alive(self) -> bool:
-        if self._is_wage():
+        if self._is_wage() or self._is_climb():
             return True
         if self._is_stardew():
             return self._stardew_alive()
@@ -531,7 +549,7 @@ class App:
 
     def dt_ready(self) -> tuple[bool, str]:
         """托管前的体检：模型配好没有、游戏在不在。"""
-        if self._is_wage():
+        if self._is_wage() or self._is_climb():
             return True, ""
         why = self._config_problem()
         if why:
@@ -564,6 +582,14 @@ class App:
 
     def start_dt(self, new_run: bool = False) -> dict:
         """只建 Player 并丢进事件循环，游戏启动/体检放到 async 那一侧做。"""
+        if self._is_climb():
+            state = self.climb.snapshot()
+            if state["auto"] and not new_run:
+                return {"ok": True, "already": True}
+            if new_run:
+                self.climb.reset()
+            self.climb.set_auto(True)
+            return {"ok": True}
         if self.dt and self.dt.running:
             return {"ok": False, "error": "自动托管已经在跑"}
         if self._is_wage():
@@ -706,6 +732,8 @@ class App:
             return False
 
     async def stop_dt(self) -> dict:
+        if getattr(self, "climb", None) is not None and self._is_climb():
+            self.climb.set_auto(False)
         player, task = self.dt, self.dt_task
         if player:
             player.stop()
@@ -759,6 +787,8 @@ class App:
 
     async def resume_dt(self, new_run: bool = False) -> dict:
         asyncio.create_task(self._ensure_engine())
+        if self._is_climb():
+            return self.start_dt(new_run=new_run)
         if self._is_wage():
             async with self.dt_resume_lock:
                 if self.dt and self.dt.running:
@@ -813,6 +843,9 @@ class App:
         游戏起不来是真开不了播（没画面可采）；代打起不来只警告，直播照常——
         模型没配好不该让观众看不到画面。
         """
+        if self._is_climb():
+            await self.resume_dt()
+            return {"ok": True, "launched": False}
         if self._is_wage():
             r = await self.resume_dt()
             if not r.get("ok") and not r.get("already"):
@@ -924,6 +957,9 @@ def build_web(app: App):
 
     def page(name):
         return web.FileResponse(os.path.join(config.WEB_DIR, name), headers={"Cache-Control": "no-cache"})
+
+    if getattr(app, "climb", None) is not None:
+        bind_climb(routes, app, page)
 
     @routes.get("/")
     async def index(_):
@@ -1121,10 +1157,17 @@ def build_web(app: App):
                 validate_wage_settings(patch["wage"])
             except ValueError as error:
                 return web.json_response({"ok": False, "error": str(error)}, status=400)
+        if "climb" in patch:
+            try:
+                if not isinstance(patch["climb"], dict):
+                    raise ValueError("攀爬互动设置无效")
+                validate_climb_settings({**app.cfg.get("climb", {}), **patch["climb"]})
+            except ValueError as error:
+                return web.json_response({"ok": False, "error": str(error)}, status=400)
         if "game" in patch:
             game_patch = patch["game"]
             if (not isinstance(game_patch, dict) or set(game_patch) != {"active"}
-                    or game_patch["active"] not in ("demontower", "stardew", "sts2", "wage")):
+                    or game_patch["active"] not in ("demontower", "stardew", "sts2", "wage", "climb")):
                 return web.json_response({"ok": False, "error": "未知的播放类型"}, status=400)
             if game_patch["active"] != app._active_game():
                 broadcast = app.broadcast
@@ -1155,8 +1198,15 @@ def build_web(app: App):
         if getattr(app, "wage", None) is not None:
             app.wage.room_id = str(app.cfg.get("room_id") or "")
         if (app.cfg.get("game") or {}).get("active") != old_game:
+            if old_game == "climb":
+                app.climb.set_auto(False)
             await app.stop_dt()
-            app.push("log", {"level": "info", "msg": f"已切换为{app._game_name()}，请重新启动托管"})
+            if app._is_climb():
+                app.climb.set_auto(True)
+            message = f"已切换为{app._game_name()}"
+            if not app._is_climb():
+                message += "，请重新启动托管"
+            app.push("log", {"level": "info", "msg": message})
         style_changed = app.cfg.get("ai", {}).get("style") != old_style
         if (app.cfg.get("ai", {}).get("persona") != old_persona or style_changed
                 or app.cfg.get("interaction", {}).get("emotional_value", True) != old_emotional_value):
@@ -1320,7 +1370,7 @@ def build_web(app: App):
     @routes.get("/api/broadcast/sources")
     async def broadcast_sources(_):
         data = await app.broadcast.sources()
-        if app._is_wage():
+        if app._is_wage() or app._is_climb():
             data["program"] = True
             return web.json_response(data)
         try:
@@ -1938,6 +1988,11 @@ def build_web(app: App):
             "game_name": app._game_name(),
             "auto_launch": bool(c.get("auto_launch", True)),
         }
+        if kind == "climb":
+            state = app.climb.snapshot()
+            info.update(running=state["auto"], turns=state["turns"], game_running=True, ready=True, why="",
+                        game_text=f"第 {state['round']} 局 · {state['zone']} · 最高 {state['best']} m")
+            return web.json_response(info)
         if kind == "wage":
             info["game_text"] = app.dt.status_text() if app.dt and hasattr(app.dt, "status_text") else ""
             info["game"] = app.dt.status_summary() if app.dt and hasattr(app.dt, "status_summary") else app.wage.snapshot()
@@ -1993,7 +2048,7 @@ def build_web(app: App):
 
     @routes.post("/api/dtgame/stopgame")
     async def dt_stopgame(_):
-        if app._is_wage():
+        if app._is_wage() or app._is_climb():
             return web.json_response({"ok": True, "program": True})
         ok = app.game.stop()
         return web.json_response({"ok": ok})
@@ -2007,6 +2062,15 @@ def build_web(app: App):
             except asyncio.CancelledError:
                 pass
     wapp.on_cleanup.append(cleanup_speech_switch)
+    if getattr(app, "climb", None) is not None:
+        async def climb_context(_):
+            task = asyncio.create_task(run_climb(app))
+            try:
+                yield
+            finally:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        wapp.cleanup_ctx.append(climb_context)
     wapp.add_routes(routes)
     wapp.router.add_static("/static", config.WEB_DIR)
     return wapp

@@ -46,7 +46,7 @@ const merge = (a, b) => { for (const [k, v] of Object.entries(b)) { if (v && typ
       return route.fulfill({contentType: 'application/json', body: JSON.stringify(result)});
     });
     await page.goto('http://127.0.0.1:18787');
-    await page.waitForFunction(() => document.querySelector('#broadcastGameSelect').options.length === 4);
+    await page.waitForFunction(() => [...document.querySelector('#broadcastGameSelect').options].some(option => option.value === 'wage'));
     await page.selectOption('#broadcastGameSelect', 'wage');
     await page.waitForFunction(() => document.querySelector('#broadcastProgramHint').style.display !== 'none');
     await page.waitForFunction(() => document.querySelector('#gameActive').value === 'wage');
