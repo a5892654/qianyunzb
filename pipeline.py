@@ -359,9 +359,12 @@ class Pipeline:
                 return j["id"]
         return None
 
-    def narrate(self, text, emotion=""):
+    def narrate(self, text, emotion="", *, expires_in=None):
         """普通游戏解说排在观众互动后面，保留手动播报的原有优先级。"""
-        return self.say(text, emotion, kind="narration")
+        event = {"type": "narration", "name": "", "text": text, "emotion": emotion}
+        if expires_in is not None:
+            event["expires_at"] = time.monotonic() + expires_in
+        return self._enqueue(event, text=text)
 
     def narrate_fresh(self, text, emotion=""):
         """游戏解说最新优先：丢掉排队中的旧游戏解说/反应，当前这句说完再接最新一句。"""

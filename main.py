@@ -44,7 +44,7 @@ from tts import GsvEngine, Player
 from wage import WageEngine, WagePlayer, preview_jpeg as wage_preview_jpeg, validate_settings as validate_wage_settings
 from wage_audio import WageSfx, SOUNDS as WAGE_SOUNDS
 from climb import Climb, TITLE as CLIMB_TITLE, validate_settings as validate_climb_settings
-from climb_web import bind_climb, run_climb
+from climb_web import bind_climb, climb_narrating, run_climb
 from live_climb import ClimbScene
 from wishlist import WishlistActions, validate_settings as validate_wishlist_settings
 
@@ -280,6 +280,10 @@ class App:
             self._engine_offline_since = None
             return "start" if self.engine_idle else ""
         if not known:
+            return ""
+        if (getattr(self, "climb", None) is not None and self.cfg["tts"].get("enabled", True)
+                and climb_narrating(self)):
+            self._engine_offline_since = None
             return ""
         if self._engine_offline_since is None:
             self._engine_offline_since = now

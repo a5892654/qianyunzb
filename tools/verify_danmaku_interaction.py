@@ -178,6 +178,14 @@ class InteractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(app.pipe.spoken_done(job))
         self.assertTrue(app.pipe.synth_q.empty())
 
+    async def test_operation_narration_expires_even_within_queue_wait_limit(self):
+        app = make_app()
+        job = app.pipe.narrate("准备起跳", expires_in=-1)
+        await self.worker(app)
+        await asyncio.sleep(0)
+        self.assertTrue(app.pipe.spoken_done(job))
+        self.assertTrue(app.pipe.synth_q.empty())
+
     async def test_stale_narration_is_replaced_by_the_current_scene(self):
         app = make_app()
         app.dt = SimpleNamespace(running=True, fresh_commentary=lambda: "能量见底了，这回合先收手。")

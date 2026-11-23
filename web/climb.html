@@ -43,6 +43,7 @@
   <div class="tools">
     <button id="auto" type="button" aria-pressed="false" disabled>暂停攀爬</button>
     <button id="restart" type="button">重新开始</button>
+    <button id="activate" type="button" hidden>设为当前节目</button>
     <span class="spacer"></span>
     <label class="simulation" for="effect">试播互动</label>
     <select id="effect">
@@ -52,7 +53,8 @@
     </select>
     <button id="simulate" type="button">模拟一次</button>
   </div>
-  <p class="settings">房间弹幕与礼物在千音选择本节目后接入。礼物映射在 AI 设置中配置。<a href="/climb?view=1" target="_blank" rel="noopener">打开干净画面</a></p>
+  <p class="settings">设为当前节目后，语音解说、房间弹幕和礼物会接入。礼物映射在 AI 设置中配置。<a href="/climb?view=1" target="_blank" rel="noopener">打开干净画面</a></p>
+  <p class="settings" id="activate-error" role="alert" hidden></p>
 </main>
 <script>
   const isolated = new URLSearchParams(location.search).get('view') === '1';
@@ -60,6 +62,8 @@
   const status = document.getElementById('status');
   const auto = document.getElementById('auto');
   const restart = document.getElementById('restart');
+  const activate = document.getElementById('activate');
+  const activateError = document.getElementById('activate-error');
   const simulate = document.getElementById('simulate');
   let socket, autoEnabled = false, guest = 0;
   document.body.classList.toggle('view', isolated);
@@ -75,6 +79,7 @@
     socket.onclose = () => {
       status.textContent = '正在重连';
       auto.disabled = simulate.disabled = restart.disabled = true;
+      activate.hidden = true;
       setTimeout(connect, 1300);
     };
   }
@@ -87,8 +92,12 @@
       auto.textContent = autoEnabled ? '暂停攀爬' : '继续攀爬';
       auto.disabled = false;
       auto.setAttribute('aria-pressed', String(!autoEnabled));
-      status.textContent = !state.auto ? '已暂停' : state.finished
+      activate.hidden = state.active;
+      const climbing = !state.auto ? '已暂停' : state.finished
         ? `已登顶 · ${state.result_left} 秒后续局` : `自动攀爬 · 第 ${state.round} 局`;
+      const voice = !state.active ? '当前节目未选中' : !state.voice ? '语音已关闭'
+        : state.warming_up ? '语音引擎预热中' : '';
+      status.textContent = voice ? `${climbing} · ${voice}` : climbing;
     } catch (_) {}
   }
   if (!isolated) {
@@ -97,6 +106,24 @@
     auto.onclick = () => send('auto', {enabled:!autoEnabled});
     restart.onclick = () => { if (window.confirm('重新开始本局攀爬？')) send('reset'); };
     simulate.onclick = () => send('simulate', {label:document.getElementById('effect').value, viewer:guest++ % 20});
+    activate.onclick = async () => {
+      activate.disabled = true;
+      activateError.hidden = true;
+      try {
+        const response = await fetch('/api/config', {
+          method:'POST', headers:{'Content-Type':'application/json', 'X-BVB':'1'},
+          body:JSON.stringify({game:{active:'climb'}})
+        });
+        const result = await response.json();
+        if (!response.ok || !result.ok) throw new Error(result.error || '切换播放类型失败');
+        await refresh();
+      } catch (error) {
+        activateError.textContent = error.message;
+        activateError.hidden = false;
+      } finally {
+        activate.disabled = false;
+      }
+    };
   }
 </script>
 </body>

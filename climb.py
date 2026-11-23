@@ -18,6 +18,7 @@ ROUND_BREAK = 7.0
 MIN_SPEED, MAX_SPEED = 250, 675
 BODY_RADIUS = 26
 BRACE_TIME = 4.89
+REACTION_LIFETIME = 10
 GRIP_X, GRIP_Y = 66, 109
 CARRY_POSES = ((-0.46, 0.78), (-1.52, 0.74), (-2.65, 0.66), (2.28, 0.64), (1.03, 0.57),
                (0.12, 0.33), (1.10, 0.33), (-1.52, 0.33), (2.90, 0.33), (2.95, 0.10))
@@ -27,6 +28,17 @@ DEFAULTS = {"guidance": 1, "air": 2, "net": 3,
 
 
 COMMANDS = {"指路": "guidance", "打气": "air", "接住": "net"}
+
+OPERATION_LINES = (
+    "我先撑住吸盘，再往{aim}跳。",
+    "下一块在{aim}，我往那儿摆过去。",
+    "等杆头贴紧，我就往{aim}蹬。",
+    "我借这块石头发力，往{aim}够。",
+    "我瞄{aim}那块，过岩壁时收一下杆。",
+    "就走{aim}，我先把盆摆过去。",
+    "杆子撑在这儿，我往{aim}借一把力。",
+    "我把杆头压稳，这跳往{aim}走。",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -144,7 +156,9 @@ class Climb:
             self.votes = {key: {} for key in COMMANDS.values()}
             self.cooldowns = {}
             self.news = deque(maxlen=3)
-            self.voice = deque(maxlen=4)
+            self.voice = None
+            self.opening_voice = True
+            self.last_operation_voice = None
 
     def set_auto(self, enabled):
         with self.lock:
@@ -274,16 +288,51 @@ class Climb:
                 self._say("终于爬出海了！这次真的到顶了。", "开心")
 
     def _say(self, line, emotion):
-        self.voice.append((line, emotion))
+        self.voice = (self.run_clock + REACTION_LIFETIME, line, emotion)
 
     def _notice(self, line):
         self.news.append((self.run_clock + 6, line))
 
     def take_voice(self):
         with self.lock:
-            voice = self.voice[-1] if self.voice else None
-            self.voice.clear()
-            return voice
+            if not self.auto:
+                return None
+            if self.opening_voice and not self.finished:
+                self.opening_voice = False
+                return "我是大肥鱼，先找块岩沿落脚。", "开心"
+            voice, self.voice = self.voice, None
+            if voice and self.run_clock < voice[0]:
+                return voice[1:]
+            return None
+
+    def take_operation_voice(self):
+        """Describe the current approach once per attempt, with time left to say it."""
+        with self.lock:
+            attempt = (self.turns, self.reposition_attempt)
+            if (not self.auto or self.finished or self.recover_at or self.on_ledge is None
+                    or attempt == self.last_operation_voice):
+                return None
+            if self.reposition_to is not None:
+                delta = self.reposition_to - self.x
+                remaining = abs(delta) / 112
+                side = "右" if delta > 0 else "左"
+                text = f"我往{side}挪一点，换个支点。"
+            else:
+                remaining = self.auto_at - self.run_clock
+                index, landing_x = self._target()
+                delta = landing_x - self.x
+                aim = "正上方" if abs(delta) < 15 else "右上" if delta > 0 else "左上"
+                if "air" in self.effects:
+                    text = f"我先往{aim}跳，备用气留到半空。"
+                elif LEDGES[index].width < 120 and self.turns % 3 == 0:
+                    text = f"{aim}那块太窄，我得瞄准中间。"
+                else:
+                    line = (self.turns + self.round_number - 1) % len(OPERATION_LINES)
+                    text = OPERATION_LINES[line].format(aim=aim)
+            if remaining < 1.25:
+                return None
+            self.last_operation_voice = attempt
+            return text, remaining
 
     def _fall(self):
         self.recover_at = self.run_clock + 1.45
@@ -652,6 +701,7 @@ class Climb:
                 self.replan = True
                 self.effects.pop("net")
                 self._notice("弹幕的救生网接住了大肥鱼")
+                self._say("接住了！还好有你们这张网。", "惊喜")
                 return
             for index, ledge in sorted(surfaces, key=lambda item: item[1].y):
                 left, right = ledge.landing_bounds(self.vx)
@@ -662,6 +712,7 @@ class Climb:
                         plank["used"] = True
                         plank["until"] = self.run_clock + 10
                         self._notice(f"{plank['by']} 的泡泡踏板接住了大肥鱼")
+                        self._say("这块泡泡踏板来得正好，我借它再蹬一下！", "开心")
                     return
         floor = self._catch_floor()
         if self.y > LEDGES[floor].y + (185 if floor == self.checkpoint else 120):
@@ -726,9 +777,11 @@ class Climb:
             index, x = self._target()
             self.effects[kind] = {"until": self.run_clock + 8, "x": x, "y": LEDGES[index].surface(x)}
             self._notice("弹幕给下一块落脚石点了灯")
+            self._say("灯亮了！这下看见该往哪儿跳了。", "开心")
         elif kind == "air":
             self.effects[kind] = {"until": self.run_clock + 30}
             self._notice("备用气已攒好 · 下一跳可额外喷气")
+            self._say("收到你们的打气，下一跳有底了。", "开心")
         else:
             # Deploy under the current crossing so the net can catch an active fall.
             x = clamp(self.x + self.vx * 0.16, 115, WIDTH - 115)

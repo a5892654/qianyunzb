@@ -28,6 +28,34 @@ class ClimbTests(unittest.TestCase):
         for _ in range(round(seconds * 60)):
             self.game.advance(1 / 60)
 
+    def test_voice_describes_successive_jumps_before_launch(self):
+        self.assertIn("我是大肥鱼", self.game.take_voice()[0])
+        self.assertIsNone(self.game.take_voice())
+        self.assertIsNone(self.game.take_operation_voice())
+        self.tick(3)
+        first, remaining = self.game.take_operation_voice()
+        _, landing_x = self.game._target()
+        self.assertIn("右上" if landing_x > self.game.x else "左上", first)
+        self.assertGreater(remaining, 1.25)
+        self.assertEqual(self.game.turns, 1)
+        self.assertIsNone(self.game.take_operation_voice())
+        self.tick(6.5)
+        second, remaining = self.game.take_operation_voice()
+        self.assertNotEqual(first, second)
+        self.assertGreater(remaining, 1.25)
+        self.assertEqual(self.game.turns, 2)
+
+    def test_audience_voice_and_reset(self):
+        self.game.take_voice()
+        self.assertTrue(self.game.simulate("指路", 0))
+        self.assertIn("灯亮了", self.game.take_voice()[0])
+        self.game.set_auto(False)
+        self.assertIsNone(self.game.take_voice())
+        self.assertIsNone(self.game.take_operation_voice())
+        self.game.reset()
+        self.game.set_auto(True)
+        self.assertIn("我是大肥鱼", self.game.take_voice()[0])
+
     def test_auto_reaches_summit_and_restarts_without_input(self):
         self.assertTrue(self.game.snapshot()["auto"])
         seen = set()
@@ -199,6 +227,13 @@ class RoutesTests(unittest.IsolatedAsyncioTestCase):
         app.climb_scene = ClimbScene(app.climb, config.WEB_DIR)
         app.rice_gift = Mock()
         app.pipe = Mock(paused=False)
+        app.pipe.current = None
+        app.pipe.pending_replies = set()
+        app.pipe.tts_ready = asyncio.Event()
+        app.pipe.tts_ready.set()
+        app.engine_ready = asyncio.Event()
+        app.engine_ready.set()
+        app.engine_idle = app._engine_booting = False
         app.push = Mock()
         app.game = Mock()
         app.broadcast = main.Broadcast(app)
@@ -237,6 +272,28 @@ class RoutesTests(unittest.IsolatedAsyncioTestCase):
         finally:
             stream.close()
             await socket.close()
+
+    async def test_voice_waits_for_engine_without_stalling_the_scene(self):
+        self.app.engine_ready.clear()
+        self.app.engine_idle = True
+
+        async def warmup():
+            self.app.engine_idle = False
+            self.app._engine_booting = True
+
+        self.app.start_engine_for_live = AsyncMock(side_effect=warmup)
+        self.app.broadcast.capture.previewing = True
+        await asyncio.sleep(0.15)
+        self.assertGreater(self.app.climb.snapshot()["clock"], 0)
+        self.app.start_engine_for_live.assert_awaited_once()
+        self.app.pipe.narrate_fresh.assert_not_called()
+        state = await (await self.client.get("/api/climb/state")).json()
+        self.assertTrue(state["warming_up"])
+        self.app._engine_booting = False
+        self.app.engine_ready.set()
+        await asyncio.sleep(0.1)
+        self.app.pipe.narrate_fresh.assert_called_once()
+        self.assertIn("我是大肥鱼", self.app.pipe.narrate_fresh.call_args.args[0])
 
     async def test_duplicate_gift_mappings_are_rejected(self):
         with patch("config.save") as save:
