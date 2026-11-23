@@ -18,6 +18,8 @@ logs/
 qoder_workdir/
 gift_supporters.sqlite3*
 rice_counter.json*
+wage_state.json*
+/outputs/wage-*/
 
 # Media / model weights / datasets (never commit)
 live2d-models/*
@@ -42,8 +44,10 @@ Thumbs.db
 
 # Build artifacts / local backups
 QianyinAI.exe
+QianyinAI.exe.old-*
 config.json.testbak
 config.json.*bak*
+covers/
 
 # Debug screenshots from local verification
 _*.png

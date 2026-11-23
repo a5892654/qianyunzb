@@ -1,4 +1,4 @@
-"""按 game.active 分派启动器：恶魔之塔（Godot）、星露谷（SMAPI）或杀戮尖塔 2。"""
+"""按 game.active 分派游戏启动器或不依赖游戏进程的节目源。"""
 
 from __future__ import annotations
 
@@ -7,12 +7,34 @@ from dtgame.stardew import StardewProcess
 from dtgame.sts2 import STS2Process
 
 
+class ProgramSource:
+    """节目画面由工具生成，启动/停止不能误操作游戏进程。"""
+
+    proc = None
+
+    def running(self):
+        return True
+
+    def launch(self):
+        return {"ok": True, "program": True}
+
+    async def launch_and_wait(self, check):
+        return self.launch()
+
+    def stop(self):
+        return True
+
+    def audio_pids(self):
+        return []
+
+
 class GameLauncher:
     def __init__(self, cfg: dict):
         self.cfg = cfg
         self.demontower = GameProcess(cfg.get("dtgame", {}))
         self.stardew = StardewProcess(cfg.get("stardew", {}))
         self.sts2 = STS2Process(cfg.get("sts2", {}))
+        self.program = ProgramSource()
 
     def sync(self, cfg: dict):
         self.cfg = cfg
@@ -33,6 +55,8 @@ class GameLauncher:
         return self.kind == "sts2"
 
     def current(self):
+        if self.kind == "wage":
+            return self.program
         if self.is_stardew:
             return self.stardew
         if self.is_sts2:

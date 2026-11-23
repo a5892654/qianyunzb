@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
 
+import config
 from dtgame import ttsd
 from pipeline import Pipeline
 from tts import Player
@@ -252,6 +253,99 @@ class OwnStaleEngineTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(ttsd, "_listening_pids", return_value={111}), \
                 patch.object(ttsd, "_ttsd_pids", return_value={222}):
             self.assertFalse(ttsd.owns_port({"ttsd_base": "http://127.0.0.1:8899"}))
+
+
+class EngineWatchTests(unittest.IsolatedAsyncioTestCase):
+    """流式引擎连跑 8 小时或私有提交涨过上限，都要趁空闲重启一次。"""
+
+    def pipeline(self, **tts):
+        app = FakeApp()
+        app.cfg["tts"] = {"stream_enabled": True, "qwen_enabled": True, **tts}
+        app.dt = SimpleNamespace(running=True)
+        return Pipeline(app)
+
+    async def check(self, pipe, used, age=0.0, *, recovering=False, speaking=False):
+        pipe._recovering = recovering
+        pipe.current = Mock(spec=["text"]) if speaking else None
+        with patch.object(ttsd, "private_commit_mib", return_value=used), \
+                patch.object(ttsd, "age_seconds", return_value=age), \
+                patch.object(Pipeline, "_announce_engine_restart", new_callable=AsyncMock) as notice, \
+                patch.object(Pipeline, "_recover_stream_engine", new_callable=AsyncMock) as recover:
+            fired = await pipe._check_stream_engine()
+        return fired, notice, recover
+
+    async def test_restarts_over_memory_limit_when_idle(self):
+        fired, notice, recover = await self.check(self.pipeline(), 15000)
+        self.assertTrue(fired)
+        notice.assert_awaited_once()
+        recover.assert_awaited_once()
+
+    async def test_restarts_every_eight_hours(self):
+        fired, notice, recover = await self.check(self.pipeline(), 8000, age=8 * 3600)
+        self.assertTrue(fired)
+        notice.assert_awaited_once()
+        recover.assert_awaited_once()
+
+    async def test_keeps_engine_below_both_limits(self):
+        fired, notice, recover = await self.check(self.pipeline(), 9000, age=7 * 3600)
+        self.assertFalse(fired)
+        notice.assert_not_awaited()
+        recover.assert_not_awaited()
+
+    async def test_never_restarts_while_speaking(self):
+        fired, notice, recover = await self.check(self.pipeline(), 20000, age=9 * 3600, speaking=True)
+        self.assertFalse(fired)
+        recover.assert_not_awaited()
+
+    async def test_never_overlaps_with_running_recovery(self):
+        fired, notice, recover = await self.check(self.pipeline(), 20000, recovering=True)
+        self.assertFalse(fired)
+        recover.assert_not_awaited()
+
+    async def test_skips_legacy_engine(self):
+        fired, notice, recover = await self.check(self.pipeline(stream_enabled=False), 20000)
+        self.assertFalse(fired)
+        recover.assert_not_awaited()
+
+    async def test_restarts_silently_when_off_air(self):
+        pipe = self.pipeline()
+        pipe.app.dt = None
+        fired, notice, recover = await self.check(pipe, 15000)
+        self.assertTrue(fired)
+        notice.assert_not_awaited()
+        recover.assert_awaited_once()
+
+
+class EngineRestartNoticeTests(unittest.IsolatedAsyncioTestCase):
+    """重启前要先说一句、把画面挂成「上厕所中」，说完再动手。"""
+
+    async def announce(self, line):
+        app = FakeApp()
+        app.cfg["broadcast"] = {"engine_restart_line": line}
+        app.wage = SimpleNamespace(set_away=Mock())
+        pipe = Pipeline(app)
+        said = []
+        pipe.say_job_id = Mock(side_effect=lambda text, *a, **k: said.append(text) or 7)
+        pipe.spoken_done = Mock(return_value=True)
+        await pipe._announce_engine_restart()
+        return app, said
+
+    async def test_puts_away_screen_up_and_says_line(self):
+        app, said = await self.announce("我去趟厕所")
+        app.wage.set_away.assert_called_once_with(True)
+        self.assertEqual(said, ["我去趟厕所"])
+
+    async def test_uses_default_line_when_config_empty(self):
+        app, said = await self.announce("")
+        self.assertEqual(said, [config.DEFAULTS["broadcast"]["engine_restart_line"]])
+
+    async def test_restart_clears_away_screen(self):
+        app = FakeApp()
+        app.wage = SimpleNamespace(set_away=Mock())
+        pipe = Pipeline(app)
+        with patch.object(ttsd, "stop", Mock()), patch.object(ttsd, "ensure", AsyncMock(return_value=True)):
+            await pipe._recover_stream_engine()
+        app.wage.set_away.assert_called_once_with(False)
 
 
 class DecodeTests(unittest.TestCase):

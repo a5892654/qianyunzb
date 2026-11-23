@@ -1,0 +1,11 @@
+Edited with the built-in image_gen tool on 2026-11-11.
+Reference: shark-boss.png. Output: shark-boss-fullbody.png.
+
+Edit the referenced shark boss image into a COMPLETE FULL-BODY STANDING character illustration on genuine transparent alpha.
+Keep the SAME shark identity, exact opaque black sunglasses, intimidating blue-gray angular shark face, dark black business suit, white shirt and red tie, muscular broad-shouldered build, cel-shaded anime rendering, stern toothy expression, and the arm pointing toward viewer's LEFT. Preserve the threatening executive presence. The black sunglasses must still hide both eyes completely.
+Critical change: zoom the camera OUT enough to show the ENTIRE character from the very top tip of the dorsal fin ALL THE WAY DOWN to BOTH COMPLETE FEET. Extend and finish the lower body with full-length tailored black suit trousers, two clearly visible sturdy legs, both knees and ankles, and TWO COMPLETE polished black dress shoes. A small shark tail may curve to the side behind the legs. Strong grounded stance with feet apart, leaning slightly forward. About 4-heads-tall stylized proportions; NOT realistic long lanky legs, NOT a tiny baby mascot.
+Composition: ONE character in ONE single full-body portrait, centered on a roomy portrait canvas, every extremity entirely inside the image. Leave at least 8 percent transparent margin above the dorsal fin, below both shoe soles and to the sides of all hands. Both shoes must visibly sit ABOVE the bottom image edge with transparent pixels underneath. No cropped waist, no bust view, no cutoff thighs, no cutoff shins, no cutoff shoes, no vignette fade at the bottom. No grid, no sprite sheet, no collage, no text, no labels, no environment, no floor, no cast shadow, no watermark.
+Do not retain the close-up crop of the reference. The reference is only to lock character identity and rendering style; the requested result MUST show a complete body and both feet, with sufficient transparent breathing room for subsequent GIF animation.
+
+Animation assembly: tools/build_shark_boss_gif.py.
+48 frames / 60 ms for scolding and pointing; 32 frames / 100 ms for idle breathing.

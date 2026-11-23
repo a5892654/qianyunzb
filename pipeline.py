@@ -8,6 +8,7 @@ import time
 
 import numpy as np
 
+import config
 from brain import fill
 from live_context import rice_question
 from interaction import AudienceInteraction
@@ -31,6 +32,12 @@ CHAT_TYPES = ("manual", "farewell", "superchat", "guard", "gift", "danmaku", "fo
 # 正常中文语速约 5 字/秒；TTS 偶发复读时按文本长度给约 2 倍余量的上限，超了就掐断。
 SPEECH_SECONDS_PER_CHAR = 0.35
 SPEECH_CAP_EXTRA = 4.0
+# 流式引擎每说一句约泄漏 3~6MB 私有提交（实测 18 小时 4355 句把 63GB 的提交限额顶穿，
+# 连带 dwm 和直播姬一起崩）。固定每 8 小时重启一次；泄漏比预期快时由内存上限兜底。
+ENGINE_MAX_AGE_SECONDS = 8 * 3600
+ENGINE_COMMIT_LIMIT_MIB = 14 * 1024
+ENGINE_WATCH_SECONDS = 60
+ENGINE_NOTICE_TIMEOUT_S = 15
 _seq = itertools.count(1)
 
 
@@ -101,7 +108,8 @@ class Pipeline:
         return self.app.cfg
 
     def start(self):
-        self.tasks = [asyncio.create_task(c()) for c in (self._ticker, self._gen_worker, self._synth_worker, self._play_worker)]
+        self.tasks = [asyncio.create_task(c()) for c in (self._ticker, self._gen_worker, self._synth_worker,
+                                                         self._play_worker, self._watch_stream_engine)]
 
     # ---------- 事件入口 ----------
     def _display_name(self, name):
@@ -568,6 +576,14 @@ class Pipeline:
             await self.play_q.put(item)
 
     async def _play_stream(self, item, loop):
+        if getattr(self.app, "engine_idle", False):
+            return  # 没开播，引擎已卸载；开播后 watch 会把引擎拉回来
+        ready = getattr(self.app, "engine_ready", None)
+        if ready is not None and not ready.is_set():
+            try:
+                await asyncio.wait_for(ready.wait(), 60)
+            except asyncio.TimeoutError:
+                pass
         from dtgame import ttsd
         a = self.cfg["audio"]
         text, dev, vol = item["text"], a.get("device", ""), float(a.get("volume", 80))
@@ -653,12 +669,69 @@ class Pipeline:
                 f"流式语音失败，这句跳过（不降级），后台重启引擎：{error}"})
         asyncio.create_task(self._recover_stream_engine())
 
+    async def _watch_stream_engine(self):
+        """流式引擎连跑太久或私有提交涨过上限时，趁没在说话重启一次。"""
+        while True:
+            await asyncio.sleep(ENGINE_WATCH_SECONDS)
+            try:
+                await self._check_stream_engine()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                log.warning("流式引擎巡检失败：%s", e)
+
+    async def _check_stream_engine(self) -> bool:
+        from dtgame import ttsd
+        tts = self.cfg["tts"]
+        if not (tts.get("stream_enabled") and tts.get("qwen_enabled")):
+            return False
+        used = ttsd.private_commit_mib(tts)
+        age = ttsd.age_seconds()
+        over_mem = bool(used and used >= ENGINE_COMMIT_LIMIT_MIB)
+        over_age = age >= ENGINE_MAX_AGE_SECONDS
+        if not (over_mem or over_age):
+            return False
+        if self._recovering or self.current is not None:
+            return False
+        reason = (f"私有提交已占 {used / 1024:.1f}GB" if over_mem
+                  else f"已连续工作 {age / 3600:.1f} 小时")
+        announce = self._program_active()
+        log.warning("流式语音引擎%s，趁空闲重启一次", reason)
+        self.app.push("log", {"level": "warn", "msg":
+            f"流式语音引擎{reason}，{'先跟观众说一声再' if announce else ''}后台重启（约 1 分钟）"})
+        if announce:
+            await self._announce_engine_restart()
+        self.tts_ready.clear()
+        await self._recover_stream_engine()
+        return True
+
+    def _program_active(self) -> bool:
+        """没有代打在跑（未开播）时不说话，只安静地换引擎。"""
+        return bool(getattr(self.app, "dt", None) and getattr(self.app.dt, "running", False))
+
+    async def _announce_engine_restart(self):
+        """重启前先跟观众打招呼，并把摸鱼画面切成「上厕所中」。"""
+        wage = getattr(self.app, "wage", None)
+        if callable(getattr(wage, "set_away", None)):
+            wage.set_away(True)
+        line = self._engine_restart_line()
+        job = self.say_job_id(line) if line else None
+        deadline = time.monotonic() + ENGINE_NOTICE_TIMEOUT_S
+        while job is not None and not self.spoken_done(job) and time.monotonic() < deadline:
+            await asyncio.sleep(0.15)
+
+    def _engine_restart_line(self):
+        line = str((self.cfg.get("broadcast") or {}).get("engine_restart_line") or "").strip()
+        return line or config.DEFAULTS["broadcast"]["engine_restart_line"]
+
     async def _recover_stream_engine(self):
         """后台清残留并重拉引擎：加载要 40 秒，不能让播报队列等它。"""
         from dtgame import ttsd
-        if self._recovering:
+        if self._recovering or getattr(self.app, "engine_idle", False):
             return
         self._recovering = True
+        # 重启期间压住播报，别让排队中的句子因为引擎不在而整句跳过。
+        self.tts_ready.clear()
         try:
             ttsd.stop()
             if not await ttsd.ensure(self.cfg["tts"],
@@ -669,6 +742,10 @@ class Pipeline:
             log.warning("重启流式引擎失败：%s", e)
         finally:
             self._recovering = False
+            self.tts_ready.set()
+            wage = getattr(self.app, "wage", None)
+            if callable(getattr(wage, "set_away", None)):
+                wage.set_away(False)
 
     async def _play_blocking(self, item, loop):
         a = self.cfg["audio"]

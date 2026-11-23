@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import ipaddress
+import os
 import re
 import time
 import urllib.parse
@@ -20,6 +21,9 @@ LiveRoom = bili_live.LiveRoom
 
 START_LIVE_URL = "https://api.live.bilibili.com/room/v1/Room/startLive"
 UPDATE_TITLE_URL = "https://api.live.bilibili.com/room/v1/Room/update"
+UPLOAD_IMAGE_URL = "https://api.bilibili.com/x/upload/web/image"
+PRE_LIVE_INFO_URL = "https://api.live.bilibili.com/xlive/app-blink/v1/preLive/UpdatePreLiveInfo"
+COVER_TYPES = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "webp": "image/webp"}
 LIVE_TS_URL = "https://api.bilibili.com/x/report/click/now"
 # 直播姬通道的开播形态（社区 IHateLivehime 实测可用）：缺 version/build/ts
 # 会被 B站按 60024 拒绝；用静态旧版本走二维码认证，最新版会转 60043 外部验证
@@ -247,6 +251,82 @@ class BiliBroadcastPlatform:
             message = _CTRL_RE.sub("", str(data.get("message") or data.get("msg") or "")).strip()[:60]
             raise PlatformError("修改直播间标题失败：" + (message or f"B站返回 {code}"), code)
         return {"ok": True, "title": text}
+
+    async def _upload_cover_image(self, image_path: str) -> str:
+        """把本地封面传到B站图床，返回图床地址（必须在 hdslb.com 下才能设封面）。"""
+        token = self.credential.bili_jct or ""
+        if not token:
+            raise PlatformError("B站登录状态缺少校验信息，请重新扫码登录")
+        content_type = COVER_TYPES.get(os.path.splitext(image_path)[1].lstrip(".").lower())
+        if not content_type:
+            raise PlatformError("封面仅支持 PNG、JPG、WebP 图片")
+        with open(image_path, "rb") as handle:
+            image = handle.read()
+        if not image:
+            raise PlatformError("封面文件是空的，请重新选择封面")
+        form = aiohttp.FormData()
+        form.add_field("file", image, filename=os.path.basename(image_path), content_type=content_type)
+        form.add_field("bucket", "openplatform")
+        form.add_field("csrf", token)
+        headers = {"User-Agent": "Mozilla/5.0",
+                   "Origin": "https://www.bilibili.com",
+                   "Referer": "https://www.bilibili.com/",
+                   "Cookie": self.cookie}
+        try:
+            async with aiohttp.ClientSession(headers=headers) as session:
+                async with session.post(UPLOAD_IMAGE_URL, data=form,
+                                        timeout=aiohttp.ClientTimeout(total=TIMEOUT_SECONDS)) as response:
+                    uploaded = await response.json(content_type=None)
+        except asyncio.TimeoutError:
+            raise PlatformError("上传封面到B站超时，请检查网络后重试") from None
+        except aiohttp.ClientError:
+            raise PlatformError("连接B站上传封面失败，请检查网络后重试") from None
+        if not isinstance(uploaded, dict):
+            raise PlatformError("上传封面到B站失败：B站返回了异常数据")
+        if int(uploaded.get("code") or 0) != 0:
+            message = _CTRL_RE.sub("", str(uploaded.get("message") or uploaded.get("msg") or "")).strip()[:60]
+            raise PlatformError("上传封面到B站失败：" + (message or f"B站返回 {uploaded.get('code')}"))
+        uploaded_data = uploaded.get("data") or {}
+        url = str(uploaded_data.get("location") or uploaded_data.get("url")
+                  or uploaded_data.get("image_url") or "").strip()
+        url = url.replace("http://", "https://", 1)
+        host = (urllib.parse.urlsplit(url).hostname or "").lower()
+        if not url or not (host == "hdslb.com" or host.endswith(".hdslb.com")):
+            raise PlatformError("封面没有传到B站图床，请换一张图片重试")
+        return url
+
+    async def _apply_cover(self, url: str) -> dict:
+        token = self.credential.bili_jct or ""
+        if not token:
+            raise PlatformError("B站登录状态缺少校验信息，请重新扫码登录")
+        payload = {"csrf": token, "csrf_token": token, "platform": "web", "mobi_app": "web",
+                   "build": "1", "cover": url, "visit_id": ""}
+        headers = {"User-Agent": "Mozilla/5.0",
+                   "Origin": "https://link.bilibili.com",
+                   "Referer": "https://link.bilibili.com/p/center/index",
+                   "Cookie": self.cookie + "; os=pc"}
+        try:
+            async with aiohttp.ClientSession(headers=headers) as session:
+                async with session.post(PRE_LIVE_INFO_URL, data=payload,
+                                        timeout=aiohttp.ClientTimeout(total=TIMEOUT_SECONDS)) as response:
+                    updated = await response.json(content_type=None)
+        except asyncio.TimeoutError:
+            raise PlatformError("设置直播间封面超时，请检查网络后重试") from None
+        except aiohttp.ClientError:
+            raise PlatformError("连接B站设置封面失败，请检查网络后重试") from None
+        if not isinstance(updated, dict):
+            raise PlatformError("设置直播间封面失败：B站返回了异常数据")
+        code = int(updated.get("code") or 0)
+        if code != 0:
+            message = _CTRL_RE.sub("", str(updated.get("message") or updated.get("msg") or "")).strip()[:60]
+            if code == 100402:
+                message = "图片地址不合法，可能图片审核未通过，请换一张重试"
+            raise PlatformError("设置直播间封面失败：" + (message or f"B站返回 {code}"), code)
+        return {"ok": True, "cover": url}
+
+    async def update_cover(self, image_path: str) -> dict:
+        """把本地图片传到B站图床并换成本场直播封面；只动封面，不碰标题和分区。"""
+        return await self._apply_cover(await self._upload_cover_image(image_path))
 
     async def _stop_started_room(self) -> bool:
         """关闭本实例刚开启的房间；成功 True，失败 False 且保留 started_room_id 供重试。"""

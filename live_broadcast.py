@@ -69,6 +69,8 @@ class Broadcast:
         if getattr(app, "rice", None) is not None:
             self.capture.rice_compositor = RiceCompositor(app.rice, lambda: app.cfg.get("rice_counter", {}))
         self.capture.banner_compositor = getattr(app, "gift_banner", None)
+        from live_wage import WageForeground
+        self.capture.foreground_compositor = WageForeground(app)
         self.platform = None
         self.lock = asyncio.Lock()
         self.phase = "idle"
@@ -101,6 +103,10 @@ class Broadcast:
         if not l2d.get("enabled") or not l2d.get("overlay_in_broadcast", True):
             return None
 
+        if getattr(self.app, "_is_wage", lambda: False)():
+            from wage import avatar_layout
+            wage = self.app.cfg.get("wage", {})
+            return avatar_layout(wage, self.app.wage.snapshot())
         if self.theme.active:
             theme = self.app.cfg.get("stream_theme", {})
             return ("bl", theme.get("avatar_size", THEME_DEFAULTS["avatar_size"]), 0,
@@ -135,8 +141,21 @@ class Broadcast:
         height = round(OUT_H * settings[1]) if settings else OVERLAY_BOX
         # 按 128px 分档，拖动大小时避免每帧重建 WebGL 缓冲区。
         size = max(OVERLAY_BOX, math.ceil(height / 128) * 128)
-        zoom = self.app.cfg.get("stream_theme", {}).get("avatar_zoom", THEME_DEFAULTS["avatar_zoom"]) if self.theme.active else 1
-        return {"size": size, "zoom": zoom}
+        wage = bool(getattr(self.app, "_is_wage", lambda: False)())
+        zoom = (self.app.cfg.get("stream_theme", {}).get("avatar_zoom", THEME_DEFAULTS["avatar_zoom"])
+                if self.theme.active and not wage else 1)
+        if wage:
+            zoom = self.app.cfg.get("wage", {}).get("avatar_zoom", 1.8)
+        view = {"size": size, "zoom": zoom}
+        if wage:
+            state = self.app.wage.snapshot()
+            view["office"] = {"status": state.get("status", "working"),
+                              "paused": bool(state.get("paused")),
+                              "typing": bool(state.get("typing_enabled", True)),
+                              "work_time": float(state.get("focus_s") or 0),
+                              "slack_kind": (state.get('slack_event') or {}).get('id', ''),
+                              "speed": float(state.get("speed") or 1)}
+        return view
 
     async def prepare_overlay(self) -> None:
         """预览/配置变化时准备渲染器，保留失败原因供界面展示和开播校验。"""
@@ -199,6 +218,12 @@ class Broadcast:
         except PlatformError as error:
             return {"ok": False, "error": str(error)}
 
+    async def update_cover(self, image_path):
+        try:
+            return await BiliBroadcastPlatform(self.app.cfg.get("bili_cookie", "")).update_cover(image_path)
+        except PlatformError as error:
+            return {"ok": False, "error": str(error)}
+
     async def login(self):
         result = await self.account()
         if result.get("logged_in"):
@@ -237,11 +262,33 @@ class Broadcast:
             raise ValueError("请选择有效的游戏窗口和声音输出设备")
         return hwnd, audio
 
+    @staticmethod
+    def program_audio(data):
+        audio = data.get("audio_device") if isinstance(data, dict) else None
+        if type(audio) is not int or audio < 0:
+            raise ValueError("请选择声音输出设备")
+        return audio
+
     async def preview(self, data):
         async with self.lock:
             if self.running:
                 return {"ok": False, "error": "直播期间不能切换采集源，请先停止直播"}
             try:
+                if getattr(self.app, "_is_wage", lambda: False)():
+                    audio = self.program_audio(data)
+                    if (self.capture.previewing and self.capture.program is not None
+                            and self.capture.audio_device == audio):
+                        await self.prepare_overlay()
+                        self.phase, self.error = "preview", ""
+                        return {"ok": True, "already": True, "program": True}
+                    self.error = ""
+                    if self.capture.previewing:
+                        await asyncio.to_thread(self.capture.stop_preview)
+                    await asyncio.to_thread(self.capture.start_program,
+                                            lambda: self.app.wage.frame(), audio)
+                    await self.prepare_overlay()
+                    self.phase = "preview"
+                    return {"ok": True, "program": True}
                 hwnd, audio = self.selection(data)
                 if hwnd == self.source_hwnd:
                     # 源画面窗口里放的就是这条采集链的输出，采它等于让自己喂自己，
@@ -414,10 +461,19 @@ class Broadcast:
             if self.source_open:
                 return {"ok": False, "error": "源画面窗口还开着（直播姬在用），请先点「关闭源画面」再用千音开播"}
             try:
-                hwnd, audio = self.selection(data)
+                wage = bool(getattr(self.app, "_is_wage", lambda: False)())
+                if wage:
+                    hwnd, audio = 0, self.program_audio(data)
+                else:
+                    hwnd, audio = self.selection(data)
                 if data.get("confirm") is not True:
                     raise ValueError("开播前需要确认公开直播")
-                if not self.capture.previewing or self.capture.hwnd != hwnd or self.capture.audio_device != audio:
+                if wage:
+                    if (not self.capture.previewing or self.capture.program is None
+                            or self.capture.audio_device != audio):
+                        raise ValueError("请先预览上班摸鱼画面和声音，再开始直播")
+                elif (not self.capture.previewing or self.capture.hwnd != hwnd
+                      or self.capture.audio_device != audio):
                     raise ValueError("请先预览当前窗口和声音，再开始直播")
                 if self.capture.error:
                     raise CaptureError(self.capture.error)
@@ -513,7 +569,9 @@ class Broadcast:
         timing = overlay.snapshot() if overlay is not None and callable(getattr(overlay, "snapshot", None)) else {}
         if not isinstance(timing, dict):
             timing = {}
-        return {**state, **timing, "phase": self.phase, "error": self.error or state.get("error", "") or state.get("theme_error", ""),
+        return {**state, **timing, "phase": self.phase,
+                "error": (self.error or state.get("error", "") or state.get("theme_error", "")
+                          or state.get("foreground_error", "")),
                 "running": self.running, "overlay": ready, "source": self.source_open,
                 "source_title": SOURCE_TITLE if self.source_open else "",
                 "overlay_error": overlay_error,

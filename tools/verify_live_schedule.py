@@ -46,6 +46,18 @@ def account_seq(*states):
         return {"ok": True, "logged_in": True, "room_id": 42, "live_status": state}
     return answer
 
+def account_flaky(*entries):
+    """逐次返回完整 account 结果（dict，或 Exception=抛错）；用完保持最后一个。"""
+    calls = {"i": 0}
+    async def answer():
+        index = min(calls["i"], len(entries) - 1)
+        calls["i"] += 1
+        entry = entries[index]
+        if isinstance(entry, Exception):
+            raise entry
+        return dict(entry)
+    return answer
+
 def make(iso="2026-10-01 07:00", **st):
     SAVED.clear()
     sch = {"enabled": False, "start_time": "08:00", "stop_time": "18:00", "window_title": "DemoTower",
@@ -81,6 +93,7 @@ def make(iso="2026-10-01 07:00", **st):
     schedule.FAREWELL_TAIL = 0
     schedule.LIVE_STATUS_INTERVAL = 0.01
     schedule.LIVEHIME_STOP_INTERVAL = 0.01
+    schedule.ACCOUNT_RETRY_SECONDS = 0  # 离线用例不真等重试间隔，只验证尝试次数与取消
     return schedule, app, now
 
 async def drain(s):
@@ -443,8 +456,10 @@ async def s23_livehime_already_live():
     a.broadcast.account = AsyncMock(side_effect=account_seq(1))
     await fire(s, now, "2026-10-01 08:00")
     await asyncio.sleep(0.02)
-    req(a.broadcast.start_source.await_count == 0 and a.livehime.ensure_running.await_count == 0
-        and a.livehime.trigger.call_count == 0, "已在直播仍拉起/触发直播姬")
+    # 已在播分支同样必须保证源画面（start_source 幂等，窗口开着就是复用）
+    req(a.broadcast.start_source.await_count == 1, "已在播却没启动/复用源画面")
+    req(a.livehime.ensure_running.await_count == 0 and a.livehime.trigger.call_count == 0,
+        "已在播仍拉起/触发直播姬")
     req(a.cfg["room_id"] == 42 and s.last_result["ok"] and "跳过" in s.last_result["message"],
         "已在直播未跳过: " + str(s.last_result))
 
@@ -573,6 +588,148 @@ async def s32_stop_catch_up_after_missed_minute():
     req(a2.broadcast.stop_external.await_count == 0, "超过 30 分钟不再补停，避免大半夜误触发")
 
 
+async def s33_livehime_account_transient_recovers():
+    # B 站瞬断：源画面已起，account 只重试读取，恢复后照常开播且快捷键仅发一次
+    s, a, now = make(enabled=True, mode="livehime")
+    s.ACCOUNT_TRIES = 5
+    err = {"ok": False, "logged_in": False, "room_id": 0, "error": "B站请求失败，请稍后重试"}
+    a.broadcast.account = AsyncMock(side_effect=account_flaky(
+        err, err,
+        {"ok": True, "logged_in": True, "room_id": 42, "live_status": 0},
+        {"ok": True, "logged_in": True, "room_id": 42, "live_status": 1}))
+    await fire(s, now, "2026-10-01 08:00")
+    req(a.broadcast.start_source.await_count == 1, "重试前未先保证源画面")
+    req(a.broadcast.account.await_count == 4, "瞬断恢复应读 2 次失败+1 次成功+1 次确认开播: "
+        + str(a.broadcast.account.await_count))
+    req(a.livehime.trigger.call_count == 1, "开播快捷键必须只发一次: " + str(a.livehime.trigger.call_count))
+    req(s.last_result["ok"] and "直播姬已开播" in s.last_result["message"], "瞬断恢复后未开播: " + str(s.last_result))
+    req(sum(1 for k, d in a.pushes if k == "log" and "不会重发开播快捷键" in d.get("msg", "")) == 2,
+        "每次失败重试应写日志（含次数与不重发说明）: " + str(a.pushes))
+
+
+async def s34_livehime_account_persistent_failure():
+    # 持续失败：恰好尝试 ACCOUNT_TRIES 次后明确失败，不发快捷键，日志写明次数
+    s, a, now = make(enabled=True, mode="livehime")
+    s.ACCOUNT_TRIES = 3
+    a.broadcast.account = AsyncMock(return_value={"ok": False, "logged_in": False, "room_id": 0,
+                                                  "error": "B站请求失败，请稍后重试"})
+    await fire(s, now, "2026-10-01 08:00")
+    req(a.broadcast.account.await_count == 3, "持续失败应重试恰好 ACCOUNT_TRIES 次: "
+        + str(a.broadcast.account.await_count))
+    req(a.broadcast.start_source.await_count == 1, "account 失败前源画面必须已启动")
+    req(a.livehime.trigger.call_count == 0 and a.livehime.ensure_running.await_count == 0,
+        "主播状态没读到却拉起/触发了直播姬")
+    req(s.last_result["ok"] is False and "3 次" in s.last_result["message"]
+        and "B站请求失败" in s.last_result["message"], "最终失败应写明重试次数: " + str(s.last_result))
+
+
+async def s35_livehime_logged_out_no_retry():
+    # ok=True 但 logged_in=False：重试无意义，马上报重新登录
+    s, a, now = make(enabled=True, mode="livehime")
+    s.ACCOUNT_TRIES = 5
+    a.broadcast.account = AsyncMock(return_value={"ok": True, "logged_in": False, "room_id": 0})
+    await fire(s, now, "2026-10-01 08:00")
+    req(a.broadcast.account.await_count == 1, "登录失效不该重试读取: " + str(a.broadcast.account.await_count))
+    req(a.broadcast.start_source.await_count == 1, "登录失效前源画面仍必须先启动")
+    req(a.livehime.trigger.call_count == 0 and a.livehime.ensure_running.await_count == 0,
+        "登录失效仍触发了开播")
+    req(s.last_result["ok"] is False and "登录" in s.last_result["message"], "登录失效未明确报错: " + str(s.last_result))
+
+
+async def s36_livehime_retry_respects_cancel():
+    cases = [("stop_requested", lambda s, now: setattr(s, "stop_requested", True)),
+             ("disabled", lambda s, now: s.settings.update(enabled=False)),
+             ("past_stop", lambda s, now: now.__setitem__(0, dt("2026-10-01 18:30")))]
+    for name, cancel in cases:
+        s, a, now = make(enabled=True, mode="livehime")
+        s.ACCOUNT_TRIES = 5
+        s.ACCOUNT_RETRY_SECONDS = 30
+        s.ACCOUNT_RETRY_POLL_SECONDS = 0.01
+        a.broadcast.account = AsyncMock(return_value={"ok": False, "logged_in": False, "room_id": 0,
+                                                      "error": "B站请求失败，请稍后重试"})
+        now[0] = dt("2026-10-01 08:00"); s.tick()
+        for _ in range(8):
+            await asyncio.sleep(0)
+        req(a.broadcast.account.await_count >= 1, name + "：重试读取应已开始")
+        req(a.broadcast.start_source.await_count == 1, name + "：源画面应先于 account 启动")
+        cancel(s, now)
+        await asyncio.wait_for(drain(s), 5)
+        req(a.livehime.trigger.call_count == 0, name + "：取消后仍发送开播快捷键")
+        req(a.broadcast.account.await_count <= 2, name + "：取消后仍继续重试读取: " + str(a.broadcast.account))
+        req(s.last_result["ok"] and "取消" in s.last_result["message"], name + "：取消未记结果: " + str(s.last_result))
+
+    for live_status in (0, 1):
+        s, a, now = make(enabled=True, mode="livehime")
+        async def cancel_while_reading():
+            s.stop_requested = True
+            return {"ok": True, "logged_in": True, "room_id": 42, "live_status": live_status}
+        a.broadcast.account.side_effect = cancel_while_reading
+        await fire(s, now, "2026-10-01 08:00")
+        req(s.last_result["ok"] and "取消" in s.last_result["message"], "读取成功时仍需检查取消")
+        req(a.livehime.ensure_running.await_count == 0 and a.livehime.trigger.call_count == 0,
+            "账号请求期间取消后仍启动了直播姬")
+        req(a.cfg["room_id"] == 0, "账号请求期间取消后仍接管直播间")
+
+
+async def s37_livehime_source_failure_zero_platform_calls():
+    # 源画面起不来 → 立即失败，一个 B站请求都不发，更不碰直播姬
+    s, a, now = make(enabled=True, mode="livehime")
+    a.broadcast.start_source.return_value = {"ok": False, "error": "源画面窗口启动失败：进程退出"}
+    await fire(s, now, "2026-10-01 08:00")
+    req(a.broadcast.account.await_count == 0, "源画面失败后仍请求了 B站账号")
+    req(a.livehime.trigger.call_count == 0 and a.livehime.ensure_running.await_count == 0,
+        "源画面失败仍触发了直播姬")
+    req(s.last_result["ok"] is False and "源画面" in s.last_result["message"], "源画面失败未如实报错: " + str(s.last_result))
+
+
+async def s38_failed_start_pauses_only_autoplay_launched_this_run():
+    # 本次执行拉起的托管：开播失败必须暂停，免得整晚空说
+    s, a, now = make(enabled=True, mode="livehime")
+    a.dt = None
+    async def launch_dt():
+        a.dt = Mock(running=True)
+        return {"ok": True}
+    a.ensure_game_and_dt.side_effect = launch_dt
+    s.ACCOUNT_TRIES = 2
+    a.broadcast.account = AsyncMock(return_value={"ok": False, "logged_in": False, "room_id": 0,
+                                                  "error": "B站请求失败，请稍后重试"})
+    await fire(s, now, "2026-10-01 08:00")
+    req(s.last_result["ok"] is False and a.stop_dt.await_count == 1, "本次拉起的托管失败后未暂停")
+    req(a.broadcast.start_source.await_count == 1 and a.broadcast.stop_source.await_count == 0,
+        "失败收尾不得销毁已启动的源画面")
+    req(a.broadcast.stop.await_count == 0 and a.broadcast.stop_external.await_count == 0,
+        "开播失败收尾不得顺带停直播")
+    req(any("暂停" in str(m) for k, m in a.pushes), "暂停托管应写日志: " + str(a.pushes[-3:]))
+
+    # 执行前已有的手动托管：保留，不受这次失败影响
+    s2, a2, now2 = make(enabled=True, mode="livehime")
+    a2.broadcast.account = AsyncMock(return_value={"ok": False, "logged_in": False, "room_id": 0,
+                                                   "error": "B站请求失败，请稍后重试"})
+    await fire(s2, now2, "2026-10-01 08:00")
+    req(s2.last_result["ok"] is False and a2.stop_dt.await_count == 0, "执行前的手动托管被失败收尾暂停了")
+
+    # 开播成功：绝不动托管
+    s3, a3, now3 = make(enabled=True, mode="livehime")
+    a3.dt = None
+    async def launch_dt3():
+        a3.dt = Mock(running=True)
+        return {"ok": True}
+    a3.ensure_game_and_dt.side_effect = launch_dt3
+    a3.broadcast.account = AsyncMock(side_effect=account_seq(0, 1))
+    await fire(s3, now3, "2026-10-01 08:00")
+    req(s3.last_result["ok"] and a3.stop_dt.await_count == 0, "开播成功却暂停了托管")
+
+    # 执行异常（游戏启动抛错但托管已拉起）同样要收尾
+    s4, a4, now4 = make(enabled=True, mode="livehime")
+    a4.dt = None
+    async def boom():
+        a4.dt = Mock(running=True)
+        raise RuntimeError("boom")
+    a4.ensure_game_and_dt.side_effect = boom
+    await fire(s4, now4, "2026-10-01 08:00")
+    req(s4.last_result["ok"] is False and a4.stop_dt.await_count == 1, "执行异常未收尾托管")
+
+
 SUITES = [s01_disabled, s02_day_start_stop, s03_cross_midnight, s04_minute_and_rollback, s05_restart_ledger,
           s06_init_save_minute_and_missed, s07_skip_and_stop_noop, s08_sources_bad, s09_resolve_new_ids,
           s10_fail_once, s11_save_rejects, s12_save_enabled_ok, s13_disable_keeps_live,
@@ -583,7 +740,10 @@ SUITES = [s01_disabled, s02_day_start_stop, s03_cross_midnight, s04_minute_and_r
           s25_livehime_not_confirmed, s26_livehime_stop_uses_hotkey_and_api,
           s27_livehime_save_sets_global_settings, s28_livehime_save_rejects,
           s29_livehime_cancel_during_ready, s30_livehime_daily_stop, s31_auto_stop_also_stops_autoplay,
-          s32_stop_catch_up_after_missed_minute]
+          s32_stop_catch_up_after_missed_minute, s33_livehime_account_transient_recovers,
+          s34_livehime_account_persistent_failure, s35_livehime_logged_out_no_retry,
+          s36_livehime_retry_respects_cancel, s37_livehime_source_failure_zero_platform_calls,
+          s38_failed_start_pauses_only_autoplay_launched_this_run]
 
 async def amain():
     t0 = time.time()

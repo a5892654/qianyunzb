@@ -23,6 +23,7 @@ _proc = None
 _signature = None
 _generation = 0
 _memory_pid = None
+_spawned_at = 0.0
 _ensure_lock = asyncio.Lock()
 
 
@@ -33,6 +34,11 @@ def owned():
 
 def owned_model():
     return _signature[0] if owned() and _signature else ""
+
+
+def age_seconds():
+    """自管引擎已经连跑了多久；外部引擎或未知返回 0。"""
+    return max(0.0, time.monotonic() - _spawned_at) if owned() and _spawned_at else 0.0
 
 
 def runtime_paths(cfg_tts):
@@ -223,7 +229,7 @@ def kill_stale(cfg_tts, on_status=None):
 
 def spawn(cfg_tts, on_status=None):
     """拉起 ttsd 常驻进程；模型首次上卡要几十秒，调用方自己等 alive()。"""
-    global _proc, _signature, _generation, _memory_pid
+    global _proc, _signature, _generation, _memory_pid, _spawned_at
     if _proc is not None and _proc.poll() is None:
         return True
     kill_stale(cfg_tts, on_status)
@@ -249,12 +255,15 @@ def spawn(cfg_tts, on_status=None):
     env.setdefault("TORCH_CUDNN_V8_API_LRU_CACHE_LIMIT", "1024")
     if os.name == "nt" and "AuthenticAMD" in env.get("PROCESSOR_IDENTIFIER", ""):
         env.setdefault("CUBLASLT_DISABLE_CPU_INSTRUCTIONS_MASK", "1")
-    with open(os.path.join(LOG_DIR, "ttsd.log"), "wb") as logf:
+    # 追加而不是覆盖：引擎崩掉的最后几行是排查依据，重启时不能把它抹掉。
+    with open(os.path.join(LOG_DIR, "ttsd.log"), "ab") as logf:
+        logf.write(f"\n===== {time.strftime('%Y-%m-%d %H:%M:%S')} 启动流式语音引擎 =====\n".encode("utf-8"))
         _proc = subprocess.Popen(cmd, cwd=os.path.dirname(script), stdout=logf, stderr=subprocess.STDOUT,
                                  env=env, creationflags=procutil.CREATE_NO_WINDOW)
     _signature = _desired(cfg_tts)
     _generation += 1
     _memory_pid = None
+    _spawned_at = time.monotonic()
     procutil.bind_to_app(_proc.pid)
     if on_status:
         on_status("正在启动流式语音引擎（模型常驻显存，首次约 40~90 秒）…")
@@ -262,7 +271,7 @@ def spawn(cfg_tts, on_status=None):
 
 
 def stop():
-    global _proc, _signature, _generation, _memory_pid
+    global _proc, _signature, _generation, _memory_pid, _spawned_at
     _generation += 1
     proc = _proc
     if proc is not None and proc.poll() is None:
@@ -270,6 +279,7 @@ def stop():
     _proc = None
     _signature = None
     _memory_pid = None
+    _spawned_at = 0.0
 
 
 async def ensure(cfg_tts, on_status):

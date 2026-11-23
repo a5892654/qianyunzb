@@ -66,6 +66,7 @@ class Harness(unittest.IsolatedAsyncioTestCase):
             broadcast=br, livehime=lh, connect=AsyncMock(),
             pipe=Mock(say_job_id=Mock(return_value=1), spoken_done=Mock(return_value=True)),
             pushes=[], notify_live_started=Mock(), sync_room_title=AsyncMock(),
+            sync_plan_cover=AsyncMock(),
             ensure_game_and_dt=AsyncMock(return_value={"ok": True, "launched": False}),
             dt=types.SimpleNamespace(running=False), stop_dt=AsyncMock(),
             game=types.SimpleNamespace(sync=Mock()),
@@ -130,6 +131,17 @@ class ValidationTests(Harness):
                     {"start": "20:00", "stop": "22:00", "game": "demontower", "playlist": value}])
             self.assertIn("歌单", str(ctx.exception))
 
+    def test_clean_plans_keeps_cover_and_rejects_bad_names(self):
+        plans = DailyBroadcastSchedule._clean_plans([
+            {"start": "20:00", "stop": "23:00", "game": "demontower", "cover": "cover-1.png"}])
+        self.assertEqual(plans[0]["cover"], "cover-1.png")
+        self.assertEqual(DailyBroadcastSchedule._clean_plans([
+            {"start": "20:00", "stop": "23:00", "game": "demontower"}])[0]["cover"], "")
+        for bad in ("../cover.png", "a b.png", ".hidden.png", "x" * 90):
+            with self.subTest(cover=bad), self.assertRaises(ValueError):
+                DailyBroadcastSchedule._clean_plans([
+                    {"start": "20:00", "stop": "23:00", "game": "demontower", "cover": bad}])
+
     async def test_save_plans_requires_login_and_plans(self):
         scheduler, app, _ = self.make()
         cases = [
@@ -187,7 +199,8 @@ class SchedulingTests(Harness):
         app.broadcast.preview.assert_awaited_once_with({"hwnd": 3333, "audio_device": 2222})
         start = app.broadcast.start.await_args.args[0]
         self.assertEqual((start["hwnd"], start["audio_device"], start["confirm"]), (3333, 2222, True))
-        self.assertEqual(scheduler.settings["last_starts"]["night"], "2026-10-01")
+        self.assertEqual(scheduler.settings["last_starts"]["night"], "2026-10-01 20:00")
+        app.sync_plan_cover.assert_not_awaited()
         self.assertEqual(scheduler.active_plan_id, "night")
         self.assertEqual(app.cfg["game"]["active"], "demontower")
         app.sync_room_title.assert_awaited_once_with("demontower")
@@ -197,7 +210,21 @@ class SchedulingTests(Harness):
         app.broadcast.sources.return_value = sources((3333, "DemonTower"))
         await self.fire(scheduler, now, "2026-10-01 23:00")
         app.broadcast.stop.assert_awaited_once()
-        self.assertEqual(scheduler.settings["last_stops"]["night"], "2026-10-01")
+        self.assertEqual(scheduler.settings["last_stops"]["night"], "2026-10-01 23:00")
+
+    async def test_plan_start_applies_plan_cover_only_when_set(self):
+        plans = [{"id": "with", "start": "20:00", "stop": "21:00", "game": "demontower",
+                  "cover": "cover-1.png"},
+                 {"id": "plain", "start": "21:00", "stop": "22:00", "game": "demontower"}]
+        scheduler, app, now = self.make(plans=plans)
+        app.broadcast.sources.return_value = sources((3333, "DemonTower"))
+        await self.fire(scheduler, now, "2026-10-01 20:00")
+        app.sync_plan_cover.assert_awaited_once_with("cover-1.png")
+
+        app.broadcast.running = False
+        app.sync_plan_cover.reset_mock()
+        await self.fire(scheduler, now, "2026-10-01 21:00")
+        app.sync_plan_cover.assert_not_awaited()
 
     async def test_plan_start_triggers_plan_playlist(self):
         plans = [{"id": "night", "start": "20:00", "stop": "23:00", "game": "demontower",
@@ -236,10 +263,28 @@ class SchedulingTests(Harness):
         app.broadcast.running = True
         await self.fire(scheduler, now, "2026-10-02 02:00")
         app.broadcast.stop.assert_awaited_once()
-        self.assertEqual(scheduler.settings["last_stops"]["late"], "2026-10-02")
+        self.assertEqual(scheduler.settings["last_stops"]["late"], "2026-10-02 02:00")
         app.broadcast.running = False
         await self.fire(scheduler, now, "2026-10-02 23:00")
         self.assertEqual(app.broadcast.start.await_count, 2)
+
+    async def test_plan_ledger_is_per_occurrence_not_date(self):
+        # 回归：跨零点停播把“次日”记成已停；当天把同一计划改到 16:00 后不能因此吞掉停播
+        plans = [{"id": "p", "start": "17:00", "stop": "00:00", "game": "demontower"}]
+        scheduler, app, now = self.make("2026-10-01 17:00", plans=plans)
+        app.broadcast.running = True
+        await self.fire(scheduler, now, "2026-10-01 23:59:59")
+        self.assertEqual(scheduler.settings["last_stops"]["p"], "2026-10-02 00:00")
+        app.broadcast.running = False
+
+        scheduler.settings["plans"] = [{"id": "p", "start": "12:00", "stop": "16:00",
+                                        "game": "wage", "playlist": "", "playlist_name": ""}]
+        await self.fire(scheduler, now, "2026-10-02 12:00")
+        app.broadcast.running = True
+        app.broadcast.stop.reset_mock()
+        await self.fire(scheduler, now, "2026-10-02 15:59:59")
+        app.broadcast.stop.assert_awaited_once()
+        self.assertEqual(scheduler.settings["last_stops"]["p"], "2026-10-02 16:00")
 
     async def test_adjacent_plans_stop_then_start(self):
         plans = [{"id": "a", "start": "20:00", "stop": "22:00", "game": "demontower"},
@@ -253,8 +298,8 @@ class SchedulingTests(Harness):
         start = app.broadcast.start.await_args.args[0]
         self.assertEqual(start["hwnd"], 4444)
         self.assertEqual(app.cfg["game"]["active"], "stardew")
-        self.assertEqual(scheduler.settings["last_starts"]["b"], "2026-10-01")
-        self.assertEqual(scheduler.settings["last_stops"]["a"], "2026-10-01")
+        self.assertEqual(scheduler.settings["last_starts"]["b"], "2026-10-01 22:00")
+        self.assertEqual(scheduler.settings["last_stops"]["a"], "2026-10-01 22:00")
 
     async def test_plan_missing_window_never_starts(self):
         plans = [{"id": "sv", "start": "20:00", "stop": "23:00", "game": "stardew"}]

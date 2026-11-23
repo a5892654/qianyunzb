@@ -1,0 +1,12 @@
+Generated with the built-in image_gen tool on 2026-11-11.
+The user requested an imposing shark boss wearing black sunglasses and a finished GIF, not a sprite sheet.
+
+Use case: stylized-concept.
+Create ONE single isolated character illustration on a genuinely transparent background. This is NOT a sprite sheet, NOT a collage, NOT a grid, and NOT multiple poses. ONE shark boss only.
+Subject: an intimidating anthropomorphic shark corporate boss for an anime comedy livestream. Huge massive blue-gray shark head, powerful broad shoulders, thick muscular neck and upper body, near-black sharply tailored suit, white shirt, deep crimson tie, opaque BLACK SUNGLASSES that fully hide both eyes, sleek black lenses and thick black frame. No visible eyes behind the lenses. Small dorsal fin, distinctly shark-shaped side gills and white lower jaw, a tight dominant sneer showing only a few sharp shark teeth. He looks like a very stern head of security / ruthless executive, imposing and hard to argue with, NOT sweet or cute.
+Pose: three-quarter front view facing slightly toward viewer's LEFT; chin lowered, shoulders leaning forward, upper body looming toward the viewer. One large shark-fin hand points assertively to the LEFT toward the employee; the other holds the jacket lapel. Strong confident grounded silhouette. No weapons, no smoking, no props except his outfit.
+Style: polished 2D anime game character art, crisp thick dark outlines, dramatic cel shading with restrained steel-blue highlights, premium sticker cutout, controlled detail, intense visual weight. Slight comic exaggeration but NOT baby proportions, NOT a cuddly mascot, NOT a smiling toy. Broad angular snout and jaw. Strong high-contrast dark clothing.
+Composition: full upper-body/bust portrait with complete head, dorsal fin, shoulders, hands, jacket and waist fully inside frame. Centered with generous transparent space around the silhouette. Portrait canvas, suitable as a livestream overlay. No backdrop, no floor, no shadows outside the character, no text, no watermark. Keep sunglasses entirely BLACK. This single image will be animated into a GIF with a looming-in and stern shake motion.
+
+Animation assembly: tools/build_shark_boss_gif.py.
+48 frames / 60 ms for looming, pointing and scolding; 32 frames / 100 ms for idle breathing.

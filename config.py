@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import threading
+from wage_play import OFFICE_DEFAULTS
 
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
@@ -253,11 +254,14 @@ DEFAULTS = {
     "broadcast": {
         "auto_stop_minutes": 0,
         "auto_stop_line": "下了下了，吃白饭去了，拜拜～",
+        # 语音引擎每 8 小时重启一次前说的一句，留空则用这句默认
+        "engine_restart_line": "我去趟厕所，几分钟就回来，别走开啊。",
         # 开播时按游戏自动修改B站直播间标题
         "game_titles": {
             "stardew": "大胖鱼开播了，来看我自己种田",
             "demontower": "大胖鱼开播了，来看我被自己的游戏虐",
             "sts2": "大胖鱼开播了，来一起爬塔",
+            "wage": "大胖鱼开播了，来陪我上班摸鱼",
         },
         "livehime": {"path": "", "hotkey": "", "click_x": 0.0, "click_y": 0.0},
         "schedule": {"enabled": False, "mode": "managed", "start_time": "20:00", "stop_time": "23:00",
@@ -272,8 +276,43 @@ DEFAULTS = {
         "ticker": "欢迎来到深蓝放映室  ·  发条弹幕，一起聊聊天吧  ·  愿今天的快乐像海浪一样绵长",
         "show_chat": True, "avatar_x": 0.125, "avatar_y": 0.745, "avatar_size": 0.54, "avatar_zoom": 2.0,
     },
-    # 当前直播并托管哪个游戏：demontower（恶魔之塔）、stardew（星露谷物语）或 sts2（杀戮尖塔 2）
+    # 当前直播并托管哪个内容：demontower（恶魔之塔）、stardew（星露谷物语）、
+    # sts2（杀戮尖塔 2）或 wage（上班摸鱼·虚拟区互动节目）
     "game": {"active": "demontower"},
+    "wage": {
+        "enabled": True,
+        "target": 6000,
+        "base_minutes": 60,
+        "work_reward": 100,
+        "narrate": True,
+        "idle_line_seconds": 25,
+        "speech_hold": 6.0,
+        "slack_seconds": 10.0,
+        "catch_seconds": 5.0,
+        "slack_mean_seconds": 120,
+        "catch_rate": 0.06,
+        "slack_penalty": 0,
+        "catch_penalty": 500,
+        "speed_per_yuan": 0.1,
+        "speed_decay_per_second": 0.005,
+        "max_speed": 9.9,
+        "next_day_seconds": 45,
+        "auto_slack": True,
+        "poll_enabled": True,
+        "poll_seconds": 30,
+        "poll_cooldown": 90,
+        "persona": "",
+        "avatar_x": 0.52,
+        "avatar_y": 0.67,
+        "avatar_size": 0.78,
+        "avatar_zoom": 1.8,
+        "boss_scale": 1.0,
+        "typing_enabled": True,
+        "boss_sfx_enabled": True,
+        "boss_sfx_volume": 45,
+        "boss_sfx_cooldown": 3.0,
+        **OFFICE_DEFAULTS,
+    },
     "stardew": {
         "enabled": True,
         "game_dir": r"E:\Game\xlg\EN00906\Stardew Valley",
@@ -474,6 +513,13 @@ def load():
             os.replace(CONFIG_PATH, CONFIG_PATH + ".broken")
     cfg = _merge(DEFAULTS, data)
     upgrade_legacy_texts(cfg)
+    # 修复曾误用的全身默认构图；自定义取景和用户拖过的位置保持不变。
+    wage = cfg.get("wage") or {}
+    if (wage.get("avatar_x"), wage.get("avatar_y"), wage.get("avatar_size"),
+            wage.get("avatar_zoom")) in ((0.74, 0.57, 0.78, 1.0), (0.72, 0.67, 0.78, 1.8)):
+        wage.update(avatar_x=0.52, avatar_y=0.67, avatar_size=0.78, avatar_zoom=1.8)
+    if wage.get("idle_line_seconds") == 75:
+        wage["idle_line_seconds"] = 25
     if cfg["ai"].get("persona") == LEGACY_DEFAULT_PERSONA:
         # 只升级旧版出厂人设，保留用户自己写过的性格。
         cfg["ai"]["persona"] = DEFAULT_PERSONA

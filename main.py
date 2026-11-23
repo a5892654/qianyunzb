@@ -1,6 +1,7 @@
 import asyncio
 import collections
 import ctypes
+import io
 import json
 import logging
 import os
@@ -9,6 +10,7 @@ import socket
 import subprocess
 import sys
 import time
+import uuid
 import webbrowser
 
 from aiohttp import web, WSMsgType, ClientSession
@@ -39,6 +41,8 @@ from pipeline import Pipeline
 from songs import SongManager
 from netease import CAPTCHA_ID, DEVICE_APP_ID
 from tts import GsvEngine, Player
+from wage import WageEngine, WagePlayer, preview_jpeg as wage_preview_jpeg, validate_settings as validate_wage_settings
+from wage_audio import WageSfx, SOUNDS as WAGE_SOUNDS
 from wishlist import WishlistActions, validate_settings as validate_wishlist_settings
 
 os.makedirs(config.LOG_DIR, exist_ok=True)
@@ -51,8 +55,34 @@ log = logging.getLogger("app")
 
 # aiohttp 默认只收 1MB 请求体，封面原图轻松超它；上限要比 5MB 的封面校验再宽一点。
 MAX_BODY_BYTES = 8 * 1024 * 1024
+MAX_COVER_BYTES = 5 * 1024 * 1024
+COVER_DIR = os.path.join(config.BASE_DIR, "covers")
+COVER_UPLOAD_TYPES = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp"}
+_COVER_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,79}\Z")
 
 _PHONE_RE = re.compile(r"\d{6,11}")
+
+
+def _cover_path(name):
+    name = str(name or "")
+    if not _COVER_NAME.fullmatch(name):
+        return None
+    path = os.path.join(COVER_DIR, name)
+    return path if os.path.isfile(path) else None
+
+
+def _cover_problem(data):
+    try:
+        from PIL import Image
+        with Image.open(io.BytesIO(data)) as image:
+            image.verify()
+        with Image.open(io.BytesIO(data)) as image:
+            width, height = image.size
+    except Exception:
+        return "这不是有效的图片文件"
+    if width < 960 or height < 600:
+        return f"封面尺寸至少 960×600，当前 {width}×{height}"
+    return ""
 
 
 def _sms_fail(e: Exception) -> str:
@@ -91,8 +121,14 @@ class App:
         self.dt_task = None
         self.dt_resume_lock = asyncio.Lock()
         self.engine_ready = asyncio.Event()
+        self._engine_booting = False
+        self.engine_idle = False  # 没开播时主动卸掉流式语音引擎，开播/计划前再拉起
+        self._engine_offline_since = None
         self.game = GameLauncher(self.cfg)
         self.rice = RiceCounter()
+        self.wage = WageEngine(lambda: self.cfg.get("wage", {}), room_id=self.cfg.get("room_id"),
+                               persist_path=os.path.join(config.BASE_DIR, "wage_state.json"))
+        self.wage_sfx = WageSfx(self)
         self.gift_banner = GiftBanner()
         self.broadcast = Broadcast(self)
         self.livehime = LivehimeController(self)
@@ -108,6 +144,11 @@ class App:
                 subtitles.event(kind, data)
         if kind == "event" and getattr(self, "broadcast", None):
             self.broadcast.theme.add_event(data)
+        if kind in ("speak", "speak_end", "bye") and getattr(self, "wage", None) is not None and self._is_wage():
+            try:
+                self.wage.on_speak(kind, data)
+            except Exception as error:
+                log.warning("上班摸鱼台词同步失败：%s", error)
         if kind in ("event", "reply", "log"):
             self.history.append(msg)
         if kind == "log":
@@ -121,6 +162,11 @@ class App:
 
     def on_event(self, ev):
         self.rice_gift(ev)
+        if getattr(self, "wage", None) is not None and self._is_wage():
+            try:
+                self.wage.on_event(ev)
+            except Exception as error:
+                log.warning("上班摸鱼互动处理失败：%s", error)
         self.pipe.on_event(ev)
 
     # ---------- 后台任务 ----------
@@ -131,7 +177,9 @@ class App:
                 eng = "已关闭"
             elif tts.get("stream_enabled") and tts.get("qwen_enabled"):
                 from dtgame import ttsd
-                eng = "在线" if await ttsd.alive(tts) else "启动中" if not self.engine_ready.is_set() else "未启动"
+                eng = ("在线" if await ttsd.alive(tts)
+                       else "已卸载·待开播" if self.engine_idle
+                       else "启动中" if not self.engine_ready.is_set() else "未启动")
             elif self.engine.lock.locked():
                 eng = "合成中"
             else:
@@ -154,9 +202,16 @@ class App:
         self.pipe.start()
         self.schedule.start()
         self.tasks = [asyncio.create_task(self.status_loop()), asyncio.create_task(self.songs.run()),
-                      asyncio.create_task(self.brain.warm(self.cfg))]
-        if self.cfg["tts"].get("enabled") and self.cfg["tts"].get("auto_start"):
-            self.tasks.append(asyncio.create_task(self._boot_engine()))
+                      asyncio.create_task(self.brain.warm(self.cfg)), asyncio.create_task(self.wage_sfx.run())]
+        tts = self.cfg["tts"]
+        idle_ok = bool(tts.get("enabled") and tts.get("auto_start")
+                       and tts.get("qwen_enabled") and tts.get("stream_enabled"))
+        if tts.get("enabled") and tts.get("auto_start") and not idle_ok:
+            self.tasks.append(asyncio.create_task(self._ensure_engine()))
+        elif idle_ok:
+            # 没开播时不常驻 6.6G 内存 + 4.2G 显存，开播或计划到点前再拉起。
+            self.engine_idle = True
+            self.tasks.append(asyncio.create_task(self._watch_live_engine()))
         else:
             self.engine_ready.set()
         if self.cfg.get("auto_connect") and self.cfg.get("room_id"):
@@ -175,6 +230,73 @@ class App:
             self.push("log", {"level": "error", "msg": f"语音引擎启动失败：{e}"})
         finally:
             self.engine_ready.set()
+
+    async def _ensure_engine(self):
+        """引擎就绪则复用；下播释放后重新热身。守卫避免重复拉起，托管靠 engine_ready 等它。"""
+        if self.engine_ready.is_set() or self._engine_booting:
+            return
+        if not (self.cfg["tts"].get("enabled") and self.cfg["tts"].get("auto_start")):
+            self.engine_ready.set()
+            return
+        self._engine_booting = True
+        try:
+            await self._boot_engine()
+        finally:
+            self._engine_booting = False
+
+    LIVE_POLL_SECONDS = 30
+    IDLE_UNLOAD_SECONDS = 300
+
+    async def start_engine_for_live(self):
+        """开播（含计划预热）时拉起流式语音；auto_start 关着就不动。"""
+        if not (self.cfg["tts"].get("enabled") and self.cfg["tts"].get("auto_start")):
+            return
+        self.engine_idle = False
+        if self.engine_ready.is_set() or self._engine_booting:
+            return
+        await self._ensure_engine()
+
+    async def _unload_engine_idle(self):
+        self.engine_idle = True
+        await asyncio.to_thread(self.engine.stop, keep_comfyui=True)
+        self.engine_ready.clear()
+        self.push("log", {"level": "info", "msg":
+            "当前没在直播，已释放流式语音引擎（约 6.6G 内存 / 4.2G 显存），开播会自动重新加载"})
+
+    def _engine_power_action(self, info, now) -> str:
+        """按平台直播状态决定引擎动作：start / unload / 空。读不到状态时什么都不做。"""
+        known = bool(info.get("ok") and info.get("logged_in"))
+        live = known and int(info.get("live_status") or 0) == 1
+        if live:
+            self._engine_offline_since = None
+            return "start" if self.engine_idle else ""
+        if not known:
+            return ""
+        if self._engine_offline_since is None:
+            self._engine_offline_since = now
+        if not self.engine_idle and now - self._engine_offline_since >= self.IDLE_UNLOAD_SECONDS:
+            return "unload"
+        return ""
+
+    async def _watch_live_engine(self):
+        """开播就拉起流式语音，离线超过宽限期就卸掉，闲时不占内存和显存。"""
+        live_before = None
+        while True:
+            try:
+                info = await self.broadcast.account()
+            except Exception as error:
+                log.debug("读取直播状态失败：%s", error)
+                info = {}
+            action = self._engine_power_action(info, time.monotonic())
+            if action == "start" and live_before is not True:
+                # 只在「从没开播到开播」时自动拉起；直播中手动关掉的引擎不抢回来
+                self.push("log", {"level": "info", "msg": "检测到开播，正在拉起流式语音引擎…"})
+                await self.start_engine_for_live()
+            elif action == "unload":
+                await self._unload_engine_idle()
+            known = bool(info.get("ok") and info.get("logged_in"))
+            live_before = known and int(info.get("live_status") or 0) == 1
+            await asyncio.sleep(self.LIVE_POLL_SECONDS)
 
     async def connect(self):
         self.push("log", {"level": "info", "msg": f"正在连接直播间 {self.cfg['room_id']} …"})
@@ -198,7 +320,12 @@ class App:
     def _is_sts2(self) -> bool:
         return self._active_game() == "sts2"
 
+    def _is_wage(self) -> bool:
+        return self._active_game() == "wage"
+
     def _game_name(self) -> str:
+        if self._is_wage():
+            return "上班摸鱼"
         if self._is_stardew():
             return "星露谷物语"
         if self._is_sts2():
@@ -222,7 +349,26 @@ class App:
                               "msg": f"直播间标题未能改为「{title}」：{result.get('error') or '未知原因'}"})
         return result
 
+    async def sync_plan_cover(self, name):
+        """按播放计划换本场直播间封面；失败只写日志，不影响直播。"""
+        path = _cover_path(name)
+        if path is None:
+            self.push("log", {"level": "warn", "msg": "计划封面文件不存在，本次沿用直播间当前封面"})
+            return {"ok": False, "error": "计划封面文件不存在"}
+        try:
+            result = await self.broadcast.update_cover(path)
+        except Exception as error:
+            result = {"ok": False, "error": str(error) or type(error).__name__}
+        if result.get("ok"):
+            self.push("log", {"level": "info", "msg": "直播间封面已按播放计划更换"})
+        else:
+            self.push("log", {"level": "warn",
+                              "msg": f"直播间封面未能更换：{result.get('error') or '未知原因'}；继续开播"})
+        return result
+
     def _game_cfg(self) -> dict:
+        if self._is_wage():
+            return self.cfg.get("wage", {})
         if self._is_stardew():
             return self.cfg.get("stardew", {})
         if self._is_sts2():
@@ -230,6 +376,8 @@ class App:
         return self.cfg.get("dtgame", {})
 
     def _autoplay_enabled(self) -> bool:
+        if self._is_wage():
+            return bool(self.cfg.get("wage", {}).get("enabled", True))
         return bool(self._game_cfg().get("enabled", True))
 
     def _dt_ai(self) -> dict:
@@ -280,7 +428,19 @@ class App:
         ai["step_interval"] = float(c.get("step_interval", 0.6))
         return ai
 
+    def _wage_ai(self) -> dict:
+        c = self.cfg.get("wage", {})
+        ai = dict(self.cfg.get("ai", {}))
+        ai["persona"] = styles.game_persona(self.cfg.get("ai", {}))
+        ai["emotional_value"] = bool(self.cfg.get("interaction", {}).get("emotional_value", True))
+        if c.get("persona"):
+            ai["persona"] = c["persona"]
+        ai["narrate"] = bool(c.get("narrate", True))
+        return ai
+
     def _game_ai(self) -> dict:
+        if self._is_wage():
+            return self._wage_ai()
         if self._is_stardew():
             return self._stardew_ai()
         if self._is_sts2():
@@ -289,6 +449,8 @@ class App:
 
     def _config_problem(self, stardew_alive=None, sts2_alive=None) -> str:
         """模型/启动配置检查，返回空串表示没问题。传入 *_alive 可复用已探测结果。"""
+        if self._is_wage():
+            return ""
         ai = self._game_ai()
         if not self._is_stardew() or str(ai.get("backend")) == "openai":
             if not str(ai.get("openai_base", "")).strip():
@@ -359,6 +521,8 @@ class App:
         return await asyncio.to_thread(self._sts2_alive)
 
     def _game_alive(self) -> bool:
+        if self._is_wage():
+            return True
         if self._is_stardew():
             return self._stardew_alive()
         if self._is_sts2():
@@ -367,6 +531,8 @@ class App:
 
     def dt_ready(self) -> tuple[bool, str]:
         """托管前的体检：模型配好没有、游戏在不在。"""
+        if self._is_wage():
+            return True, ""
         why = self._config_problem()
         if why:
             return False, why
@@ -400,6 +566,13 @@ class App:
         """只建 Player 并丢进事件循环，游戏启动/体检放到 async 那一侧做。"""
         if self.dt and self.dt.running:
             return {"ok": False, "error": "自动托管已经在跑"}
+        if self._is_wage():
+            p = WagePlayer(self, lambda: self.cfg.get("wage", {}))
+            p.running = True
+            self.dt = p
+            self.dt_task = p.start()
+            self.dt_task.add_done_callback(self._task_died)
+            return {"ok": True}
         # 配置问题现在就报，别假装启动成功然后空转。
         why = self._config_problem()
         if why:
@@ -486,11 +659,14 @@ class App:
         """等语音引擎和游戏都就绪再开跑，避免开场几句用错音色。"""
         c = self._game_cfg()
         if getattr(self, "engine_ready", None) is not None and not self.engine_ready.is_set():
-            self.push("log", {"level": "info", "msg": "等语音引擎就绪…"})
-            try:
-                await asyncio.wait_for(self.engine_ready.wait(), 180)
-            except asyncio.TimeoutError:
-                self.push("log", {"level": "warn", "msg": "语音引擎等待超时，先开始托管"})
+            if self.engine_idle:
+                self.push("log", {"level": "info", "msg": "未开播，语音引擎保持卸载状态"})
+            else:
+                self.push("log", {"level": "info", "msg": "等语音引擎就绪…"})
+                try:
+                    await asyncio.wait_for(self.engine_ready.wait(), 180)
+                except asyncio.TimeoutError:
+                    self.push("log", {"level": "warn", "msg": "语音引擎等待超时，先开始托管"})
         self.push("log", {"level": "info", "msg": "正在准备游戏…"})
 
         ok, why = await asyncio.to_thread(self.dt_ready)
@@ -582,6 +758,13 @@ class App:
             return self.start_dt(new_run=new_run)
 
     async def resume_dt(self, new_run: bool = False) -> dict:
+        asyncio.create_task(self._ensure_engine())
+        if self._is_wage():
+            async with self.dt_resume_lock:
+                if self.dt and self.dt.running:
+                    return {"ok": True, "already": True}
+                await self.stop_dt()
+                return self.start_dt()
         if self._is_sts2():
             return await self._resume_sts2(new_run)
         if self._is_stardew():
@@ -630,6 +813,11 @@ class App:
         游戏起不来是真开不了播（没画面可采）；代打起不来只警告，直播照常——
         模型没配好不该让观众看不到画面。
         """
+        if self._is_wage():
+            r = await self.resume_dt()
+            if not r.get("ok") and not r.get("already"):
+                self.push("log", {"level": "warn", "msg": "上班摸鱼托管没有开起来，先照常开播：" + str(r.get("error"))})
+            return {"ok": True, "launched": False}
         launched = False
         if not await asyncio.to_thread(self._game_alive):
             if not self._game_cfg().get("auto_launch", True):
@@ -657,6 +845,10 @@ class App:
             log.warning("开播自动播放歌单触发失败", exc_info=True)
 
     async def shutdown(self):
+        try:
+            self.wage.save()
+        except Exception:
+            log.warning("保存上班摸鱼存档失败", exc_info=True)
         await self.schedule.close()
         await self.wishlist.close()
         # 先让直播画面立刻隐藏，再收拾后台
@@ -750,6 +942,24 @@ def build_web(app: App):
         data = await asyncio.to_thread(theme_preview_jpeg, dict(app.cfg.get("stream_theme", {})),
                                        dict(app.cfg.get("marquee", {})))
         return web.Response(body=data, content_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+    @routes.get("/api/wage/preview.jpg")
+    async def wage_preview(_):
+        data = await asyncio.to_thread(wage_preview_jpeg, app.cfg.get("room_id") or 0)
+        return web.Response(body=data, content_type="image/jpeg", headers={"Cache-Control": "no-store"})
+
+    @routes.post("/api/wage/sfx/test")
+    async def wage_sfx_test(request):
+        data = await request.json()
+        if not isinstance(data, dict) or data.get('sound') not in WAGE_SOUNDS:
+            return web.json_response({'ok': False, 'error': '请选择有效的鲨总音效'}, status=400)
+        try:
+            played = await app.wage_sfx.play(data['sound'], manual=True)
+            if played is False:
+                return web.json_response({'ok': False, 'error': '请先开启鲨总声音，并将音量设为大于 0'}, status=400)
+            return ok()
+        except Exception as error:
+            return web.json_response({'ok': False, 'error': f'音效播放失败：{error}'}, status=500)
 
     @routes.get("/api/rice/state")
     async def rice_state(_):
@@ -906,6 +1116,20 @@ def build_web(app: App):
                 validate_rice_settings(patch["rice_counter"])
             except ValueError as error:
                 return web.json_response({"ok": False, "error": str(error)}, status=400)
+        if "wage" in patch:
+            try:
+                validate_wage_settings(patch["wage"])
+            except ValueError as error:
+                return web.json_response({"ok": False, "error": str(error)}, status=400)
+        if "game" in patch:
+            game_patch = patch["game"]
+            if (not isinstance(game_patch, dict) or set(game_patch) != {"active"}
+                    or game_patch["active"] not in ("demontower", "stardew", "sts2", "wage")):
+                return web.json_response({"ok": False, "error": "未知的播放类型"}, status=400)
+            if game_patch["active"] != app._active_game():
+                broadcast = app.broadcast
+                if (broadcast.running or broadcast.phase in ("starting", "stopping") or broadcast.source_open):
+                    return web.json_response({"ok": False, "error": "请先停止直播并关闭源画面，再切换播放类型"}, status=400)
         if "wishlist" in patch:
             try:
                 if not isinstance(patch["wishlist"], dict):
@@ -919,9 +1143,17 @@ def build_web(app: App):
         old_style = app.cfg.get("ai", {}).get("style")
         old_emotional_value = app.cfg.get("interaction", {}).get("emotional_value", True)
         old_game = (app.cfg.get("game") or {}).get("active")
+        if (patch.get("game", {}).get("active", old_game) != old_game
+                and app.broadcast.capture.previewing):
+            await app.broadcast.stop_preview()
         app.cfg = config.merge(app.cfg, patch)
         config.save(app.cfg)
         app.game.sync(app.cfg)
+        if (patch.get('wage', {}).get('boss_sfx_enabled') is False
+                and getattr(app, 'wage_sfx', None) is not None):
+            await app.wage_sfx.stop()
+        if getattr(app, "wage", None) is not None:
+            app.wage.room_id = str(app.cfg.get("room_id") or "")
         if (app.cfg.get("game") or {}).get("active") != old_game:
             await app.stop_dt()
             app.push("log", {"level": "info", "msg": f"已切换为{app._game_name()}，请重新启动托管"})
@@ -933,7 +1165,8 @@ def build_web(app: App):
                 app.brain.openai.history.clear()
             if getattr(app, "dt", None) is not None:
                 game_section = ("stardew" if app._is_stardew()
-                                else ("sts2" if app._is_sts2() else ""))
+                                else ("sts2" if app._is_sts2()
+                                      else ("wage" if app._is_wage() else "")))
                 game_persona = app.cfg.get(game_section, {}).get("persona") if game_section else ""
                 app.dt.cfg["persona"] = game_persona or styles.game_persona(app.cfg.get("ai", {}))
                 app.dt.cfg["emotional_value"] = app.cfg.get("interaction", {}).get("emotional_value", True)
@@ -1087,6 +1320,9 @@ def build_web(app: App):
     @routes.get("/api/broadcast/sources")
     async def broadcast_sources(_):
         data = await app.broadcast.sources()
+        if app._is_wage():
+            data["program"] = True
+            return web.json_response(data)
         try:
             if app._active_game() == "stardew":
                 marks = ("stardew", "星露谷")
@@ -1148,6 +1384,40 @@ def build_web(app: App):
             return web.json_response(await app.schedule.save_plans(await request.json()))
         except ValueError as error:
             return web.json_response({"ok": False, "error": str(error)}, status=400)
+
+    @routes.post("/api/broadcast/plans/cover")
+    async def broadcast_plan_cover_upload(request):
+        try:
+            posted = await request.post()
+        except Exception:
+            return web.json_response({"ok": False, "error": "封面上传格式不正确"}, status=400)
+        field = posted.get("file")
+        if field is None or isinstance(field, str):
+            return web.json_response({"ok": False, "error": "请选择要上传的封面图片"}, status=400)
+        ext = COVER_UPLOAD_TYPES.get(str(getattr(field, "content_type", "") or "").lower())
+        if not ext:
+            return web.json_response({"ok": False, "error": "封面仅支持 PNG、JPG、WebP 图片"}, status=400)
+        data = field.file.read(MAX_COVER_BYTES + 1)
+        if not data:
+            return web.json_response({"ok": False, "error": "封面文件是空的"}, status=400)
+        if len(data) > MAX_COVER_BYTES:
+            return web.json_response({"ok": False, "error": "封面图片不能超过 5MB"}, status=400)
+        problem = await asyncio.to_thread(_cover_problem, data)
+        if problem:
+            return web.json_response({"ok": False, "error": problem}, status=400)
+        name = f"{int(time.time())}-{uuid.uuid4().hex[:10]}.{ext}"
+        os.makedirs(COVER_DIR, exist_ok=True)
+        with open(os.path.join(COVER_DIR, name), "wb") as handle:
+            handle.write(data)
+        return web.json_response({"ok": True, "cover": name,
+                                  "url": f"/api/broadcast/plans/cover/{name}"})
+
+    @routes.get("/api/broadcast/plans/cover/{name}")
+    async def broadcast_plan_cover_file(request):
+        path = _cover_path(request.match_info.get("name", ""))
+        if path is None:
+            raise web.HTTPNotFound()
+        return web.FileResponse(path)
 
     @routes.post("/api/broadcast/timer/start")
     async def broadcast_timer_start(request):
@@ -1223,6 +1493,7 @@ def build_web(app: App):
 
     @routes.post("/api/broadcast/start")
     async def broadcast_start(request):
+        asyncio.create_task(app.start_engine_for_live())
         result = await app.broadcast.start(await request.json())
         if result.get("ok"):
             app.cfg["room_id"] = result["room_id"]
@@ -1279,6 +1550,9 @@ def build_web(app: App):
                 return web.json_response({"ok": False, "error": str(e)})
         else:
             emotion = ""
+        if app.engine_idle:
+            # 手动播报/试听：没开播时引擎是卸的，先把这次要用的引擎拉起来
+            asyncio.create_task(app.start_engine_for_live())
         app.pipe.say(text, emotion)
         return ok(text=text)
 
@@ -1464,7 +1738,9 @@ def build_web(app: App):
     async def tts_start(_):
         nonlocal speech_switch_error
         speech_switch_error = ""
-        asyncio.create_task(app.engine.start(app.cfg["tts"], lambda m: app.push("log", {"level": "info", "msg": m})))
+        app.engine_idle = False
+        app.engine_ready.clear()
+        asyncio.create_task(app.start_engine_for_live())
         return ok()
 
     @routes.get("/api/tts/models")
@@ -1520,6 +1796,7 @@ def build_web(app: App):
         app.cfg["tts"].update(patch)
         config.save(app.cfg)
         speech_switch_error = ""
+        app.engine_idle = False
         if not (app.cfg["tts"].get("enabled", True) and app.cfg["tts"].get("qwen_enabled", True)
                 and app.cfg["tts"].get("stream_enabled", True)):
             return ok(selected=size, voice=tts_voices.current_id(app.cfg["tts"]), loading=False, ready=False,
@@ -1547,6 +1824,7 @@ def build_web(app: App):
             except Exception as error:
                 speech_switch_error = str(error)
             finally:
+                app.engine_ready.set()
                 if speech_gate is not None:
                     speech_gate.set()
         speech_gate = getattr(getattr(app, "pipe", None), "tts_ready", None)
@@ -1569,6 +1847,8 @@ def build_web(app: App):
                 pass
         if ttsd.owned() or app.engine.proc or getattr(app.engine, "comfy_proc", None):
             await asyncio.to_thread(app.engine.stop)
+            app.engine_idle = True
+            app.engine_ready.clear()
             app.push("log", {"level": "info", "msg": "已关闭本软件启动的语音引擎并释放其显存"})
             return ok()
         return web.json_response({"ok": False, "error": "引擎不是本软件启动的，请在它自己的窗口关闭"})
@@ -1658,6 +1938,14 @@ def build_web(app: App):
             "game_name": app._game_name(),
             "auto_launch": bool(c.get("auto_launch", True)),
         }
+        if kind == "wage":
+            info["game_text"] = app.dt.status_text() if app.dt and hasattr(app.dt, "status_text") else ""
+            info["game"] = app.dt.status_summary() if app.dt and hasattr(app.dt, "status_summary") else app.wage.snapshot()
+            info["wage"] = app.wage.snapshot()
+            info["game_running"] = True
+            info["ready"] = True
+            info["why"] = ""
+            return web.json_response(info)
         if kind == "stardew":
             info["game_text"] = app.dt.status_text() if app.dt and hasattr(app.dt, "status_text") else ""
             info["game"] = app.dt.status_summary() if app.dt and hasattr(app.dt, "status_summary") else {}
@@ -1705,6 +1993,8 @@ def build_web(app: App):
 
     @routes.post("/api/dtgame/stopgame")
     async def dt_stopgame(_):
+        if app._is_wage():
+            return web.json_response({"ok": True, "program": True})
         ok = app.game.stop()
         return web.json_response({"ok": ok})
 

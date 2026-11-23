@@ -411,6 +411,9 @@ class Player:
         self.mgain = 1.0
         self.on_music_end = None
         self._music_levels = None
+        self.effect = None
+        self.epos = 0
+        self.effect_vol = .45
 
     @staticmethod
     def devices():
@@ -450,6 +453,7 @@ class Player:
         sr = int(info["default_samplerate"]) or 48000
         with self.lock:
             if sr != self.sr:
+                self.effect = None
                 if self.music is not None:
                     pos = self.mpos
                     self.music = _resample(self.music, self.sr, sr)
@@ -470,7 +474,8 @@ class Player:
         with self.lock:
             if getattr(_status, "output_underflow", False):
                 self._output_underflows += 1
-            target = self.duck if self.voice is not None else 1.0
+            speaking = self.voice is not None
+            target = self.duck if speaking or self.effect is not None else 1.0
             g0 = self.mgain
             g1 = g0 + (target - g0) * min(1.0, frames / (self.sr * 0.25))
             if self.music is not None and not self.music_paused:
@@ -514,9 +519,29 @@ class Player:
                 # 流式时缓冲区被抽空只是「暂时没到货」，不算播完；真正收尾由 end_stream 决定。
                 if available == n and not self.streaming:
                     self._clear_voice()
+            # 鲨总音效独立于主播语音；不推进口型、不触发 speak/speak_end。
+            if self.effect is not None:
+                n = min(frames, len(self.effect) - self.epos)
+                gain = self.effect_vol * (.25 if speaking else 1.0)
+                out[:n] += self.effect[self.epos:self.epos + n] * gain
+                self.epos += n
+                if self.epos >= len(self.effect):
+                    self.effect = None
         np.clip(out, -1, 1, out=out)
         if ended:
             ended()
+
+    def play_effect(self, pcm, sr, device_name, volume=45):
+        """替换短音效通道；沿用直播输出设备，最多三秒，不排队叠播。"""
+        self.ensure(device_name)
+        with self.lock:
+            data = _stereo(_resample(pcm.astype(np.float32) / 32768.0, sr, self.sr))
+            self.effect, self.epos = data[:self.sr * 3], 0
+            self.effect_vol = max(0, min(100, volume)) / 100.0
+
+    def stop_effect(self):
+        with self.lock:
+            self.effect, self.epos = None, 0
 
     # ---------- 语音 ----------
     def set_duck(self, pids, level):
@@ -720,6 +745,7 @@ class Player:
         return self._music_levels
 
     def close(self):
+        self.stop_effect()
         self.skip()
         if self.stream is not None:
             try:

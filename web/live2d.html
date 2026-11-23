@@ -38,7 +38,8 @@ const qs = new URLSearchParams(location.search);
 if (qs.get('bg')) document.body.style.background = (qs.get('bg').startsWith('#') ? '' : '#') + qs.get('bg');
 // 作为直播画面的一部分时由软件叠加，气泡单独渲染会更清晰，这里不画
 const OVERLAY_MODE = qs.get('overlay') === '1';
-const MOUTH_IDS = ['ParamMouthOpenY', 'PARAM_MOUTH_OPEN_Y'];
+// 同时兼容标准 Cubism 口型和使用 JawOpen 输入的 ARKit 公皮。
+const MOUTH_IDS = ['ParamMouthOpenY', 'PARAM_MOUTH_OPEN_Y', 'JawOpen'];
 const EYE_IDS = ['ParamEyeLOpen', 'ParamEyeROpen'];
 const FADE = 0.35;
 PIXI.live2d.Live2DModel.registerTicker(PIXI.Ticker);
@@ -51,7 +52,7 @@ const bubble = document.getElementById('bubble'), errBox = document.getElementBy
 let CFG = null, INFO = null, model = null, baseW = 1, baseH = 1, modelKey = '';
 const exprData = {};          // id -> exp3 json
 let active = [];              // {id, w, target, base}
-let mouth = 0, env = null, envStart = 0, envFps = 30, fakeMouth = false;
+let mouth = 0, env = null, envStart = 0, envFps = 30, fakeMouth = false, mouthHoldUntil = 0;
 let envPos = -1, envPosAt = 0;   // 服务端报的真实发声位置（秒），-1 = 还没收到
 let eyeBlinkFallback = false;
 let clearTimer = null, bubbleTimer = null, typeTimer = null, speakId = null;
@@ -59,12 +60,17 @@ let activeMotion = '', motionRequest = 0, configQueue = Promise.resolve();
 let assetGeneration = 0, expressionRequest = 0;
 let defaultPartOpacities = null;
 let overlayUpdateAt = 0;
+let office = null, officeTime = 0, talking = false;
+const officePose = {x: 0, y: 0, z: 0};
+let typingRig = false, typingWeight = 0, typingPhase = 0;
+let typingHandLayer = null;
 
 // 同步渲染后读取 WebGL 画布，避免默认清空绘图缓冲后得到全透明图片。
 function renderLive2DFrame(view = {}) {
   const error = window.live2dOverlayState.error || errBox.textContent;
   if (error) return {error};
   if (!CFG?.enabled || !model) return {ready: false};
+  office = view.office || null;
   // 先让模型按最终取景绘制，再读取 PNG，避免半身裁切损失一半像素。
   // 保留逻辑视口和模型配置，独立浏览器源与气泡位置不受影响。
   const W = innerWidth, H = innerHeight;
@@ -208,6 +214,7 @@ function configureMaskBuffers(im) {
 async function loadModel() {
   errBox.textContent = '';
   delete window.live2dOverlayState.error;
+  if (typingHandLayer) { app.stage.removeChild(typingHandLayer); typingHandLayer.destroy({children: true}); typingHandLayer = null; }
   if (model) { app.stage.removeChild(model); model.destroy(); model = null; }
   clearTimeout(clearTimer);
   activeMotion = ''; motionRequest++;
@@ -221,6 +228,11 @@ async function loadModel() {
   } catch (e) { errBox.textContent = 'Live2D 模型加载失败：' + e; return; }
   const im = model.internalModel;
   configureMaskBuffers(im);
+  const ids = new Set(im.coreModel.getModel().parameters.ids);
+  typingRig = ['Movement2', 'Movement3', 'Param35', 'Param62', 'Param60', 'Param36', 'Param41'].every(id => ids.has(id));
+  typingWeight = 0;
+  // 手臂参数也是物理输出；在模型绘制前落位，避免同帧被物理系统覆盖。
+  im.on('beforeModelUpdate', () => officeTyping(im.coreModel));
   defaultPartOpacities = im.coreModel?.getModel ? Array.from(im.coreModel.getModel().parts.opacities) : null;
   im.lipSync = false;
   if (!CFG.blink) im.eyeBlink = undefined;
@@ -237,6 +249,7 @@ async function loadModel() {
   im.breath = {updateParameters: frame};
   baseW = model.width; baseH = model.height;
   app.stage.addChild(model);
+  setupTypingHandMirror(im);
   overlayUpdateAt = 0;
   for (const id of CFG.base_expressions || []) if (await loadExpr(id)) active.push({id, w: 1, target: 1, base: true});
   layout();
@@ -269,11 +282,12 @@ function frame(core, dt) {
   const t = performance.now() / 1000;
   const params = CFG.parameter_map || {};
   if (CFG.breath) core.setParameterValueById(params.breath || 'ParamBreath', (Math.sin(t * 2 * Math.PI / 3.4) + 1) / 2);
-  if (CFG.sway) {
+  if (CFG.sway && !office) {
     core.addParameterValueById(params.angle_x || 'ParamAngleX', Math.sin(t * 2 * Math.PI / 6.5) * 4);
     core.addParameterValueById(params.angle_z || 'ParamAngleZ', Math.sin(t * 2 * Math.PI / 8.3) * 2);
     core.addParameterValueById(params.body_x || 'ParamBodyAngleX', Math.sin(t * 2 * Math.PI / 7.1) * 2);
   }
+  if (office) officeMovement(core, dt); else typingWeight = 0;
   const motionState = model.internalModel.motionManager.state;
   // 一次性动作自行控制眼睛，避免把睡觉、眯眼动作强制睁开。
   if (eyeBlinkFallback && (motionState.currentPriority <= 1 || motionState.currentGroup === CFG.idle_motion)) {
@@ -303,8 +317,148 @@ function frame(core, dt) {
     if (env) { const i = Math.floor(mouthSeconds() * envFps); v = i < env.length ? env[i] : 0; }
     else if (fakeMouth) v = (Math.sin(t * 17) + 1) / 2 * 0.8;
     mouth += (Math.min(1, v * (CFG.lip_gain || 1)) - mouth) * Math.min(1, dt * 18);
-    if (env || fakeMouth || mouth > 0.02) for (const id of MOUTH_IDS) core.setParameterValueById(id, mouth);
+    if (env || fakeMouth || mouth > 0.02 || talking || performance.now() < mouthHoldUntil)
+      for (const id of MOUTH_IDS) core.setParameterValueById(id, mouth);
   }
+}
+
+// 某些公皮的 IDLE 只循环道具，不能靠它让工位人物活起来。
+// 在真实模型上叠加看屏幕、转头和说话点头，口型仍只使用真实语音包络。
+function officeMovement(core, dt) {
+  if (!office.paused) officeTime += Math.max(0, Math.min(0.1, dt));
+  const t = officeTime, state = office.status || 'working';
+  const slackPoses = {
+    anime: {x: -4, y: -2, z: 3}, shorts: {x: -1, y: -11, z: 7},
+    shopping: {x: -6, y: -4, z: -3}, snack: {x: 4, y: 2, z: 6},
+    meeting: {x: 1, y: 5, z: 0}, nap: {x: 2, y: -16, z: 11},
+    game: {x: -7, y: -6, z: -5}, daydream: {x: 8, y: 7, z: 5},
+    cat: {x: -3, y: -9, z: 8}, coffee: {x: -5, y: -3, z: 2},
+    treasure: {x: -8, y: -12, z: -7},
+  };
+  const targets = state === 'slacking' ? (slackPoses[office.slack_kind] || {x: 6, y: 1, z: 4})
+    : state === 'caught' ? {x: -6, y: -3, z: -5}
+    : state === 'offwork' ? {x: 0, y: 3, z: 3}
+    : {x: -5, y: -5, z: -1};
+  const blend = office.paused ? 0 : Math.min(1, dt * 3);
+  for (const k of ['x', 'y', 'z']) officePose[k] += (targets[k] - officePose[k]) * blend;
+  const speaking = talking && !office.paused;
+  const motion = model.internalModel.motionManager.state;
+  const weight = motion.currentPriority > 1 ? 0.35 : 1;
+  if (!office.paused) {
+    const target = typingRig && office.typing !== false && state === 'working'
+      && !talking && motion.currentPriority <= 1 ? 1 : 0;
+    // 换成说话手势时先松开键盘，避免双臂突然跳到胸前。
+    typingWeight += (target - typingWeight) * (1 - Math.exp(-Math.max(0, dt) * (target ? 8 : 14)));
+  }
+  if (!office.paused) {
+    const rate = 2.3 * Math.sqrt(Math.min(4, Math.max(1, Number(office.speed) || 1)));
+    typingPhase = (Number.isFinite(office.work_time) ? office.work_time : officeTime) * rate * Math.PI * 2;
+  }
+  if (typingWeight > .001) {
+    core.setParameterValueById('Movement2', 1, typingWeight);
+    core.setParameterValueById('Movement3', 1, typingWeight);
+  }
+  const params = CFG.parameter_map || {};
+  const angleY = params.angle_y || (params.angle_x === 'AngleX' ? 'AngleY' : 'ParamAngleY');
+  const angles = {
+    [params.angle_x || 'ParamAngleX']: officePose.x + Math.sin(t * 1.05) * (speaking ? 4 : 2),
+    [angleY]: officePose.y + Math.sin(t * (speaking ? 7.5 : 2.6)) * (speaking ? 2.8 : 1.4),
+    [params.angle_z || 'ParamAngleZ']: officePose.z + Math.sin(t * 1.4) * 1.8,
+    [params.body_x || 'ParamBodyAngleX']: Math.sin(t * 0.9) * 2.2,
+    ParamBodyAngleZ: Math.sin(t * 1.1) * 1.0,
+  };
+  if (state === 'slacking' && office.slack_kind === 'nap' && !speaking && motion.currentPriority <= 1) {
+    for (const id of ['ParamEyeLOpen', 'ParamEyeROpen']) core.setParameterValueById(id, .08);
+  }
+  for (const [id, value] of Object.entries(angles)) core.addParameterValueById(id, value * weight);
+}
+
+function officeTyping(core) {
+  if (!office || !typingRig || typingWeight < .001) return;
+  const workTime = Number.isFinite(office.work_time) ? office.work_time : officeTime;
+  const burst = workTime % 4.8 < 4.35 ? 1 : 0;
+  const left = Math.max(0, Math.sin(typingPhase + .13 * Math.sin(typingPhase * .17))) ** 2 * burst;
+  const right = Math.max(0, -Math.sin(typingPhase + .1 * Math.sin(typingPhase * .23))) ** 2 * burst;
+  const pose = {
+    Param35: 1,
+    Param62: .17, Param59: .25, Param60: -.37 + .017 * left, Param61: .025 + .035 * left,
+    Param36: .17, Param39: .25, Param41: -.37 + .015 * right, Param42: -.025 - .03 * right,
+    Param43: .8 + .07 * right,
+    LHand: .12 + .07 * left, LHand2: .25 + .08 * left,
+    RHand: .12 + .065 * right, RHand2: .25 + .07 * right,
+  };
+  for (const [id, value] of Object.entries(pose)) core.setParameterValueById(id, value, typingWeight);
+}
+
+function setupTypingHandMirror(im) {
+  const raw = im.coreModel.getModel(), d = raw.drawables;
+  const leftPart = raw.parts.ids.indexOf('Part52'), rightPart = raw.parts.ids.indexOf('Part56');
+  const leftPalm = d.ids.indexOf('ArtMesh285'), rightPalm = d.ids.indexOf('ArtMesh302');
+  if (!typingRig || leftPart < 0 || rightPart < 0 || leftPalm < 0 || rightPalm < 0) return;
+  // 这套公皮的竖食指手型露出掌心。敲键盘时复用现有手背网格，
+  // 镜像成另一只手，保留原来的袖口和手腕落点；不修改原模型文件。
+  const hidden = new Set(), meshes = [];
+  const layer = new PIXI.Container();
+  for (let i = 0; i < d.count; i++) {
+    if (d.parentPartIndices[i] === rightPart) hidden.add(i);
+    if (d.parentPartIndices[i] !== leftPart) continue;
+    const uvs = new Float32Array(d.vertexUvs[i]);
+    for (let j = 1; j < uvs.length; j += 2) uvs[j] = 1 - uvs[j];
+    const mesh = new PIXI.SimpleMesh(model.textures[d.textureIndices[i]],
+      new Float32Array(d.vertexPositions[i].length), uvs, new Uint16Array(d.indices[i]));
+    layer.addChild(mesh);
+    meshes.push({index: i, mesh});
+  }
+  typingHandLayer = layer;
+  app.stage.addChild(layer);
+  const opacity = im.coreModel.getDrawableOpacity.bind(im.coreModel);
+  im.coreModel.getDrawableOpacity = index => opacity(index) *
+    (office && hidden.has(index) ? 1 - typingWeight : 1);
+  const draw = im.draw.bind(im);
+  im.draw = gl => {
+    layer.visible = !!office && typingWeight > .001;
+    if (layer.visible) {
+      const transform = im.drawingMatrix.clone();
+      transform.c = -transform.c; transform.d = -transform.d;
+      const screen = (x, y) => {
+        const p = transform.apply({x, y});
+        return {x: (p.x + 1) * innerWidth / 2, y: (1 - p.y) * innerHeight / 2};
+      };
+      const anchor = index => {
+        const v = d.vertexPositions[index], points = [];
+        for (let j = 0; j < v.length; j += 2) points.push(screen(v[j], v[j+1]));
+        const top = Math.min(...points.map(p => p.y)), bottom = Math.max(...points.map(p => p.y));
+        const wrist = points.filter(p => p.y <= top + (bottom - top) * .18);
+        return {x: wrist.reduce((a,p) => a+p.x, 0) / wrist.length,
+                y: wrist.reduce((a,p) => a+p.y, 0) / wrist.length};
+      };
+      const source = anchor(leftPalm), target = anchor(rightPalm);
+      for (const {index, mesh} of meshes) {
+        const vertices = d.vertexPositions[index], output = mesh.vertices;
+        for (let j = 0; j < vertices.length; j += 2) {
+          const p = screen(vertices[j], vertices[j+1]);
+          const q = app.stage.worldTransform.applyInverse({
+            x: target.x - (p.x - source.x) * .95,
+            y: target.y + (p.y - source.y) * .72,
+          });
+          output[j] = q.x; output[j+1] = q.y;
+        }
+        mesh.geometry.getBuffer('aVertexPosition').update();
+        mesh.alpha = typingWeight * d.opacities[index];
+      }
+    }
+    draw(gl);
+  };
+}
+
+function officeSpeechMotion(name) {
+  if (!office || office.paused) return '';
+  // 只使用已配置复位动作的手势，避免把模型留在举手状态；其他皮套仍有点头。
+  const wanted = ['惊讶', '尴尬', '害羞', '感谢'].includes(name)
+    ? ['默认手切举手', '竖手指切出来动画'] : ['竖手指切出来动画', '默认手切举手'];
+  return wanted.find(id => CFG.motion_resets?.[id]
+    && INFO.motions.some(m => m.id === id)
+    && INFO.motions.some(m => m.id === CFG.motion_resets[id])) || '';
 }
 
 // ---------- 表情 / 动作 ----------
@@ -339,7 +493,7 @@ async function setEmotionExprs(ids) {
     if (a) a.target = 1; else active.push({id, w: 0, target: 1, base: false});
   }
 }
-function clearEmotion() { expressionRequest++; for (const a of active) if (!a.base) a.target = 0; playMotion(''); }
+function clearEmotion(motion = '') { expressionRequest++; for (const a of active) if (!a.base) a.target = 0; playMotion(motion); }
 async function playMotion(id) {
   if (id === '@reset') { restoreDefaultState(); return; }
   const request = ++motionRequest, target = model;
@@ -383,7 +537,7 @@ function applyEmotion(name) {
     ids.push(pid);
   }
   setEmotionExprs(ids.concat(emo.expressions || []));
-  playMotion(emo.motion);
+  playMotion(emo.motion || (talking ? officeSpeechMotion(name) : ''));
   return true;
 }
 
@@ -433,13 +587,15 @@ function hideBubbleLater(sec) {
 function onSpeak(m) {
   if (!CFG || !CFG.enabled) return;
   speakId = m.id;
+  talking = true;
+  mouthHoldUntil = 0;
   clearTimeout(clearTimer);
   env = m.env && m.env.length ? m.env : null; envFps = m.fps || 30;
   envStart = performance.now();
   envPos = -1; envPosAt = envStart;
   // 流式播报开头那半秒本来就没有音频，此时用假口型只会让嘴抢在声音前面动
   fakeMouth = !env && m.stream !== true;
-  if (!m.emotion || !applyEmotion(m.emotion)) clearEmotion();
+  if (!m.emotion || !applyEmotion(m.emotion)) clearEmotion(officeSpeechMotion(m.emotion));
   showBubble(m.text, m.dur);
 }
 function onSpeakEnv(m) {
@@ -457,6 +613,8 @@ function onSpeakPos(m) {
 }
 function onSpeakEnd(m) {
   if (m.id !== speakId) return;
+  talking = false;
+  mouthHoldUntil = performance.now() + ((CFG.expr_hold ?? 3) + FADE + 0.3) * 1000;
   env = null; fakeMouth = false;
   clearTimeout(clearTimer);
   clearTimer = setTimeout(clearEmotion, (CFG.expr_hold ?? 3) * 1000);
@@ -503,7 +661,7 @@ function online(ok) {
   if (ok === onlineState) return;
   onlineState = ok;
   document.documentElement.classList.toggle('off', !ok);
-  if (!ok) { env = null; fakeMouth = false; bubble.classList.remove('on'); app.ticker.stop(); }
+  if (!ok) { env = null; fakeMouth = false; talking = false; bubble.classList.remove('on'); app.ticker.stop(); }
   else app.ticker.start();
 }
 setInterval(() => { if (!OVERLAY_MODE) online(!stopped && Date.now() - lastOk < 5000); }, 1000);

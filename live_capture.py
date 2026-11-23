@@ -389,6 +389,13 @@ class WindowStreamCapture:
         self._conn: socket.socket | None = None
         self._threads: list[threading.Thread] = []
         self.compositor = None  # 直播时叠加皮套（live_overlay.OverlayCompositor）
+        self.foreground_compositor = None  # 皮套之后叠加的台词等前景层
+        self.foreground_error = ""
+        self.program = None  # 程序源：返回 BGRA 整帧的函数，不采集窗口
+        self._program_thread: threading.Thread | None = None
+        self._program_revive_at = 0.0
+        self._program_failures = 0
+        self._program_gave_up = False
         self.theme_compositor = None
         self.theme_error = ""
         self.marquee_compositor = None  # 底部滚动横幅，在主题之上、皮套之下
@@ -406,6 +413,7 @@ class WindowStreamCapture:
         with self._lock:
             if self.previewing:
                 raise CaptureError("预览已在运行")
+            self.program = None
             self.error = ""
             self.theme_error = ""
             self._frame = self._jpeg = None
@@ -511,6 +519,120 @@ class WindowStreamCapture:
         self.stop_preview()
         raise CaptureError("采集无有效画面（窗口黑屏或已关闭），已回退")
 
+    def start_program(self, frame_source, audio_device: int) -> None:
+        """不采集窗口，由程序逐帧生成整幅画面（上班摸鱼等虚拟节目）。"""
+        with self._lock:
+            if self.previewing:
+                raise CaptureError("预览已在运行")
+            self.error = ""
+            self.theme_error = ""
+            self._frame = self._jpeg = None
+            self._source_frame = None
+            self._native_source_frame = None
+            self.latest = self._jpeg_at = 0.0
+            self._jpeg_requested_until = 0.0
+            self._jpeg_seq = 0
+            self._jpeg_times.clear()
+            self._capture_times.clear()
+            self._render_times.clear()
+            self._process_times.clear()
+            self._capture_closed.clear()
+            self._raw_size = (OUT_W, OUT_H)
+            self._mean = 0.0
+            self.program = frame_source
+            self._program_revive_at = 0.0
+            self._program_failures = 0
+            self._program_gave_up = False
+        p: pa.PyAudio | None = None
+        stream = None
+        try:
+            devs, _d = _list_loopback_devices()
+            dev = next((d for d in devs if d["id"] == int(audio_device)), None)
+            if dev is None:
+                raise CaptureError("音频设备不是有效的 loopback 设备")
+            p = pa.PyAudio()
+            try:
+                info = p.get_device_info_by_index(dev["id"])
+            except Exception as exc:
+                raise CaptureError(_safe(f"音频设备不可用: {exc}")) from exc
+            rate = int(float(info.get("defaultSampleRate") or 48000)) or 48000
+            ch = max(1, min(2, int(info.get("maxInputChannels") or 1)))
+            stream = p.open(format=pa.paInt16, channels=ch, rate=rate,
+                            input=True, input_device_index=dev["id"],
+                            frames_per_buffer=_AUDIO_CHUNK)
+        except BaseException as exc:
+            if stream:
+                try:
+                    stream.stop_stream(); stream.close()
+                except Exception:
+                    pass
+            if p:
+                try:
+                    p.terminate()
+                except Exception:
+                    pass
+            with self._lock:
+                self.program = None
+            if isinstance(exc, CaptureError):
+                raise
+            raise CaptureError(_safe(f"音频启动失败: {exc}")) from exc
+        with self._lock:
+            self.hwnd, self.audio_device = 0, dev["id"]
+            self._audio_rate, self._audio_ch = rate, ch
+            self._pa, self._stream, self._control = p, stream, None
+            self._crop = None
+            self.previewing = True
+            self.started_at = time.time()
+            self._stop_evt.clear()
+        self._audio_stop.clear()
+        self._audio_thread = threading.Thread(target=self._audio_reader, name="lc-audio", daemon=True)
+        self._audio_thread.start()
+        self._program_thread = threading.Thread(target=self._program_worker, name="lc-program", daemon=True)
+        self._program_thread.start()
+        self._jpeg_thread = threading.Thread(target=self._jpeg_worker, name="lc-render", daemon=True)
+        self._jpeg_thread.start()
+        self._watch_thread = threading.Thread(target=self._watch_frame_age, name="lc-watch", daemon=True)
+        self._watch_thread.start()
+        deadline = time.monotonic() + _FRAME_WAIT_S
+        while time.monotonic() < deadline:
+            with self._frame_cv:
+                if self._frame is None and not self._audio_stop.is_set():
+                    self._frame_cv.wait(timeout=0.5)
+                got = self._frame
+            if got is not None:
+                return
+        self.stop_preview()
+        raise CaptureError("程序画面没有生成有效帧")
+
+    def _program_worker(self) -> None:
+        next_t = time.monotonic()
+        while self.previewing and not self._audio_stop.is_set():
+            started = time.monotonic()
+            try:
+                source = self.program
+                frame = source() if source is not None else None
+                if frame is None:
+                    raise CaptureError("程序画面为空")
+                frame = np.asarray(frame, dtype=np.uint8)
+                if frame.shape != (OUT_H, OUT_W, 4):
+                    raise CaptureError("程序画面尺寸不是 1920x1080 BGRA")
+            except Exception as exc:
+                self._fail(_safe(f"程序画面生成失败: {exc}"))
+                return
+            with self._lock:
+                self._source_frame = frame
+                self._native_source_frame = None
+                self._mean = max(self._mean, 40.0)
+                self.latest = time.monotonic()
+                self._capture_times.append(self.latest)
+            next_t += 1 / FPS
+            now = time.monotonic()
+            if next_t < now - 0.1:
+                next_t = now
+            delay = next_t - now
+            if delay > 0:
+                self._audio_stop.wait(delay)
+
     def _on_frame(self, frame, *_args) -> None:
         try:
             buf = np.asarray(frame.frame_buffer, dtype=np.uint8)
@@ -566,7 +688,7 @@ class WindowStreamCapture:
     def _compose_frame(self, source: np.ndarray) -> None:
         canvas = None
         theme = self.theme_compositor
-        if theme is not None and theme.active:
+        if self.program is None and theme is not None and theme.active:
             try:
                 with self._lock:
                     native = self._native_source_frame
@@ -606,11 +728,19 @@ class WindowStreamCapture:
                 self.banner_error = ""
             except Exception as exc:
                 self.banner_error = f"送礼横幅合成失败：{exc}"
+        foreground = getattr(self, "foreground_compositor", None)
+        if foreground is not None:
+            try:
+                foreground.apply(canvas)
+                self.foreground_error = ""
+            except Exception as exc:
+                self.foreground_error = f"台词前景合成失败：{exc}"
         data = canvas.tobytes()
         with self._lock:
             sink = self._source_sink
         source_data = data
-        if sink is not None and self.source_subtitles is not None and self.source_subtitles.apply(canvas):
+        if (sink is not None and self.program is None
+                and self.source_subtitles is not None and self.source_subtitles.apply(canvas)):
             source_data = canvas.tobytes()
         with self._frame_cv:
             if sink is not None and sink is self._source_sink:
@@ -768,10 +898,12 @@ class WindowStreamCapture:
 
         with self._lock:
             return {"previewing": self.previewing,
+                    "program": bool(self.program),
                     "output_running": self.output_running,
                     "audio_level": self.audio_level,
                     "error": self.error, "width": OUT_W, "height": OUT_H,
                     "theme_error": self.theme_error,
+                    "foreground_error": self.foreground_error,
                     "capture_size": list(self._raw_size or []), "fps": FPS,
                     "capture_fps": rate(self._capture_times),
                     "render_fps": rate(self._render_times),
@@ -951,20 +1083,21 @@ class WindowStreamCapture:
     def _monitor(self) -> None:
         try:
             while self.output_running and not self._stop_evt.is_set():
-                if self._capture_closed.is_set():
-                    self._fail("窗口采集已关闭（最小化或退出），停止输出")
-                    break
-                try:
-                    info = _hwnd_info(self.hwnd, want_title=False)
-                except Exception:
-                    info = None
-                if info is None:
-                    self._fail("目标窗口已关闭，停止输出")
-                    break
-                if info["iconic"] or not info["visible"]:
-                    self._fail("目标窗口不可见/已最小化，停止输出")
-                    break
-                self._crop = _client_crop(self.hwnd) or self._crop
+                if self.program is None:
+                    if self._capture_closed.is_set():
+                        self._fail("窗口采集已关闭（最小化或退出），停止输出")
+                        break
+                    try:
+                        info = _hwnd_info(self.hwnd, want_title=False)
+                    except Exception:
+                        info = None
+                    if info is None:
+                        self._fail("目标窗口已关闭，停止输出")
+                        break
+                    if info["iconic"] or not info["visible"]:
+                        self._fail("目标窗口不可见/已最小化，停止输出")
+                        break
+                    self._crop = _client_crop(self.hwnd) or self._crop
                 if self._proc and self._proc.poll() is not None:
                     break
                 self._stop_evt.wait(0.5)
@@ -1038,7 +1171,7 @@ class WindowStreamCapture:
         """
         now = time.monotonic() if now is None else now
         hwnd = self.hwnd
-        if not self.previewing or not hwnd or not self.latest:
+        if self.program is not None or not self.previewing or not hwnd or not self.latest:
             return {}
         age = now - self.latest
         if age < self._STALE_WARN_S:
@@ -1051,12 +1184,42 @@ class WindowStreamCapture:
             return {"revived": True, "age": age}
         return {"stale": True, "age": age}
 
+    def _revive_program(self) -> None:
+        """程序源的生产线程出错退出后只重开这一条线程：音频、渲染、共享内存都保持不动，
+        源画面窗口句柄不变，直播姬里的窗口采集不用重选。"""
+        thread = self._program_thread
+        if thread is not None and thread.is_alive():
+            if time.monotonic() - self.latest < 5.0:
+                self._program_failures = 0
+            return
+        now = time.monotonic()
+        if now - self._program_revive_at < 10.0:
+            return
+        self._program_revive_at = now
+        if self._program_failures >= 5:
+            if not self._program_gave_up:
+                self._program_gave_up = True
+                log.error("程序画面线程连续 %d 次退出，已停止自动重启：%s", self._program_failures, self.error)
+            return
+        reason = self.error
+        self._program_failures += 1
+        self.error = ""
+        thread = threading.Thread(target=self._program_worker, name="lc-program", daemon=True)
+        with self._lock:
+            self._program_thread = thread
+        thread.start()
+        log.warning("程序画面线程已退出%s，已自动重启（第 %d 次）",
+                    "：" + reason if reason else "", self._program_failures)
+
     def _watch_frame_age(self) -> None:
         """帧龄看门狗：每 2 秒看一次，能还原就还原，还原不了就明确告警。"""
         warned_at = 0.0
         while not self._audio_stop.wait(2.0):
             if not self.previewing:
                 return
+            if self.program is not None:
+                self._revive_program()
+                continue
             try:
                 info = self.revive_if_stale()
             except Exception as exc:
@@ -1082,6 +1245,10 @@ class WindowStreamCapture:
             control, stream, p = self._control, self._stream, self._pa
             self._control = self._stream = self._pa = None
             self.previewing = False
+            self.program = None
+            self._program_failures = 0
+            self._program_gave_up = False
+            program_thread, self._program_thread = self._program_thread, None
         if control:
             try:
                 control.stop()
@@ -1099,6 +1266,8 @@ class WindowStreamCapture:
             reader.join(timeout=2.0)
         if encoder and encoder.is_alive() and encoder is not threading.current_thread():
             encoder.join(timeout=2.0)
+        if program_thread and program_thread.is_alive() and program_thread is not threading.current_thread():
+            program_thread.join(timeout=2.0)
         if stream:
             try:
                 stream.stop_stream()

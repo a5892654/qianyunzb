@@ -1,0 +1,35 @@
+{
+  "provenance": "Original nonsense phrases synthesized with local Windows Chinese SAPI; pitch wobble and original procedural Foley. No sampled game/meme audio.",
+  "sounds": {
+    "inspect": {
+      "label": "查岗探头",
+      "phrase": "歪比？巴布？",
+      "seconds": 1.982,
+      "peak": 0.68
+    },
+    "scold": {
+      "label": "抓包训话",
+      "phrase": "歪比巴布！哇啦巴巴！",
+      "seconds": 2.226,
+      "peak": 0.68
+    },
+    "assign": {
+      "label": "派离谱需求",
+      "phrase": "巴布，歪比歪比！",
+      "seconds": 1.745,
+      "peak": 0.68
+    },
+    "angry": {
+      "label": "鲨总发怒",
+      "phrase": "哇啦哇啦！巴布！",
+      "seconds": 1.958,
+      "peak": 0.68
+    },
+    "approve": {
+      "label": "批准夸奖",
+      "phrase": "歪比！巴布！",
+      "seconds": 1.838,
+      "peak": 0.68
+    }
+  }
+}
