@@ -6,10 +6,8 @@ import time
 
 from aiohttp import WSMsgType, web
 
-from climb import COMMANDS, GIFTS
-
-
-VOICE_GAP = 3.5
+from climb import COMMANDS, FOLLOW_EFFECTS, GIFTS
+from climb_voice import ClimbPresenter
 
 
 def bind_climb(routes, app, page):
@@ -43,9 +41,11 @@ def bind_climb(routes, app, page):
         voice = _narration_enabled(app) and app.cfg["tts"].get("enabled", True)
         return web.json_response({
             **{key: game[key] for key in ("auto", "finished", "round", "result_left", "height",
-                                          "best", "turns", "zone", "jets")},
+                                          "best", "turns", "zone", "jets", "misses", "slips",
+                                          "comebacks", "terrain", "landmark")},
             "active": active, "voice": voice,
             "warming_up": active and voice and app._engine_booting,
+            "ai_status": getattr(app, "climb_ai_status", "") if active and voice else "",
         })
 
     @routes.get("/api/climb/control")
@@ -77,7 +77,8 @@ def _control(game, payload):
         game.reset()
     elif action == "simulate":
         label, viewer = payload.get("label"), payload.get("viewer")
-        if type(viewer) is int and 0 <= viewer < 20 and isinstance(label, str) and (label in COMMANDS or label in GIFTS):
+        if (type(viewer) is int and 0 <= viewer < 20 and isinstance(label, str)
+                and (label in COMMANDS or label in GIFTS or label in FOLLOW_EFFECTS)):
             game.simulate(label, viewer)
 
 
@@ -92,9 +93,9 @@ def climb_narrating(app):
 
 async def run_climb(app):
     last = time.monotonic()
-    last_voice = float("-inf")
     was_voicing = False
     warmup = None
+    presenter = ClimbPresenter(app)
     try:
         while True:
             await asyncio.sleep(1 / 60)
@@ -110,19 +111,12 @@ async def run_climb(app):
                 warmup = asyncio.create_task(app.start_engine_for_live())
             was_voicing = voicing
             ready = not tts or (app.engine_ready.is_set() and app.pipe.tts_ready.is_set())
-            if not active or not ready or now - last_voice < VOICE_GAP:
-                continue
-            voice = app.climb.take_voice()
-            if voice:
-                app.pipe.narrate_fresh(*voice)
-                last_voice = now
-            elif not app.pipe.current and not app.pipe.pending_replies:
-                operation = app.climb.take_operation_voice()
-                if operation:
-                    text, remaining = operation
-                    app.pipe.narrate(text, expires_in=remaining - 1.0)
-                    last_voice = now
+            if active and ready:
+                presenter.tick(now)
+            else:
+                presenter.suspend()
     finally:
+        await presenter.close()
         if warmup is not None:
             warmup.cancel()
             await asyncio.gather(warmup, return_exceptions=True)

@@ -366,15 +366,15 @@ class Pipeline:
             event["expires_at"] = time.monotonic() + expires_in
         return self._enqueue(event, text=text)
 
-    def narrate_fresh(self, text, emotion=""):
+    def narrate_fresh(self, text, emotion="", *, expires_in=12):
         """游戏解说最新优先：丢掉排队中的旧游戏解说/反应，当前这句说完再接最新一句。"""
         self._drop_pending(GAME_TYPES)
-        self.react(text, emotion)
+        return self.react(text, emotion, expires_in=expires_in)
 
-    def react(self, text, emotion=""):
+    def react(self, text, emotion="", *, expires_in=12):
         """真实变化的短反应优先于闲聊，排队太久就作废，不播过时的惊呼。"""
         return self._enqueue({"type": "reaction", "name": "", "text": text, "emotion": emotion,
-                              "expires_at": time.monotonic() + 12}, text=text)
+                              "expires_at": time.monotonic() + expires_in}, text=text)
 
     def play_audio(self, filename, text="心愿单奖励", emotion="开心"):
         """本地 AI 翻唱与普通播报共用队列、音频设备和口型时钟。"""

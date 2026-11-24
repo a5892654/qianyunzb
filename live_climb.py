@@ -9,8 +9,10 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
 
-from climb import HEIGHT, LEDGES, TITLE, WIDTH, clamp
-from climb_course import CHAPTERS, CHECKPOINTS, ledge_indices
+from climb import (FOLLOW_EFFECTS, HEIGHT, HELP_GIFTS, LEDGES, NITRO_BURN, POWER_GIFTS,
+                   ROCKET_BURN, SABOTAGE_GIFTS, TITLE, WIDTH, clamp)
+from climb_course import CHAPTERS, CHECKPOINTS, LANDMARKS, WATER_Y, ledge_indices
+from climb_landmarks import architecture_faces, ledge_faces
 from live_capture import OUT_H, OUT_W
 
 
@@ -18,6 +20,8 @@ PALE = (247, 238, 214)
 SOFT = (220, 217, 203)
 GOLD = (224, 188, 112)
 SAGE = (169, 212, 186)
+CORAL = (247, 166, 143)
+ICE = (157, 205, 231)
 INK = (48, 47, 43)
 
 
@@ -38,6 +42,35 @@ def _text(draw, pos, text, size, color=PALE, anchor="lt"):
 
 def _paste(frame, image, x, y):
     frame.paste(image, (round(x), round(y)), image)
+
+
+@lru_cache(maxsize=64)
+def _gift_name_lines(name):
+    font = _font(16)
+    lines = [""]
+    for char in " ".join(name.split()):
+        if font.getlength(lines[-1] + char) > 174:
+            lines.append("")
+        lines[-1] += char
+    return tuple(lines)
+
+
+@lru_cache(maxsize=8)
+def _landmark_bitmap(landmark):
+    faces = architecture_faces(landmark)
+    xs, ys = zip(*(point for _, polygon in faces for point in polygon))
+    x, y = math.floor(min(xs)), math.floor(min(ys))
+    layer = Image.new("RGBA", (math.ceil(max(xs)) - x + 1, math.ceil(max(ys)) - y + 1))
+    draw = ImageDraw.Draw(layer)
+    for color, polygon in faces:
+        draw.polygon([(px - x, py - y) for px, py in polygon], fill=(*color, 255))
+    pixels = np.array(layer)
+    width, height = layer.size
+    random = np.random.default_rng(landmark.first)
+    grain = random.normal(0, 2.8, (height, width))
+    light = np.linspace(10, -10, width)[None, :] + np.linspace(5, -8, height)[:, None]
+    pixels[..., :3] = np.clip(pixels[..., :3].astype(np.float32) + (light + grain)[..., None], 0, 255)
+    return Image.fromarray(pixels), x, y
 
 
 class ClimbScene:
@@ -101,31 +134,40 @@ class ClimbScene:
         chapter = CHAPTERS[state["chapter"]]
         background = self.background if state["height"] < 40 and state["chapter"] == 0 else self.backdrops[chapter.backdrop]
         frame = background.crop((offset, down, offset + WIDTH, down + HEIGHT))
+        for landmark in LANDMARKS:
+            if LEDGES[landmark.last].y - 230 < cy + HEIGHT and LEDGES[landmark.first].y + 380 > cy:
+                art, x, y = _landmark_bitmap(landmark)
+                _paste(frame, art, x - cx, y - cy)
         visible = ledge_indices(cy - 405, cy + HEIGHT + 25)
         for index in visible:
             ledge = LEDGES[index]
-            if index % 5 == 2 and ledge.material in self.recesses:
+            if not ledge.piece and index % 5 == 2 and ledge.material in self.recesses:
                 toward = ledge.x - 152 if ledge.center < WIDTH / 2 else ledge.right - 58
                 _paste(frame, self.recesses[ledge.material], toward - cx, ledge.y - cy - 24)
         for index in reversed(visible):
             ledge = LEDGES[index]
+            if ledge.piece:
+                continue
             texture, top = self._ledge_bitmap(ledge.material, ledge.width, ledge.depth, ledge.slope)
             x, y = ledge.x - cx - 6, ledge.y - cy - top
             if y < HEIGHT and y + texture.height > 0:
                 _paste(frame, texture, x, y)
         draw = ImageDraw.Draw(frame)
+        for index in visible:
+            ledge = LEDGES[index]
+            if ledge.piece:
+                for color, polygon in ledge_faces(ledge):
+                    draw.polygon([(x - cx, y - cy) for x, y in polygon], fill=color)
+            if not ledge.slick:
+                continue
+            start, end = ledge.x + 15, ledge.right - 15
+            for spot in range(start, end, 27):
+                tail = min(end, spot + 12)
+                draw.line((spot - cx, ledge.surface(spot) - cy + 1,
+                           tail - cx, ledge.surface(tail) - cy + 2), fill=(117, 193, 202), width=3)
         self._world_details(draw, state, cx, cy)
         x, y = state["x"] - cx, state["y"] - cy
-        if state["tether"]:
-            anchor = state["tether"]
-            ax, ay = anchor.center - cx, anchor.y - cy
-            y = min(HEIGHT - 33, y)
-            end = (x - state["facing"] * 22, y - 46)
-            line = [(ax, ay), (ax * 0.35 + end[0] * 0.65, ay * 0.42 + end[1] * 0.58 + 15), end]
-            draw.line(line, fill=(36, 35, 30), width=5)
-            draw.line(line, fill=GOLD, width=2)
-            self._player(frame, draw, state, x, y)
-        elif state["recovering"]:
+        if state["recovering"]:
             self._rescue(draw, state, x, cy)
         else:
             self._player(frame, draw, state, x, y)
@@ -154,7 +196,7 @@ class ClimbScene:
                              fill=(192, 157, 86) if index != len(LEDGES) - 1 else (217, 188, 121))
             else:
                 draw.line((x - 3, y - 26, x + 10, y - 22), fill=(169, 141, 96), width=4)
-        water = BASE_WATER_Y - cy
+        water = WATER_Y - cy
         if water < HEIGHT:
             points = [(x, round(water + math.sin(x / 29 + state["clock"] * 2) * 2))
                       for x in range(0, WIDTH + 15, 12)]
@@ -186,7 +228,7 @@ class ClimbScene:
         boat = effects.get("boat")
         if boat and not state["recovering"]:
             x = 110
-            y = min(HEIGHT - 34, BASE_WATER_Y - cy) + math.sin(state["clock"] * 3) * 2
+            y = min(HEIGHT - 34, WATER_Y - cy) + math.sin(state["clock"] * 3) * 2
             self._boat(draw, x, y)
             _text(draw, (x, y - 46), f"{boat['by']} 号", 15, GOLD, "ms")
 
@@ -199,6 +241,10 @@ class ClimbScene:
             bob += state["power"] * 6
         if state["standing"] is not None:
             draw.ellipse((x - 62, y - 8, x + 58, y + 7), fill=(78, 67, 50))
+        if state["rocket"]:
+            self._thruster_flames(draw, state, x, y, state["rocket"], big=True)
+        elif state["nitro"]:
+            self._thruster_flames(draw, state, x, y, state["nitro"])
         _paste(frame, sprite, x - sprite.width * (0.52 if facing == 1 else 0.48), y - sprite.height + bob)
         cx, cy = state["camera"]
         wx, wy, ax, ay, contact = state["rod"]
@@ -250,6 +296,25 @@ class ClimbScene:
                 draw.ellipse((px - 6, py - 3, px + 6, py + 3), fill=(181, 198, 185))
                 draw.polygon([(px - 3, py), (px - 10, py - 4), (px - 10, py + 4)], fill=(155, 171, 159))
 
+    def _thruster_flames(self, draw, state, x, y, remaining, big=False):
+        clock = state["clock"]
+        strength = clamp(remaining / (ROCKET_BURN if big else NITRO_BURN), 0.15, 1)
+        scale = 1.5 if big else 1.0
+        for index in range(5):
+            sway = math.sin(clock * 21 + index * 1.7) * 4
+            start = x - 26 + index * 12
+            length = (24 + (index % 3) * 13) * (0.55 + strength * 0.55) * scale
+            tip = start + 3 + sway
+            draw.polygon([(start - 6, y + 2), (tip, y + length), (start + 7, y + 2)], fill=ICE if big else CORAL)
+            draw.polygon([(start - 2, y + 2), (tip, y + length * 0.62), (start + 3, y + 2)], fill=(255, 236, 190))
+        for index in range(3 if big else 2):
+            puff = (clock * 130 + index * 34) % 58
+            px = x - 16 + index * 16 + math.sin(clock * 9 + index) * 5
+            py = y + 10 + puff * scale
+            radius = (5 + puff / 10) * scale
+            draw.ellipse((px - radius, py - radius, px + radius, py + radius),
+                         outline=(151, 154, 146), width=2)
+
     @lru_cache(maxsize=18)
     def _player_sprite(self, facing, crouch):
         sprite = self.players[facing]
@@ -259,7 +324,7 @@ class ClimbScene:
         return sprite.resize((sprite.width, height), Image.Resampling.LANCZOS)
 
     def _rescue(self, draw, state, x, cy):
-        y = min(HEIGHT - 38, BASE_WATER_Y - cy)
+        y = min(HEIGHT - 38, WATER_Y - cy)
         t = state["recovery_left"]
         if not state["boat_riding"]:
             r = 22 + 22 * (1.5 - min(t, 1.5))
@@ -276,6 +341,55 @@ class ClimbScene:
         draw.line((x + 12, y - 43, x + 12, y - 61), fill=(216, 196, 157), width=2)
         draw.polygon([(x + 12, y - 60), (x + 36, y - 53), (x + 12, y - 48)], fill=(185, 103, 62))
 
+    def _gift_panel(self, draw, top, state):
+        groups = (
+            ("援助", SAGE, HELP_GIFTS),
+            ("强力", ICE, POWER_GIFTS),
+            ("捣乱", CORAL, SABOTAGE_GIFTS),
+            ("关注", GOLD, FOLLOW_EFFECTS),
+        )
+        names = {**state["gifts"], "nitro": "新关注"}
+        effects = state["effects"]
+        left, right = 901, 1251
+        height = 40
+        for _, _, gifts in groups:
+            height += 21 + sum(23 + (len(_gift_name_lines(names[kind] or "待绑定")) - 1) * 19
+                               for kind in gifts)
+        draw.rounded_rectangle((left, top, right, top + height), radius=10,
+                               fill=(37, 40, 41), outline=(89, 93, 85), width=1)
+        _text(draw, (left + 14, top + 10), "礼物 / 关注 效果", 17, PALE)
+        draw.line((left + 14, top + 34, right - 14, top + 34), fill=(84, 88, 80))
+        y = top + 42
+        for title, color, gifts in groups:
+            _text(draw, (left + 14, y), title, 14, color)
+            y += 21
+            for kind, effect in gifts.items():
+                name = names[kind]
+                lines = _gift_name_lines(name or "待绑定")
+                for offset, line in enumerate(lines):
+                    _text(draw, (left + 14, y + offset * 19), line, 16, PALE if name else (174, 178, 167))
+                _text(draw, (left + 192, y), "→", 16, SOFT)
+                _text(draw, (left + 214, y), effect, 16, color)
+                if kind == "nitro" and state["nitro"]:
+                    draw.rounded_rectangle((right - 60, y - 2, right - 12, y + 18), radius=7,
+                                           fill=(75, 66, 51))
+                    _text(draw, (right - 36, y + 8), "加速中", 13, GOLD, "mm")
+                elif kind == "nitro":
+                    _text(draw, (right - 36, y + 8), "免费", 13, SOFT, "mm")
+                elif kind == "rocket" and state["rocket"]:
+                    draw.rounded_rectangle((right - 60, y - 2, right - 12, y + 18), radius=7,
+                                           fill=(52, 70, 80))
+                    _text(draw, (right - 36, y + 8), "喷发中", 13, ICE, "mm")
+                elif kind == "magnet" and kind in effects:
+                    draw.rounded_rectangle((right - 58, y - 2, right - 12, y + 18), radius=7,
+                                           fill=(52, 70, 80))
+                    _text(draw, (right - 35, y + 8), f"剩{effects[kind]['jumps']}跳", 13, ICE, "mm")
+                elif kind in effects:
+                    draw.rounded_rectangle((right - 52, y - 2, right - 12, y + 18), radius=7,
+                                           fill=(75, 66, 51))
+                    _text(draw, (right - 32, y + 8), "待命", 13, GOLD, "mm")
+                y += 23 + (len(lines) - 1) * 19
+
     def _hud(self, draw, state):
         _text(draw, (31, 27), TITLE, 25)
         _text(draw, (33, 60), f"{state['chapter'] + 1:02d}/{len(CHAPTERS)}  {state['zone']}", 16, SOFT)
@@ -283,7 +397,8 @@ class ClimbScene:
         minutes, seconds = divmod(rest, 60)
         elapsed = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
         _text(draw, (33, 85), elapsed, 16, SOFT)
-        _text(draw, (33, 107), f"难度 {state['chapter'] + 1}/{len(CHAPTERS)}", 15, GOLD)
+        _text(draw, (33, 107), state["landmark"] or state["terrain"], 17, GOLD)
+        _text(draw, (33, 130), f"失手 {state['misses']}   翻回 {state['comebacks']}", 16, SOFT)
         _text(draw, (1247, 30), f"当前 {state['height']:02d} m   最高 {state['best']:02d} m", 19, PALE, "rt")
         guidance, air, net = (state["votes"][name] for name in ("指路", "打气", "接住"))
         effects = state["effects"]
@@ -291,18 +406,16 @@ class ClimbScene:
                  f"打气  {'就绪' if 'air' in effects else f'{air[0]}/{air[1]}'}    "
                  f"接住  {'已张网' if 'net' in effects else f'{net[0]}/{net[1]}'}")
         _text(draw, (1247, 60), votes, 15, SAGE, "rt")
-        gift_bits = []
-        for kind, label in (("boat", "打捞艇"), ("step", "泡泡踏板"), ("school", "鱼群跟拍")):
-            if kind in effects:
-                gift_bits.append(f"{label}待命")
-            elif state["gifts"][kind]:
-                gift_bits.append(f"{state['gifts'][kind]} → {label}")
-        if gift_bits:
-            _text(draw, (1247, 84), "   ·   ".join(gift_bits)[:58], 14, GOLD, "rt")
-        if state["notice"]:
-            _text(draw, (33, 672), state["notice"], 19, PALE, "ls")
         if state["gust"]:
-            _text(draw, (1247, 108), "阵风向右" if state["gust"] > 0 else "阵风向左", 17, GOLD, "rt")
+            _text(draw, (886, 90), "阵风向右" if state["gust"] > 0 else "阵风向左", 16, GOLD, "rt")
+        self._gift_panel(draw, 83, state)
+        if state["notice"]:
+            notice = state["notice"]
+            accent = CORAL if any(word in notice for word in ("打滑", "掉回下层", "落水到底", "没够到", "逆风", "捣乱")) else GOLD
+            right = max(281, 54 + round(draw.textlength(notice, font=_font(18))))
+            draw.rounded_rectangle((26, 619, right, 661), radius=8, fill=INK)
+            draw.rounded_rectangle((26, 619, 31, 661), radius=2, fill=accent)
+            _text(draw, (43, 640), notice, 18, accent, "lm")
         if state["charging"]:
             x, y = 497, 689
             draw.rounded_rectangle((x, y, x + 285, y + 9), radius=4, fill=(63, 64, 54))
@@ -316,6 +429,3 @@ class ClimbScene:
             _text(draw, (640, 393), f"{state['result_left']} 秒后开始下一局", 15, SOFT, "mm")
         if not state["auto"]:
             _text(draw, (640, 656), "自动攀爬已暂停", 17, PALE, "mm")
-
-
-BASE_WATER_Y = 704

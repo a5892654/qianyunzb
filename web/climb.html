@@ -48,12 +48,24 @@
     <label class="simulation" for="effect">试播互动</label>
     <select id="effect">
       <option>指路</option><option>打气</option><option>接住</option>
-      <option value="boat">打捞艇</option><option value="step">泡泡踏板</option>
-      <option value="school">鱼群跟拍</option>
+      <optgroup label="援助礼物">
+        <option value="boat">打捞艇</option><option value="step">泡泡踏板</option>
+        <option value="school">鱼群跟拍</option>
+      </optgroup>
+      <optgroup label="强力礼物">
+        <option value="rocket">火箭助推</option><option value="magnet">磁力吸盘</option>
+        <option value="feather">金羽毛</option>
+      </optgroup>
+      <optgroup label="捣乱礼物">
+        <option value="oil">吸盘打滑</option><option value="squall">逆风推歪</option>
+      </optgroup>
+      <optgroup label="关注">
+        <option value="nitro">新关注 · 氮气加速</option>
+      </optgroup>
     </select>
     <button id="simulate" type="button">模拟一次</button>
   </div>
-  <p class="settings">设为当前节目后，语音解说、房间弹幕和礼物会接入。礼物映射在 AI 设置中配置。<a href="/climb?view=1" target="_blank" rel="noopener">打开干净画面</a></p>
+  <p class="settings">设为当前节目后，语音解说、房间弹幕和礼物会接入。礼物映射在 AI 设置中配置，强力道具同样可绑定礼物；新关注会自动触发一次短暂的氮气上升。<a href="/climb?view=1" target="_blank" rel="noopener">打开干净画面</a></p>
   <p class="settings" id="activate-error" role="alert" hidden></p>
 </main>
 <script>
@@ -96,7 +108,7 @@
       const climbing = !state.auto ? '已暂停' : state.finished
         ? `已登顶 · ${state.result_left} 秒后续局` : `自动攀爬 · 第 ${state.round} 局`;
       const voice = !state.active ? '当前节目未选中' : !state.voice ? '语音已关闭'
-        : state.warming_up ? '语音引擎预热中' : '';
+        : state.warming_up ? '语音引擎预热中' : state.ai_status;
       status.textContent = voice ? `${climbing} · ${voice}` : climbing;
     } catch (_) {}
   }

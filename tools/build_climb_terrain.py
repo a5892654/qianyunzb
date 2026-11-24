@@ -14,7 +14,8 @@ OUTPUT = ROOT / "outputs" / "climb" / "blender"
 OUTPUT.mkdir(parents=True, exist_ok=True)
 sys.path.insert(0, str(ROOT))
 
-from climb_course import BASE_Y, CHAPTERS, LEDGES
+from climb_course import BASE_Y, CHAPTERS, LANDMARKS, LEDGES
+from climb_landmarks import architecture_faces, ledge_faces, ledge_outline
 
 
 def material(name, dark, light, *, grain=8.0, roughness=0.8, metal=0.0):
@@ -124,6 +125,39 @@ def aim(item, target):
     item.rotation_euler = (Vector(target) - item.location).to_track_quat("-Z", "Y").to_euler()
 
 
+def architecture_mesh(name, painted, plane, palette, solid=None):
+    vertices, faces, inks = [], [], []
+
+    def add(poly, depth):
+        offset = len(vertices)
+        vertices.extend((x / 100, depth, (BASE_Y - y) / 100) for x, y in poly)
+        return tuple(range(offset, offset + len(poly)))
+
+    if solid is not None:
+        front = add(solid, -0.30)
+        back = add(solid, 0.45)
+        faces.extend((front, back[::-1]))
+        faces.extend((front[i - 1], back[i - 1], back[i], front[i]) for i in range(len(front)))
+        inks.extend([painted[0][0]] * (2 + len(front)))
+    for index, (color, poly) in enumerate(painted):
+        faces.append(add(poly, plane - index * 0.0005))
+        inks.append(color)
+    mesh = bpy.data.meshes.new(name)
+    mesh.from_pydata(vertices, [], faces)
+    for color in dict.fromkeys(inks):
+        if color not in palette:
+            label = "".join(f"{channel:02X}" for channel in color)
+            color_material = bpy.data.materials.new(f"Landmark {label}")
+            color_material.diffuse_color = (*(channel / 255 for channel in color), 1)
+            palette[color] = color_material
+        mesh.materials.append(palette[color])
+    slots = {material.name: index for index, material in enumerate(mesh.materials)}
+    for face, color in zip(mesh.polygons, inks):
+        face.material_index = slots[palette[color].name]
+    mesh.update()
+    return bpy.data.objects.new(name, mesh)
+
+
 def assemble_course(kits, key, fill):
     scene = bpy.data.scenes.new("Cliff Course")
     scene.unit_settings.system = "METRIC"
@@ -142,13 +176,25 @@ def assemble_course(kits, key, fill):
         collection = bpy.data.collections.new(f"{index:02d} {spec.name}")
         scene.collection.children.link(collection)
         chapters.append(collection)
+    palette = {}
+    for landmark in LANDMARKS:
+        architecture = architecture_mesh(landmark.name, architecture_faces(landmark), 2.8, palette)
+        chapters[LEDGES[landmark.first].chapter].objects.link(architecture)
     for index, ledge in enumerate(LEDGES):
-        item = bpy.data.objects.new(f"{index:04d} {ledge.material}", None)
-        item.instance_type = "COLLECTION"
-        item.instance_collection = variants[ledge.material]
-        item.location = (ledge.center / 100, 0, (BASE_Y - ledge.y) / 100)
-        item.scale = (ledge.width / 550, 0.83, ledge.depth / 238)
-        item.rotation_euler.y = math.atan2(ledge.slope, ledge.width)
+        if ledge.piece:
+            item = architecture_mesh(f"{index:04d} {ledge.landmark} · {ledge.piece}", ledge_faces(ledge),
+                                     -0.304, palette, ledge_outline(ledge))
+            item["landmark"] = ledge.landmark
+            item["piece"] = ledge.piece
+        else:
+            item = bpy.data.objects.new(f"{index:04d} {ledge.material}", None)
+            item.instance_type = "COLLECTION"
+            item.instance_collection = variants[ledge.material]
+            item.location = (ledge.center / 100, 0, (BASE_Y - ledge.y) / 100)
+            item.scale = (ledge.width / 550, 0.83, ledge.depth / 238)
+            item.rotation_euler.y = math.atan2(ledge.slope, ledge.width)
+        item["terrain"] = ledge.terrain
+        item["slick"] = ledge.slick
         chapters[ledge.chapter].objects.link(item)
     camera = bpy.data.objects.new("Opening shot", bpy.data.cameras.new("Opening shot"))
     camera.data.type = "ORTHO"

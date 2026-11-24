@@ -177,11 +177,14 @@ class OpenAIChat:
         transient = cfg_ai.get("transient_context", False)
         msgs = [{"role": "system", "content": system_prompt},
                 *([] if transient else self.history), {"role": "user", "content": user_text}]
+        payload = {"model": cfg_ai["openai_model"], "messages": msgs, "temperature": 0.9,
+                   "max_tokens": cfg_ai.get("completion_tokens", max(200, int(cfg_ai.get("max_chars", 40)) * 3))}
+        if cfg_ai.get("disable_thinking"):
+            payload["thinking"] = {"type": "disabled"}
         async with aiohttp.ClientSession() as s:
             async with s.post(f"{base}/chat/completions",
                               headers={"Authorization": f"Bearer {cfg_ai['openai_key']}"},
-                              json={"model": cfg_ai["openai_model"], "messages": msgs, "temperature": 0.9,
-                                    "max_tokens": max(200, int(cfg_ai.get("max_chars", 40)) * 3)},
+                              json=payload,
                               timeout=aiohttp.ClientTimeout(total=float(cfg_ai.get("timeout", 30)))) as r:
                 d = await r.json(content_type=None)
                 if r.status != 200:
