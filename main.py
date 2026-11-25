@@ -642,6 +642,7 @@ class App:
                 on_chars=lambda names: self._remember_chars(names),
                 auto_depth=bool(c.get("auto_depth", True)),
                 depth=c.get("depth", 0),
+                prefer_fish=lambda: bool(self.cfg.get("dtgame", {}).get("prefer_big_fat_fish", False)),
                 observer=RiceTracker(self.rice, lambda: bool(self.cfg.get("rice_counter", {}).get("enabled")), self.rice_awarded),
             )
         p.running = True

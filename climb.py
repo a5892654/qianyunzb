@@ -45,6 +45,8 @@ ROCKET_RISE = 720
 MAGNET_JUMPS = 3
 FALL_REACH = 220
 DEFAULTS = {"guidance": 1, "air": 2, "net": 3, "narrate": True,
+            "avatar_enabled": True, "avatar_x": 0.16, "avatar_y": 0.88,
+            "avatar_size": 0.42, "avatar_zoom": 2.0,
             **{kind + "_gift": "" for kind in GIFTS}}
 
 
@@ -94,6 +96,15 @@ def validate_settings(values):
         raise ValueError("每种攀爬效果需配置不同的礼物")
     if "narrate" in values and type(values["narrate"]) is not bool:
         raise ValueError("攀爬语音开关无效")
+    if "avatar_enabled" in values and type(values["avatar_enabled"]) is not bool:
+        raise ValueError("皮套显示开关无效")
+    for key, low, high in (("avatar_x", 0.0, 1.0), ("avatar_y", 0.0, 1.0),
+                           ("avatar_size", 0.2, 1.4), ("avatar_zoom", 1.0, 3.0)):
+        if key not in values:
+            continue
+        value = values[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not low <= value <= high:
+            raise ValueError("皮套位置或大小超出范围")
 
 
 def clamp(value, low, high):

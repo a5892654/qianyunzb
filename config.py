@@ -366,6 +366,7 @@ DEFAULTS = {
         "openai_key": "",
         "openai_model": "",
         "character": "",
+        "prefer_big_fat_fish": False,
         "depth": 0,
         "auto_depth": True,
         "narrate": True,

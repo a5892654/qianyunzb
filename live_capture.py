@@ -1256,6 +1256,13 @@ class WindowStreamCapture:
             except Exception:
                 pass
         self._audio_stop.set()
+        # 读线程可能还阻塞在原生 WASAPI read：先 abort 掉阻塞读再 join。
+        # 读线程没退出前绝不能 close/terminate，否则原生 read 会访问已释放的流把服务带崩。
+        if stream:
+            try:
+                stream.stop_stream()
+            except Exception:
+                pass
         with self._lock:
             reader, self._audio_thread = self._audio_thread, None
             encoder, self._jpeg_thread = self._jpeg_thread, None
@@ -1268,13 +1275,13 @@ class WindowStreamCapture:
             encoder.join(timeout=2.0)
         if program_thread and program_thread.is_alive() and program_thread is not threading.current_thread():
             program_thread.join(timeout=2.0)
-        if stream:
+        reader_active = bool(reader and reader.is_alive())
+        if stream and not reader_active:
             try:
-                stream.stop_stream()
                 stream.close()
             except Exception:
                 pass
-        if p:
+        if p and not reader_active:
             try:
                 p.terminate()
             except Exception:

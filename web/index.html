@@ -573,6 +573,9 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
         <label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" data-k="dtgame.enabled" style="width:auto">启动时自动代打</label>
       </div>
       <div class="row" style="margin-top:8px">
+        <label class="f" style="flex-direction:row;align-items:center;gap:8px"><input type="checkbox" data-k="dtgame.prefer_big_fat_fish" style="width:auto">选角优先大肥鱼（每局都先派鲸鱼娘·大肥鱼，关闭后按换人轮换）</label>
+      </div>
+      <div class="row" style="margin-top:8px">
         <label class="f">Game 项目目录<input data-k="dtgame.project_dir"></label>
         <span class="btn" data-pick="dtgame.project_dir" data-kind="dir" style="margin-top:18px">浏览…</span>
       </div>
@@ -660,6 +663,16 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
         <label class="f">捣乱 · 逆风推歪对应礼物<input maxlength="40" data-k="climb.squall_gift"></label>
       </div>
       <p class="hint">填入 B 站付费礼物的完整名称，绑定后自动显示在直播画面右上角。强力道具：火箭立即点火猛窜，磁力吸盘让接下来 3 跳防滑并能自动抓边，金羽毛在摔落后拉回最高岩沿。每跳最多触发一种捣乱，同类效果待命期间只保留一次。新观众关注会自动触发一次短暂的氮气加速上升，无需绑定礼物。</p>
+      <div class="row">
+        <label class="c"><input type="checkbox" data-k="climb.avatar_enabled">叠加 Live2D 皮套</label>
+        <label class="f">皮套横向位置（0-1）<input type="number" min="0" max="1" step="0.01" data-k="climb.avatar_x"></label>
+        <label class="f">皮套纵向位置（0-1）<input type="number" min="0" max="1" step="0.01" data-k="climb.avatar_y"></label>
+      </div>
+      <div class="row">
+        <label class="f">皮套大小（相对画面高度）<input type="number" min="0.2" max="1.4" step="0.01" data-k="climb.avatar_size"></label>
+        <label class="f">皮套取景倍率（1=全身，2=半身）<input type="number" min="1" max="3" step="0.1" data-k="climb.avatar_zoom"></label>
+      </div>
+      <p class="hint">皮套需先在「Live2D」页开启叠加并选择模型；横向/纵向填皮套中心在画面中的比例位置，可边预览边调。</p>
       <label class="c"><input type="checkbox" data-k="climb.narrate">开场介绍、攀爬解说和互动语音</label>
     </div>
     <div data-game="wage" style="display:none">

@@ -34,6 +34,10 @@ log = logging.getLogger("dtplay")
 # 本局最多复活两次（玩家设定）：第三次阵亡就结束本局回大厅开新局。
 MAX_REVIVES = 2
 
+# 主播人设就是大肥鱼：开启「选角优先大肥鱼」后，每局都先派她上场。
+FISH_CHARACTER_ID = "big_fat_fish"
+FISH_CHARACTER_NAME = "大肥鱼"
+
 # 普通解说至少隔一步再开口，避免每步报流水账；战斗开场和关键时刻不受这个限制。
 COMBO_STEPS = 2
 # 冷场兜底：整整这么久没有开口，才强制接一句和当前局面有关的话。
@@ -211,7 +215,7 @@ class Player:
 
     def __init__(self, cfg_ai: dict, bridge: GameBridge, speak=None, log_push=None,
                  narrate: bool = True, pipe=None, emotions=None, chars=(), on_chars=None,
-                 auto_depth: bool = True, depth: int = 0, observer=None):
+                 auto_depth: bool = True, depth: int = 0, observer=None, prefer_fish=None):
         self.cfg = cfg_ai
         self.bridge = bridge
         self.speak = speak or (lambda text, emotion="": None)
@@ -254,6 +258,12 @@ class Player:
         self._expedition_recovery = False
         self._last_expedition = None
         self.observer = observer
+        self._prefer_fish = prefer_fish if callable(prefer_fish) else (lambda: bool(prefer_fish))
+
+    @property
+    def prefer_fish(self) -> bool:
+        """设置页开关实时生效：读 callable，代打中途切换也不用重启。"""
+        return bool(self._prefer_fish())
 
     def _observe(self, method, *args):
         if self.observer is not None:
@@ -357,6 +367,10 @@ class Player:
         if persona:
             prompt += ("\n【主播人设，与弹幕聊天一致】以下人设仅影响 say 的口吻和 emotion，"
                        "不改变上述 JSON 格式、游戏动作和局势判断；不要为了整活故意乱操作。\n" + persona)
+        if self.prefer_fish:
+            prompt += ("\n【选角偏好】本场直播已开启「优先大肥鱼」：每次选角都优先选「鲸鱼娘·大肥鱼」，"
+                       "观众就想看她自己上去打。这条覆盖上文的「必须换人」规则；只有她不可选或被游戏拒绝时"
+                       "才选别人，不要主动轮换。\n")
         if self.cfg.get("emotional_value", True):
             prompt += EMOTIONAL_VALUE_PROMPT
         options = [{"name": e["name"], "motion": e.get("motion", ""), "keywords": e.get("keywords", "")}
@@ -401,10 +415,20 @@ class Player:
                 if self._can_pick_character(c)
                 and self._character_token(c) not in self._character_rejected]
 
+    @staticmethod
+    def _is_fish(character: dict) -> bool:
+        return (str((character or {}).get("id") or "") == FISH_CHARACTER_ID
+                or FISH_CHARACTER_NAME in str((character or {}).get("name") or ""))
+
+    def _fish_character(self, candidates: list[dict]) -> dict | None:
+        return next((c for c in candidates if self._is_fish(c)), None)
+
     def _preferred_character(self, candidates: list[dict]) -> dict:
         last_used = {key: i for i, key in enumerate(self.chars)}
+        prefer_fish = self.prefer_fish
         # 老桥没有解锁字段时仍允许由游戏校验，但先用明确已解锁的角色。
         return min(candidates, key=lambda c: (
+            0 if prefer_fish and self._is_fish(c) else 1,
             not view.character_unlock_known(c),
             last_used.get(self._char_key(c.get("name")), -1), c["slot"]))
 
@@ -437,6 +461,11 @@ class Player:
         roster = [n for n in roster if n]
         if not roster:
             return ""
+        fish = self._fish_character(candidates)
+        if self.prefer_fish and fish is not None:
+            name = str(fish.get("name") or FISH_CHARACTER_NAME).strip()
+            return (f"选角提醒：本场已开启「优先大肥鱼」，这局选{name}（slot {fish.get('slot')}），"
+                    "观众就想看她自己上场；只有她不可选或被游戏拒绝时才换别人。")
         if len(roster) == 1:
             return f"选角提醒：当前只有{roster[0]}可选，继续使用她，不要选择锁定角色。"
         used = self.chars[-4:]
@@ -455,6 +484,8 @@ class Player:
         if picked is None:
             return slot
         slot = int(picked.get("slot", slot))
+        if self.prefer_fish and self._is_fish(picked):
+            return slot
         name = self._char_key(picked.get("name"))
         if not self.chars or not name or name != self.chars[-1]:
             return slot
@@ -488,6 +519,11 @@ class Player:
         else:
             slot = self._swap_if_repeat(state, picked["slot"], str(picked.get("id") or ""))
             chosen = self._character_choice(state, slot, "")
+        if self.prefer_fish:
+            fish = self._fish_character(candidates)
+            if fish is not None and not self._is_fish(chosen):
+                self.log_push("info", f"已开启优先大肥鱼，本局改选{fish.get('name') or fish.get('id')}")
+                chosen = fish
         act.update(action="character", slot=chosen["slot"], id=str(chosen.get("id") or ""))
         self._character_recovery = True  # 未确认进入游戏前，后续重试不再依赖模型。
         result = self.bridge.pick_character(act["slot"], act["id"])
@@ -983,7 +1019,7 @@ class Player:
         if result.get("ok") and screen == "character_select" and result.get("character_name"):
             # 游戏已确认选角成功就记下，避免下一帧尚未读到就重启而丢失这局记录。
             self._remember_character({"run": {"character": result["character_name"]}})
-        if result.get("ok") and result.get("character_swapped"):
+        if result.get("ok") and result.get("character_swapped") and not self.prefer_fish:
             say = _clean_say(f"这局换{result['character_name']}上场，试试别的打法！")
         if result.get("ok") and screen == "hall" and (result.get("depth_adjusted") or not say):
             depth = result.get("depth")

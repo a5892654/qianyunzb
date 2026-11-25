@@ -100,12 +100,24 @@ class Broadcast:
 
     def overlay_settings(self) -> tuple[str, float, float, float | None, float | None] | None:
         """每帧调用：开关关掉时返回 None，合成器据此跳过叠加。"""
-        if getattr(self.app, "_is_climb", lambda: False)():
-            return None
+        climb = bool(getattr(self.app, "_is_climb", lambda: False)())
         l2d = self.app.cfg.get("live2d", {})
         if not l2d.get("enabled") or not l2d.get("overlay_in_broadcast", True):
             return None
 
+        if climb:
+            section = self.app.cfg.get("climb", {})
+            if not section.get("avatar_enabled", True):
+                return None
+
+            def position(key, default, low, high):
+                value = float(section.get(key, default))
+                if not math.isfinite(value) or not low <= value <= high:
+                    raise ValueError("攀爬皮套位置或大小超出范围")
+                return value
+
+            return ("br", position("avatar_size", 0.42, 0.2, 1.4), 0.0,
+                    position("avatar_x", 0.16, 0, 1), position("avatar_y", 0.88, 0, 1))
         if getattr(self.app, "_is_wage", lambda: False)():
             from wage import avatar_layout
             wage = self.app.cfg.get("wage", {})
@@ -129,7 +141,8 @@ class Broadcast:
 
     def overlay_problem(self) -> str:
         """空串表示要叠加皮套；"off" 表示不需要；其余为不可用原因。"""
-        if getattr(self.app, "_is_climb", lambda: False)():
+        if (getattr(self.app, "_is_climb", lambda: False)()
+                and not self.app.cfg.get("climb", {}).get("avatar_enabled", True)):
             return "off"
         l2d = self.app.cfg.get("live2d", {})
         if not l2d.get("enabled") or not l2d.get("overlay_in_broadcast", True):
@@ -147,10 +160,15 @@ class Broadcast:
         # 按 128px 分档，拖动大小时避免每帧重建 WebGL 缓冲区。
         size = max(OVERLAY_BOX, math.ceil(height / 128) * 128)
         wage = bool(getattr(self.app, "_is_wage", lambda: False)())
-        zoom = (self.app.cfg.get("stream_theme", {}).get("avatar_zoom", THEME_DEFAULTS["avatar_zoom"])
-                if self.theme.active and not wage else 1)
-        if wage:
+        climb = bool(getattr(self.app, "_is_climb", lambda: False)())
+        if climb:
+            zoom = float(self.app.cfg.get("climb", {}).get("avatar_zoom", 2.0))
+        elif wage:
             zoom = self.app.cfg.get("wage", {}).get("avatar_zoom", 1.8)
+        elif self.theme.active:
+            zoom = self.app.cfg.get("stream_theme", {}).get("avatar_zoom", THEME_DEFAULTS["avatar_zoom"])
+        else:
+            zoom = 1
         view = {"size": size, "zoom": zoom}
         if wage:
             state = self.app.wage.snapshot()

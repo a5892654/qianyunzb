@@ -20,9 +20,11 @@ ROSTER = [
     {"slot": 2, "id": "alice", "name": "爱丽丝", "unlocked": True},
 ]
 
+FISH = {"slot": 3, "id": "big_fat_fish", "name": "鲸鱼娘·大肥鱼", "unlocked": True}
+
 
 class SelectionTests(unittest.IsolatedAsyncioTestCase):
-    def player(self, roster=None, *, used=()):
+    def player(self, roster=None, *, used=(), prefer_fish=None):
         bridge = Mock()
         state = {"screen": "character_select", "character_select": {
             "characters": copy.deepcopy(ROSTER if roster is None else roster)}}
@@ -32,11 +34,64 @@ class SelectionTests(unittest.IsolatedAsyncioTestCase):
             bridge.state.return_value = {"screen": "map"}
             return {"ok": True}
         bridge.pick_character.side_effect = pick
-        player = Player({}, bridge, chars=used, speak=Mock(return_value=None), log_push=Mock())
+        player = Player({}, bridge, chars=used, speak=Mock(return_value=None), log_push=Mock(),
+                        prefer_fish=prefer_fish)
         player._ask = AsyncMock(return_value={"action": "character", "slot": 1, "say": "杨上场"})
         player.running = True
         player.CHARACTER_TRANSITION_TIMEOUT = 0
         return player, bridge, state
+
+    async def test_prefer_fish_overrides_a_different_model_choice(self):
+        player, bridge, _ = self.player([*copy.deepcopy(ROSTER), dict(FISH)],
+                                        used=["奈尔"], prefer_fish=True)
+        player._ask.return_value = {"action": "character", "slot": 2, "id": "alice",
+                                    "say": "这局换爱丽丝"}
+        result = await player.step()
+        self.assertTrue(result["ok"])
+        bridge.pick_character.assert_called_once_with(FISH["slot"], FISH["id"])
+        self.assertEqual(player.chars, ["奈尔", "大肥鱼"])
+        self.assertEqual(result["say"], "这局换爱丽丝")  # 不补固定的换角台词
+
+    async def test_prefer_fish_repeats_across_runs_without_rotation(self):
+        player, bridge, state = self.player([*copy.deepcopy(ROSTER), dict(FISH)],
+                                            used=["大肥鱼"], prefer_fish=True)
+        player._ask.return_value = {"action": "character", "slot": FISH["slot"], "id": FISH["id"]}
+        tip = player._rotation(state)
+        self.assertIn("优先大肥鱼", tip)
+        self.assertNotIn("必须换", tip)
+        self.assertTrue((await player.step())["ok"])
+        bridge.pick_character.assert_called_once_with(FISH["slot"], FISH["id"])
+
+    async def test_prefer_fish_falls_back_when_fish_is_locked(self):
+        fish = {**FISH, "locked": True}
+        player, bridge, state = self.player([*copy.deepcopy(ROSTER), fish],
+                                            used=["奈尔"], prefer_fish=True)
+        self.assertNotIn("优先大肥鱼", player._rotation(state))
+        player._ask.return_value = {"action": "character", "slot": 2, "id": "alice"}
+        self.assertTrue((await player.step())["ok"])
+        bridge.pick_character.assert_called_once_with(2, "alice")
+
+    async def test_prefer_fish_is_the_model_failure_fallback(self):
+        player, bridge, _ = self.player([*copy.deepcopy(ROSTER), dict(FISH)],
+                                        used=["奈尔"], prefer_fish=True)
+        player._ask.side_effect = RuntimeError("模型没给 JSON")
+        self.assertTrue((await player.step())["ok"])
+        bridge.pick_character.assert_called_once_with(FISH["slot"], FISH["id"])
+
+    async def test_prefer_fish_setting_can_toggle_mid_run(self):
+        flag = {"on": False}
+        player, bridge, state = self.player([*copy.deepcopy(ROSTER), dict(FISH)],
+                                            used=["大肥鱼"], prefer_fish=lambda: flag["on"])
+        self.assertIn("必须换", player._rotation(state))
+        flag["on"] = True
+        self.assertIn("优先大肥鱼", player._rotation(state))
+        self.assertNotIn("必须换", player._rotation(state))
+
+    def test_prefer_fish_overrides_rotation_rule_in_system_prompt(self):
+        player = Player({}, Mock(), prefer_fish=True)
+        prompt = player._system_prompt()
+        self.assertIn("优先大肥鱼", prompt)
+        self.assertIn("覆盖", prompt)
 
     async def test_locked_model_choice_automatically_uses_unlocked_alternative(self):
         player, bridge, _ = self.player(used=["奈尔"])
