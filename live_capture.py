@@ -791,6 +791,7 @@ class WindowStreamCapture:
         # 改成按固定截止时间追帧，编码时间落在同一个周期里，才能跑到采集帧率。
         next_t = time.monotonic()
         bgr = None
+        failures = 0
         while not self._audio_stop.is_set() and self.previewing:
             delay = next_t - time.monotonic()
             if delay > 0 and self._audio_stop.wait(delay):
@@ -829,9 +830,18 @@ class WindowStreamCapture:
                         self._jpeg_seq += 1
                         self._frame_cv.notify_all()
                     last_frame = frame
+                failures = 0
+                with self._lock:
+                    if self.error.startswith("预览编码异常"):
+                        self.error = ""
             except Exception as exc:
-                self._fail(_safe(f"预览编码异常: {exc}"))
-                return
+                failures += 1
+                log.exception("预览编码失败")
+                self._fail(_safe(f"预览编码异常: {type(exc).__name__}: {exc}"))
+                if failures >= 3:
+                    return
+                next_t = time.monotonic() + 0.25
+                continue
             finally:
                 if source is not None:
                     with self._lock:
