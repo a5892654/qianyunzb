@@ -282,7 +282,7 @@ pre.log{background:#0b0d12;border:1px solid var(--line);border-radius:8px;paddin
     <div class="hint" id="broadcastTitleHint">分区和封面请在直播姬里改；直播间标题会在开播时按当前播放类型自动修改。</div>
     <div class="row" id="broadcastWindowRow"><label class="f">要直播的游戏窗口<select id="broadcastWindow"><option value="">请先启动游戏，再刷新窗口</option></select></label><button class="btn" id="broadcastLaunchGame" style="margin-top:18px">启动游戏</button><button class="btn" id="broadcastRefreshSources" style="margin-top:18px">刷新窗口</button></div>
     <div class="hint" id="broadcastProgramHint" style="display:none">上班摸鱼不需要游戏窗口：预览时由千音直接渲染工资条、WageSlave 代码窗口和工位画面，再叠加 Live2D 皮套。分区请在直播姬里选「虚拟主播 / 虚拟日常」。</div>
-    <div class="row" id="broadcastClimbRow" style="display:none"><a class="btn" href="/climb" target="_blank" rel="noopener">打开攀爬画面</a><span class="hint">出画后自动攀爬，也可在页面里模拟观众互动。</span></div>
+    <div class="row" id="broadcastClimbRow" style="display:none"><a class="btn" href="/climb" target="_blank" rel="noopener">打开攀爬画面</a><button class="btn" id="broadcastClimbReset">从头开爬</button><span class="hint">出画后自动攀爬，也可在页面里模拟观众互动；「从头开爬」会清空当前进度、从旧船坞重新开始第一局。</span></div>
     <div class="row" id="broadcastSharkSoundRow" style="display:none;margin-top:10px">
       <label class="c"><input id="broadcastSharkSound" type="checkbox" data-k="wage.boss_sfx_enabled">鲨总声音</label>
       <span class="hint" id="broadcastSharkSoundState">已开启 · 查岗、派活时播放搞怪音效</span>
@@ -1627,6 +1627,8 @@ async function pollDt() {
       bStop.disabled = broadcastDtBusy || !r.running;
       bStop.textContent = isWage ? '暂停摸鱼' : (isClimb ? '暂停攀爬' : '暂停代打');
     }
+    const bClimbReset = $('#broadcastClimbReset');
+    if (bClimbReset) bClimbReset.disabled = broadcastDtBusy;
     if (bState) bState.textContent = isClimb
       ? (r.running ? r.game_text || '自动攀爬' : '攀爬已暂停')
       : r.running
@@ -2599,6 +2601,14 @@ $('#broadcastDtStop').onclick = () => broadcastDtAction(async () => {
   if (!r.ok) throw new Error(r.error || '暂停失败');
   toast(isWageType() ? '已暂停摸鱼，工资与倒计时保留' : '已暂停代打，游戏与语音保留');
 });
+$('#broadcastClimbReset').onclick = () => {
+  if (!confirm('从头开爬？当前这一局的高度和进度会清零。')) return;
+  broadcastDtAction(async () => {
+    const r = await api('/api/dtgame/resume', {new_run: true});
+    if (!r.ok) throw new Error(r.error || '从头开爬失败');
+    toast('已从旧船坞从头开爬');
+  });
+};
 // 开预览和开源画面都要先确定采集目标：窗口列表为空时自动刷新，游戏没开就自动拉起。
 async function ensureBroadcastSelection() {
   let selection = broadcastSelection();
