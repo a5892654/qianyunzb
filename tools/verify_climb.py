@@ -9,12 +9,15 @@ import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
 from aiohttp.test_utils import TestClient, TestServer
+import numpy as np
+from PIL import ImageChops
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from climb import BASE_Y, CARRY_POSES, CHAPTERS, Climb, DEFAULTS, HEIGHT, LEDGES, ROUND_BREAK
 from climb_contact import cup_contact
-from climb_course import CHECKPOINTS, LANDMARKS, WATER_Y, Ledge
+from climb_course import CHECKPOINTS, LANDMARKS, PIXELS_PER_ALTITUDE_METER, WATER_Y, Ledge
+from climb_sky import ClimbSky, _project
 from climb_voice import ClimbPresenter
 from climb_weather import WEATHERS
 from live_climb import ClimbScene
@@ -147,6 +150,38 @@ class ClimbTests(unittest.TestCase):
         steady_left, steady_right = ice.landing_bounds(0)
         fast_left, fast_right = ice.landing_bounds(300)
         self.assertLess(fast_right - fast_left, steady_right - steady_left)
+
+    def test_air_temperature_tracks_current_height_after_a_fall(self):
+        self.config["weather"] = False
+        self.assertEqual(self.game.snapshot()["temperature_c"], 24)
+        self.game.best_y = self.game.y = BASE_Y - 7000 * PIXELS_PER_ALTITUDE_METER
+        self.assertEqual(self.game.snapshot()["temperature_c"], -21.5)
+        self.game.y = BASE_Y - 1000 * PIXELS_PER_ALTITUDE_METER
+        state = self.game.snapshot()
+        self.assertEqual(state["temperature_c"], 17.5)
+        self.assertEqual(state["best"], 7000)
+
+    def test_3d_scenery_has_depth_parallax_inside_the_same_zone(self):
+        points = np.array(((0, 18, 3), (0, 110, 3)), dtype=np.float32)
+        low, _ = _project(points, 0, 8)
+        high, _ = _project(points, 0, 12)
+        side, _ = _project(points, 4, 8)
+        descent = high[:, 1] - low[:, 1]
+        self.assertGreater(descent[1], 0)
+        self.assertGreater(descent[0], descent[1] * 2)
+        self.assertGreater(low[0, 0] - side[0, 0], low[1, 0] - side[1, 0])
+
+        with (patch("climb_sky.Image.open", side_effect=AssertionError("unexpected image backdrop")),
+              patch("climb_sky.np.load", wraps=np.load) as load):
+            sky = ClimbSky(Path(config.WEB_DIR) / "assets" / "climb" / "terrain", prefer_gpu=False)
+            dock = sky.render(0, 0, 0)
+            climbed = sky.render(0, -40 * PIXELS_PER_ALTITUDE_METER, 0)
+            summit = sky.render(0, LEDGES[-1].y - BASE_Y, 0)
+            load.assert_called_once()
+            self.assertEqual(load.call_args.args[0].name, "world.npz")
+        self.assertIsNotNone(ImageChops.difference(dock, climbed).getbbox())
+        self.assertIsNotNone(ImageChops.difference(climbed, summit).getbbox())
+        self.assertIsNone(ImageChops.difference(dock, sky.render(0, 0, 0)).getbbox())
 
     def test_weather_rotates_after_the_intro_and_announces_its_effect(self):
         self.game.take_voice()
@@ -579,6 +614,8 @@ class RoutesTests(unittest.IsolatedAsyncioTestCase):
         status = await (await self.client.get("/api/dtgame/status")).json()
         self.assertEqual(status["game_kind"], "climb")
         self.assertTrue(status["running"])
+        state = await (await self.client.get("/api/climb/state")).json()
+        self.assertEqual(state["temperature_c"], 24)
 
     async def test_controller_and_audience_share_one_scene(self):
         origin = str(self.client.make_url("/")).rstrip("/")

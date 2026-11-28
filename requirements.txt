@@ -13,3 +13,4 @@ bilibili-api-python==17.4.2
 windows-capture>=2.0,<3
 PyAudioWPatch>=0.2.12.9
 Pillow>=11
+moderngl>=5.12,<6

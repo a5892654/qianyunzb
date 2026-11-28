@@ -13,10 +13,11 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
 
 from climb import (FOLLOW_EFFECTS, HEIGHT, HELP_GIFTS, LEDGES, NITRO_BURN, POWER_GIFTS,
                    ROCKET_BURN, SABOTAGE_GIFTS, TITLE, WIDTH, clamp)
-from climb_course import (BASE_Y, CHAPTERS, CHECKPOINTS, CONSTRUCTION_MODELS, CONSTRUCTION_PROFILE,
-                          DOCK_SECTION_END, LANDMARKS, WATER_Y, chapter_at, ledge_indices)
+from climb_course import (CHECKPOINTS, CONSTRUCTION_MODELS, CONSTRUCTION_PROFILE,
+                          LANDMARKS, WATER_Y, ledge_indices)
 from climb_landmarks import architecture_faces, ledge_faces
 from climb_objects import CLIMB_OBJECTS
+from climb_sky import ClimbSky
 from live_capture import OUT_H, OUT_W
 
 
@@ -26,6 +27,7 @@ GOLD = (224, 188, 112)
 SAGE = (169, 212, 186)
 CORAL = (247, 166, 143)
 ICE = (157, 205, 231)
+COLD_AIR = (122, 164, 213)
 INK = (48, 47, 43)
 WEATHER_COLORS = {"clear": SAGE, "tail": GOLD, "head": CORAL, "gusty": GOLD,
                   "storm": ICE, "fog": SOFT, "blizzard": ICE}
@@ -33,10 +35,6 @@ WIND_COLORS = {"tail": (198, 214, 190), "head": (232, 188, 168), "gusty": (216, 
                "storm": (180, 198, 210), "blizzard": (232, 240, 244)}
 ICON_SIZE = 18
 GIFT_ROW_H = 22
-BACKDROP_BLEND = 20.0
-CHAPTER_START = {}
-for _ledge in LEDGES:
-    CHAPTER_START.setdefault(chapter_at(_ledge.y), round((BASE_Y - _ledge.y) / 25))
 
 
 @lru_cache(maxsize=12)
@@ -86,14 +84,9 @@ class ClimbScene:
     def _load(self):
         terrain = self.assets / "terrain"
         construction = terrain / "construction"
-        dock = Image.open(construction / "dock.webp").convert("RGB")
-        paths = [terrain / f"background-{number}.webp" for number in range(6)]
-        paths[3] = construction / "quarry.webp"
-        self.backdrops = [
-            ImageOps.fit(Image.open(path).convert("RGB"),
-                         (1440, 810), Image.Resampling.LANCZOS, centering=(0.5, 0.49))
-            for path in paths
-        ]
+        self.sky = ClimbSky(terrain)
+        self.cloud_veil = self._bottom_mist((220, 231, 239), 86, HEIGHT)
+        self.breath = self._flake(8, 135, 3.0)
         self.fog_banks = ((self._fog_bank(271, 1520, 340, 46), 48, 9),
                           (self._fog_bank(613, 1520, 300, 38), 236, 15),
                           (self._fog_bank(947, 1520, 260, 30), 408, 23))
@@ -107,13 +100,6 @@ class ClimbScene:
         self.snowflakes = {2: self._flake(2, 120, 0.8), 3: self._flake(3, 150, 1.1),
                            5: self._flake(5, 135, 1.8), 8: self._flake(8, 125, 3.2),
                            12: self._flake(12, 85, 5.2)}
-        dock_end = (BASE_Y - LEDGES[DOCK_SECTION_END].y) / 25
-        self.backdrop_edges = [(dock_end, dock, self.backdrops[0])]
-        for index in range(1, len(CHAPTERS)):
-            if CHAPTERS[index].backdrop != CHAPTERS[index - 1].backdrop:
-                self.backdrop_edges.append(
-                    (float(CHAPTER_START[index]), self.backdrops[CHAPTERS[index - 1].backdrop],
-                     self.backdrops[CHAPTERS[index].backdrop]))
         types = {ledge.material for ledge in LEDGES}
         self.material = {name: Image.open(terrain / f"{name}.webp").convert("RGBA") for name in types}
         self.construction = {name: Image.open(construction / f"{name}.webp").convert("RGBA")
@@ -140,24 +126,6 @@ class ClimbScene:
                     icon.thumbnail((ICON_SIZE, ICON_SIZE), Image.Resampling.LANCZOS)
                     self.gift_icons[name] = icon
         self._ready = True
-
-    def _background(self, state, offset, down):
-        height_now = (BASE_Y - state["y"]) / 25
-        image, blend, weight = self.backdrop_edges[0][1], None, 1.0
-        for edge, old, new in self.backdrop_edges:
-            if height_now < edge - BACKDROP_BLEND / 2:
-                image = old
-                break
-            if height_now < edge + BACKDROP_BLEND / 2:
-                image, blend = new, old
-                weight = clamp((height_now - (edge - BACKDROP_BLEND / 2)) / BACKDROP_BLEND, 0, 1)
-                break
-            image = new
-        box = (offset, down, offset + WIDTH, down + HEIGHT)
-        frame = image.crop(box)
-        if blend is not None and 0 < weight < 1:
-            frame = Image.blend(blend.crop(box), frame, weight)
-        return frame
 
     @staticmethod
     def _fog_bank(seed, width, height, count):
@@ -225,11 +193,13 @@ class ClimbScene:
     @staticmethod
     def _flake(radius, alpha, blur):
         size = radius * 2 + 10
-        layer = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-        ImageDraw.Draw(layer).ellipse((5, 5, size - 5, size - 5), fill=(246, 249, 251, alpha))
-        return layer.filter(ImageFilter.GaussianBlur(blur))
+        mask = Image.new("L", (size, size))
+        ImageDraw.Draw(mask).ellipse((5, 5, size - 5, size - 5), fill=alpha)
+        layer = Image.new("RGBA", (size, size), (246, 249, 251))
+        layer.putalpha(mask.filter(ImageFilter.GaussianBlur(blur)))
+        return layer
 
-    def _weather_grade(self, frame, kind, prev, mix):
+    def _weather_grade(self, frame, kind, prev, mix, cold):
         grades = {"storm": (0.78, 0.84, (52, 64, 74), 0.18),
                   "blizzard": (0.88, 0.94, (228, 235, 238), 0.16),
                   "fog": (0.72, 1.0, (208, 212, 207), 0.26),
@@ -242,8 +212,6 @@ class ClimbScene:
         brightness = start[1] + (end[1] - start[1]) * blend
         if saturation != 1:
             frame = ImageEnhance.Color(frame).enhance(saturation)
-        if brightness != 1:
-            frame = ImageEnhance.Brightness(frame).enhance(brightness)
         if start[2] and end[2]:
             tint = tuple(round(a + (b - a) * blend) for a, b in zip(start[2], end[2]))
             alpha = start[3] + (end[3] - start[3]) * blend
@@ -252,9 +220,12 @@ class ClimbScene:
         elif start[2]:
             tint, alpha = start[2], start[3] * (1 - blend)
         else:
-            tint = alpha = 0
-        if tint and alpha > 0:
-            frame = Image.blend(frame, Image.new("RGB", frame.size, tint), alpha)
+            tint, alpha = (0, 0, 0), 0
+        if alpha or cold or brightness != 1:
+            # Both tints and the brightness adjustment are linear for each RGB channel.
+            scale = brightness * (1 - alpha) * (1 - cold)
+            shift = (ink * alpha * (1 - cold) + ice * cold for ink, ice in zip(tint, COLD_AIR))
+            frame = frame.point([round(value * scale + add) for add in shift for value in range(256)])
         return frame
 
     def _weather_layer(self, state, kind, density=1):
@@ -305,6 +276,20 @@ class ClimbScene:
                     lambda value, ratio=strength: round(value * ratio)))
             frame.paste(layer, (0, 0), layer)
         return frame
+
+    def _altitude_effects(self, frame, state, kind):
+        temperature = state["temperature_c"]
+        frost = clamp(-temperature / 23, 0, 1)
+        fog = self.sky.cloud_fog(state["camera"][1])
+        if fog > 0:
+            mask = self.cloud_veil.getchannel("A").point([round(alpha * fog) for alpha in range(256)])
+            frame.paste(self.cloud_veil, (0, 0), mask)
+        if frost > 0 and kind != "blizzard":
+            layer = Image.new("RGBA", (WIDTH, HEIGHT))
+            self._snow_rock(ImageDraw.Draw(layer), state, frost)
+            if temperature < -6 and kind != "storm":
+                self._snow(layer, state, clamp((-temperature - 6) / 63, 0, 0.39))
+            frame.paste(layer, (0, 0), layer)
 
     def _wind_streaks(self, draw, state, kind, density=1):
         clock, wind = state["clock"], state["wind"]
@@ -412,7 +397,7 @@ class ClimbScene:
                 x = (seed % (WIDTH + 60) - 30 + clock * direction * speed * 0.55
                      + math.sin(clock * 0.9 + seed) * (6 + band * 7)) % (WIDTH + 80) - 40
                 y = ((seed >> 9) % 1000 / 1000 * (HEIGHT + 60) + clock * speed) % (HEIGHT + 80) - 40
-                overlay.paste(sprite, (int(x), int(y)), sprite)
+                overlay.alpha_composite(sprite, (int(x), int(y)))
 
     def _snow_streaks(self, draw, state, density=1):
         clock, direction = state["clock"], 1 if state["wind"] >= 0 else -1
@@ -431,12 +416,12 @@ class ClimbScene:
             left, right = ledge.x + 10, ledge.right - 10
             draw.line((left - cx, ledge.surface(left) - cy,
                        right - cx, ledge.surface(right) - cy),
-                      fill=(238, 246, 249, 75), width=2)
+                      fill=(238, 246, 249, round(112 * density)), width=2)
             for step in range(2 if density >= 0.45 else 1):
                 x = ledge.x + 18 + (index * 79 + step * 157) % max(16, ledge.width - 36)
                 y = ledge.surface(x) - cy
                 draw.ellipse((x - cx - 9, y - 2, x - cx + 9, y + 3),
-                             fill=(242, 248, 250, 95))
+                             fill=(242, 248, 250, round(153 * density)))
 
     def _fog_banks(self, overlay, state, density=1):
         clock, direction = state["clock"], 1 if state["wind"] >= 0 else -1
@@ -538,7 +523,7 @@ class ClimbScene:
         snow_white = (238, 244, 247, 235)
         ice = (196, 226, 238, 232)
         top_pad = 16
-        extra = 46 if material in {"limestone", "snow"} else 12
+        extra = 46 if material == "snow" else 12
         canvas = Image.new("RGBA", (image.width, image.height + top_pad + extra))
         canvas.paste(image, (0, top_pad))
         draw = ImageDraw.Draw(canvas)
@@ -596,12 +581,6 @@ class ClimbScene:
                 x = rng.uniform(12, image.width - 12)
                 y = surf(x) + rng.randint(4, 10)
                 draw.line((x, y, x, y + rng.randint(10, 26)), fill=(*light, 85), width=2)
-            for _ in range(rng.randint(2, 5)):
-                x = rng.uniform(12, image.width - 12)
-                y = bottom(x) - 1
-                length = rng.randint(8, 30)
-                half = rng.randint(2, 4)
-                draw.polygon([(x - half, y), (x + half, y), (x, y + length)], fill=(*light, 210))
             for _ in range(rng.randint(1, 2)):
                 rock_chip()
         elif material == "snow":
@@ -653,7 +632,7 @@ class ClimbScene:
                           fill=(120, 68, 46, 90), width=1)
 
         roll = rng.random()
-        if material in {"snow", "limestone"} and roll < 0.28:
+        if material == "snow" and roll < 0.28:
             x = rng.uniform(18, image.width - 18)
             y = surf(x)
             draw.polygon([(x - 5, y - 1), (x + 5, y - 2), (x, y - rng.randint(10, 16))], fill=ice)
@@ -677,14 +656,14 @@ class ClimbScene:
 
     def _compose(self, state):
         cx, cy = state["camera"]
-        offset = round(clamp(78 + cx * 0.23, 0, 160))
-        down = round(clamp(75 + 16 * math.sin(cy / 680), 0, 90))
         weather = state.get("weather") or {}
         enabled = weather.get("enabled", True)
         kind = weather.get("kind", "clear") if enabled else "clear"
         prev = weather.get("prev", "clear") if enabled else "clear"
         mix = float(weather.get("mix", 1)) if enabled else 1
-        frame = self._weather_grade(self._background(state, offset, down), kind, prev, mix)
+        frame = self.sky.render(cx, cy, state["clock"])
+        cold = 0.18 * clamp((8 - state["temperature_c"]) / 36, 0, 1)
+        frame = self._weather_grade(frame, kind, prev, mix, cold)
         for landmark in LANDMARKS:
             if LEDGES[landmark.last].y - 230 < cy + HEIGHT and LEDGES[landmark.first].y + 380 > cy:
                 art, x, y = _landmark_bitmap(landmark)
@@ -722,6 +701,7 @@ class ClimbScene:
                 draw.line((spot - cx, ledge.surface(spot) - cy + 1,
                            tail - cx, ledge.surface(tail) - cy + 2), fill=(117, 193, 202), width=3)
         self._world_details(draw, state, cx, cy)
+        self._altitude_effects(frame, state, kind)
         x, y = state["x"] - cx, state["y"] - cy
         if state["recovering"]:
             self._rescue(draw, state, x, cy)
@@ -741,21 +721,11 @@ class ClimbScene:
                 draw.line((x, y, x + direction * (19 + speed * 0.19), y - 6),
                           fill=(181, 192, 195), width=2)
         chapter, clock = state["chapter"], state["clock"]
-        if chapter in (8, 9):
-            for index in range(24):
-                x = (index * 89 + clock * 21) % WIDTH
-                y = (index * 137 + clock * 33) % HEIGHT
-                draw.line((x, y, x - 3, y + 6), fill=(234, 240, 244), width=1)
-        elif chapter in (6, 7):
+        if chapter in (6, 7):
             for index in range(12):
                 x = (index * 157 + clock * 29) % WIDTH
                 y = (index * 211 + clock * 11) % HEIGHT
                 draw.ellipse((x, y, x + 3, y + 2), fill=(168, 118, 82))
-        elif chapter in (4, 5):
-            for index in range(10):
-                x = (index * 193 + clock * 9) % WIDTH
-                y = (index * 173 + clock * 47) % HEIGHT
-                draw.line((x, y, x, y + 9), fill=(130, 158, 166), width=1)
         elif chapter in (10, 11):
             for index in range(6):
                 x = (index * 241 + clock * 15) % WIDTH
@@ -824,6 +794,14 @@ class ClimbScene:
         elif state["nitro"]:
             self._thruster_flames(draw, state, x, y, state["nitro"])
         _paste(frame, sprite, x - sprite.width * (0.52 if facing == 1 else 0.48), y - sprite.height + bob)
+        cold = clamp((4 - state["temperature_c"]) / 15, 0, 1)
+        age = state["clock"] % 1.82
+        if cold and age < 0.74:
+            opacity = cold * math.sin(math.pi * age / 0.74)
+            mask = self.breath.getchannel("A").point([round(alpha * opacity) for alpha in range(256)])
+            face_x = x + facing * (45 + age * 30)
+            face_y = y - sprite.height * 0.78 + bob - age * 15
+            frame.paste(self.breath, (round(face_x - 13), round(face_y - 13)), mask)
         cx, cy = state["camera"]
         wx, wy, ax, ay, contact = state["rod"]
         hx, hy, tx, ty = wx - cx, wy - cy, ax - cx, ay - cy
@@ -1011,7 +989,7 @@ class ClimbScene:
 
     def _hud(self, draw, frame, state):
         _text(draw, (31, 27), TITLE, 25)
-        _text(draw, (33, 60), f"{state['chapter'] + 1:02d}/{len(CHAPTERS)}  {state['zone']}", 16, SOFT)
+        _text(draw, (33, 60), state["zone"], 16, SOFT)
         hours, rest = divmod(int(state["clock"]), 3600)
         minutes, seconds = divmod(rest, 60)
         elapsed = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
@@ -1024,6 +1002,9 @@ class ClimbScene:
             self._weather_icon(draw, 33, 152, weather.get("kind", "clear"), color)
             _text(draw, (57, 152), f"天气 {weather.get('name', '')} · {weather.get('hint', '')}",
                   15, color)
+        temperature = state["temperature_c"]
+        _text(draw, (33, 175 if weather.get("enabled") else 152), f"气温 {temperature:.1f} °C",
+              16, ICE if temperature <= 0 else SOFT)
         _text(draw, (1247, 30), f"当前 {state['height']:02d} m   最高 {state['best']:02d} m", 19, PALE, "rt")
         guidance, air, net = (state["votes"][name] for name in ("指路", "打气", "接住"))
         effects = state["effects"]

@@ -119,7 +119,8 @@
       if (state.weather?.kind && document.activeElement !== weather) weather.value = state.weather.kind;
       const climbing = !state.auto ? '已暂停' : state.finished
         ? `已登顶 · ${state.result_left} 秒后续局` : `自动攀爬 · 第 ${state.round} 局`;
-      const sky = state.weather?.name ? `天气 ${state.weather.name} · ` : '';
+      const sky = `${state.weather?.enabled ? `天气 ${state.weather.name} · ` : ''}` +
+        `海拔 ${state.height} m · ${state.temperature_c.toFixed(1)} °C · `;
       const voice = !state.active ? '当前节目未选中' : !state.voice ? '语音已关闭'
         : state.warming_up ? '语音引擎预热中' : state.ai_status;
       status.textContent = voice ? `${sky}${climbing} · ${voice}` : `${sky}${climbing}`;

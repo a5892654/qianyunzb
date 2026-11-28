@@ -8,10 +8,10 @@ import time
 from threading import RLock
 
 from climb_contact import Contact, carry_blend, carry_tip, cup_contact
-from climb_course import (BASE_Y, CHAPTERS, CHECKPOINTS, LEDGES, WATER_Y, Ledge, chapter_at,
+from climb_course import (BASE_Y, CHAPTERS, CHECKPOINTS, LEDGES, WATER_Y, Ledge, altitude_at, chapter_at,
                           ledge_indices, obstacle_indices)
 from climb_weather import (CLEAR, FIRST_WEATHER_SECONDS, FIRST_WEATHER_TURN, WEATHERS,
-                           WEATHER_BLEND, WEATHER_SECONDS, WEATHER_TURNS, pick_weather)
+                           WEATHER_BLEND, WEATHER_SECONDS, WEATHER_TURNS, pick_weather, temperature_at)
 
 
 TITLE = "大肥鱼爬出海"
@@ -118,7 +118,7 @@ def clamp(value, low, high):
 
 
 def height(y):
-    return max(0, round((BASE_Y - y) / 25))
+    return round(altitude_at(y))
 
 
 def direction(x, y):
@@ -1242,6 +1242,7 @@ class Climb:
                 "rod_hits": self.rod_hits, "crouch": (GRIP_Y + self._grip_offset()[1]) / 68,
                 "gust": self.gust + self.gift_wind if self.on_ledge is None and self.flight_steps > GUST_DELAY else 0,
                 "height": height(self.y), "best": height(self.best_y), "fall": self.deepest_fall,
+                "temperature_c": round(temperature_at(altitude_at(self.y)), 1),
                 "record": self.record_ledge, "turns": self.turns, "clock": now, "misses": self.misses,
                 "slips": self.slips, "comebacks": self.comebacks, "terrain": visible_ledge.surface_name,
                 "landmark": visible_ledge.landmark,

@@ -11,6 +11,15 @@ from climb_objects import CLIMB_OBJECTS
 BASE_Y = 553
 WATER_Y = 704
 STEPS_PER_CHAPTER = 132
+PIXELS_PER_ALTITUDE_METER = 25
+
+
+def altitude_at(y):
+    return max(0, (BASE_Y - y) / PIXELS_PER_ALTITUDE_METER)
+
+
+def scenery_height(altitude):
+    return 8.5 + 4.2 * altitude / (altitude + 95) + 0.028 * altitude
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,7 +69,6 @@ class Ledge:
 @dataclass(frozen=True, slots=True)
 class Chapter:
     name: str
-    backdrop: int
     materials: tuple[str, ...]
     width: tuple[int, int]
     rise: tuple[int, int]
@@ -70,18 +78,18 @@ class Chapter:
 
 
 CHAPTERS = (
-    Chapter("旧船坞", 0, ("sandstone", "wood", "basalt"), (168, 274), (108, 140), 8),
-    Chapter("潮裂玄武崖", 0, ("basalt", "sandstone"), (160, 264), (110, 141), 10, 8),
-    Chapter("雾松根径", 1, ("wood", "basalt", "limestone"), (154, 253), (112, 142), 12, 14),
-    Chapter("断栈横沟", 1, ("wood", "scaffold", "granite"), (148, 242), (114, 143), 14, 20, 56),
-    Chapter("滴水钟乳洞", 2, ("limestone", "basalt"), (141, 231), (116, 145), 16, 26, 80),
-    Chapter("回声竖井", 2, ("limestone", "scaffold", "granite"), (135, 220), (118, 147), 18, 32, 105),
-    Chapter("赤锈采石场", 3, ("steel", "sandstone", "scaffold"), (129, 209), (120, 149), 20, 38, 130),
-    Chapter("废塔外架", 3, ("scaffold", "steel", "granite"), (123, 198), (122, 151), 22, 44, 155),
-    Chapter("覆雪冰碛", 4, ("snow", "granite", "limestone"), (118, 187), (124, 153), 24, 50, 180),
-    Chapter("横风冰壁", 4, ("snow", "granite"), (112, 176), (126, 155), 26, 57, 210),
-    Chapter("云上断脊", 5, ("granite", "limestone", "snow"), (108, 165), (128, 157), 28, 64, 245),
-    Chapter("晨曦峰肩", 5, ("granite", "snow", "steel"), (103, 154), (130, 159), 30, 71, 285),
+    Chapter("旧船坞", ("sandstone", "wood", "basalt"), (168, 274), (108, 140), 8),
+    Chapter("潮裂玄武崖", ("basalt", "sandstone"), (160, 264), (110, 141), 10, 8),
+    Chapter("雾松根径", ("wood", "basalt", "limestone"), (154, 253), (112, 142), 12, 14),
+    Chapter("断栈横沟", ("wood", "scaffold", "granite"), (148, 242), (114, 143), 14, 20, 56),
+    Chapter("风化岩壁", ("limestone", "basalt"), (141, 231), (116, 145), 16, 26, 80),
+    Chapter("迎风断层", ("limestone", "scaffold", "granite"), (135, 220), (118, 147), 18, 32, 105),
+    Chapter("赤锈采石场", ("steel", "sandstone", "scaffold"), (129, 209), (120, 149), 20, 38, 130),
+    Chapter("废塔外架", ("scaffold", "steel", "granite"), (123, 198), (122, 151), 22, 44, 155),
+    Chapter("覆雪冰碛", ("snow", "granite", "limestone"), (118, 187), (124, 153), 24, 50, 180),
+    Chapter("横风冰壁", ("snow", "granite"), (112, 176), (126, 155), 26, 57, 210),
+    Chapter("云上断脊", ("granite", "limestone", "snow"), (108, 165), (128, 157), 28, 64, 245),
+    Chapter("晨曦峰肩", ("granite", "snow", "steel"), (103, 154), (130, 159), 30, 71, 285),
 )
 
 # Each stretch has a different silhouette and transfer rhythm.
@@ -141,7 +149,6 @@ CONSTRUCTION_MODELS = (
 # Left edge, front rim, width and depth of the contact plane in the Blender renders.
 CONSTRUCTION_PROFILE = (85, 55, 550, 145)
 DOCK_CONSTRUCTION_LEDGES = (0, 1, 2, 3, 5, 7, 11, 14, 18, 24, 29, 34)
-DOCK_SECTION_END = 51
 
 
 def _object_ledge(ledge, key):

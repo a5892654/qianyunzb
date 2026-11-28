@@ -9,6 +9,11 @@ FIRST_WEATHER_SECONDS = 55
 WEATHER_BLEND = 2.4
 
 
+def temperature_at(altitude):
+    """Game air temperature in Celsius, with the dock at 24°C."""
+    return 24 - altitude * 0.0065
+
+
 @dataclass(frozen=True, slots=True)
 class Weather:
     key: str

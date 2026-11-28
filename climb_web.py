@@ -43,7 +43,7 @@ def bind_climb(routes, app, page):
         return web.json_response({
             **{key: game[key] for key in ("auto", "finished", "round", "result_left", "height",
                                           "best", "turns", "zone", "jets", "misses", "slips",
-                                          "comebacks", "terrain", "landmark", "weather")},
+                                          "comebacks", "terrain", "landmark", "weather", "temperature_c")},
             "active": active, "voice": voice,
             "warming_up": active and voice and app._engine_booting,
             "ai_status": getattr(app, "climb_ai_status", "") if active and voice else "",
