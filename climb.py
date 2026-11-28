@@ -8,7 +8,8 @@ import time
 from threading import RLock
 
 from climb_contact import Contact, carry_blend, carry_tip, cup_contact
-from climb_course import BASE_Y, CHAPTERS, CHECKPOINTS, LEDGES, WATER_Y, Ledge, chapter_at, ledge_indices
+from climb_course import (BASE_Y, CHAPTERS, CHECKPOINTS, LEDGES, WATER_Y, Ledge, chapter_at,
+                          ledge_indices, obstacle_indices)
 from climb_weather import (CLEAR, FIRST_WEATHER_SECONDS, FIRST_WEATHER_TURN, WEATHERS,
                            WEATHER_BLEND, WEATHER_SECONDS, WEATHER_TURNS, pick_weather)
 
@@ -506,7 +507,7 @@ class Climb:
                 aim = "正上方" if abs(delta) < 15 else "右上" if delta > 0 else "左上"
                 ledge = self._rock_underfoot()
                 target = LEDGES[index]
-                fact = f"准备撑杆跳往{aim}的{target.landmark or target.terrain}"
+                fact = f"准备撑杆跳往{aim}的{target.landmark or target.surface_name}"
                 if "air" in self.effects:
                     fact += "，有一口弹幕给的备用气，必要时在半空使用"
                 elif ledge and ledge.slick and self.last_ledge not in self.learned_grips:
@@ -525,8 +526,8 @@ class Climb:
                 footing_index = self.last_ledge + 1
                 footing, destination = LEDGES[footing_index:footing_index + 2]
                 aim = "右上" if destination.center > footing.center else "左上"
-                fact = (f"脚下落脚点在{footing.landmark or footing.terrain}，"
-                        f"正在考虑跳向{aim}的{destination.landmark or destination.terrain}")
+                fact = (f"脚下落脚点在{footing.landmark or footing.surface_name}，"
+                        f"正在考虑跳向{aim}的{destination.landmark or destination.surface_name}")
                 if footing.piece == "tile":
                     fact += "，脚下是一片斜瓦"
                 if destination.width < 120:
@@ -677,8 +678,8 @@ class Climb:
         angle, length = self._release_pose()
         previous = self.brace.hit.point
         plank = self.effects.get("step", {}).get("ledge")
-        ledges = tuple(LEDGES[i] for i in ledge_indices(
-            self.y - vy * vy / (2 * GRAVITY) - GRIP_Y - length - 148, self.y + length + 30))
+        ledges = tuple(LEDGES[i] for i in obstacle_indices(
+            self.y - vy * vy / (2 * GRAVITY) - GRIP_Y - length - 16, self.y + length + 30))
         for frame in range(1, landing_step + 1):
             t = STEP * frame
             gust_time = STEP * max(0, frame - GUST_DELAY)
@@ -696,8 +697,8 @@ class Climb:
         # Predict using the same timestep as the live collision solver.
         steps = max(1, math.ceil((t + 0.15) / STEP))
         ox, oy = self.x, self.y
-        indices = tuple(ledge_indices(min(self.y - vy * vy / (2 * GRAVITY), target.y) - 153,
-                                      max(self.y, target.y) + 135))
+        indices = obstacle_indices(min(self.y - vy * vy / (2 * GRAVITY), target.y) - 32,
+                                   max(self.y, target.y) + 135)
         nearby = [LEDGES[i] for i in indices]
         plank = self.effects.get("step", {}).get("ledge")
         surfaces = sorted([*nearby, plank] if plank else nearby, key=lambda item: item.y)
@@ -1017,7 +1018,7 @@ class Climb:
     def _rock_impact(self, before_x, before_y):
         # Keep the basin solid against the front rim and underside of the rock.
         basin_top = self.y - 31
-        for index in ledge_indices(basin_top - 140, basin_top + 20):
+        for index in obstacle_indices(min(basin_top, before_y - 31), max(basin_top, before_y - 31) + 20):
             ledge = LEDGES[index]
             rim = ledge.surface(clamp(self.x, ledge.x, ledge.right))
             underside = ledge.underside(rim)
@@ -1242,7 +1243,7 @@ class Climb:
                 "gust": self.gust + self.gift_wind if self.on_ledge is None and self.flight_steps > GUST_DELAY else 0,
                 "height": height(self.y), "best": height(self.best_y), "fall": self.deepest_fall,
                 "record": self.record_ledge, "turns": self.turns, "clock": now, "misses": self.misses,
-                "slips": self.slips, "comebacks": self.comebacks, "terrain": visible_ledge.terrain,
+                "slips": self.slips, "comebacks": self.comebacks, "terrain": visible_ledge.surface_name,
                 "landmark": visible_ledge.landmark,
                 "weather": {"kind": weather.key, "name": weather.name, "hint": weather.hint,
                             "since": self.weather_since, "enabled": self.weather_enabled(),

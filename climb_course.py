@@ -1,8 +1,11 @@
 """Original terrain and collision surfaces for the full-length cliff course."""
 
 from bisect import bisect_left, bisect_right
+from collections import Counter
 from dataclasses import dataclass, replace
 import random
+
+from climb_objects import CLIMB_OBJECTS
 
 
 BASE_Y = 553
@@ -25,6 +28,8 @@ class Ledge:
     slick: bool = False
     landmark: str = ""
     piece: str = ""
+    model: str = ""
+    solid_height: int = 0
 
     @property
     def right(self):
@@ -33,6 +38,11 @@ class Ledge:
     @property
     def center(self):
         return self.x + self.width / 2
+
+    @property
+    def surface_name(self):
+        prop = CLIMB_OBJECTS.get(self.model)
+        return prop.label if prop else self.terrain
 
     def surface(self, x):
         return self.y + (x - self.center) * (self.slope / self.width)
@@ -44,7 +54,7 @@ class Ledge:
         return self.x + margin, self.right - margin
 
     def underside(self, rim):
-        return rim + min(self.depth * 0.70, 88 + self.chapter * 2)
+        return rim + (self.solid_height or min(self.depth * 0.70, 88 + self.chapter * 2))
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,12 +135,58 @@ LANDMARKS = (
     )),
 )
 
+CONSTRUCTION_MODELS = (
+    "broken_concrete", "cantilever", "skip_bin", "crane_truss", "switchgear", "drum_pallet",
+)
+# Left edge, front rim, width and depth of the contact plane in the Blender renders.
+CONSTRUCTION_PROFILE = (85, 55, 550, 145)
+DOCK_CONSTRUCTION_LEDGES = (0, 1, 2, 3, 5, 7, 11, 14, 18, 24, 29, 34)
+DOCK_SECTION_END = 51
+
+
+def _object_ledge(ledge, key):
+    prop = CLIMB_OBJECTS[key]
+    width = min(ledge.width, prop.max_width)
+    return replace(ledge, x=round(ledge.center - width / 2), width=width, slope=0,
+                   model=key, solid_height=round(width * prop.height / prop.width))
+
+
+def _add_objects(ledges, checkpoints):
+    dock = {
+        1: "weigh_house", 4: "oil_drum", 6: "guard_house", 8: "cable_reel", 13: "tire_stack",
+        15: "site_office", 19: "traffic_barrier", 23: "vent_unit",
+        26: "lift_cab", 27: "parcel_locker", 31: "pump_cabinet",
+    }
+    for index, key in dock.items():
+        ledges[index] = _object_ledge(ledges[index], key)
+
+    counts = Counter(dock.values())
+    chapters = ((0, 2), (1, 5), (3, 4), (5, 5), (6, 1), (7, 1))
+    for chapter, interval in chapters:
+        start = checkpoints[chapter]
+        first = 9 if chapter == 0 else 3
+        for index in range(start + first, checkpoints[chapter + 1], interval):
+            ledge = ledges[index]
+            if ledge.model or ledge.piece:
+                continue
+            depth = ledge.underside(0)
+            # In tight sections, fit the object to the existing foothold and leave room for the jump below.
+            matches = []
+            for key, spec in CLIMB_OBJECTS.items():
+                shape = ledge.width * spec.height / (depth * spec.width)
+                if 0.70 <= shape <= 1.54 and ledge.width <= spec.max_width * 1.45:
+                    matches.append((counts[key], abs(1 - shape), key))
+            if matches:
+                key = min(matches)[2]
+                ledges[index] = replace(ledge, model=key)
+                counts[key] += 1
+
 
 def _make_course():
     ledges = [Ledge(-140, BASE_Y, 724, 320, CHAPTERS[0].name, terrain="旧船坞"),
               Ledge(648, 430, 420, 249, material="basalt", terrain="防波堤"),
-              Ledge(926, 299, 350, 280, terrain="潮湿岩沿", slick=True),
-              Ledge(625, 166, 236, 109, material="wood", slope=-15, terrain="折返栈道")]
+              Ledge(926, 299, 350, 280, terrain="湿滑废料斗", slick=True),
+              Ledge(625, 166, 236, 109, material="wood", slope=-15, terrain="折返桁架")]
     checkpoints = [0]
     y = ledges[-1].y
     center = round(ledges[-1].center)
@@ -174,12 +230,22 @@ def _make_course():
         for index, (center, width, depth, slope, piece) in enumerate(landmark.parts, landmark.first):
             ledges[index] = replace(ledges[index], x=center - width // 2, width=width, depth=depth,
                                     slope=slope, landmark=landmark.name, piece=piece)
+    for order, index in enumerate(DOCK_CONSTRUCTION_LEDGES):
+        ledges[index] = replace(ledges[index], model=CONSTRUCTION_MODELS[order % len(CONSTRUCTION_MODELS)])
+    for chapter in (6, 7):
+        steps = (step for step in range(STEPS_PER_CHAPTER) if step % 11 < 3)
+        for order, step in enumerate(steps):
+            index = checkpoints[chapter] + step
+            ledges[index] = replace(ledges[index], model=CONSTRUCTION_MODELS[
+                (order + 2 * (chapter - 6)) % len(CONSTRUCTION_MODELS)])
+    _add_objects(ledges, checkpoints)
     return tuple(ledges), tuple(checkpoints)
 
 
 LEDGES, CHECKPOINTS = _make_course()
 _ELEVATIONS = tuple(-ledge.y for ledge in LEDGES)
 _CHAPTER_ELEVATIONS = tuple(_ELEVATIONS[index] for index in CHECKPOINTS)
+MAX_SOLID_REACH = max(ledge.underside(0) + abs(ledge.slope) / 2 for ledge in LEDGES)
 
 
 def chapter_at(y):
@@ -189,3 +255,8 @@ def chapter_at(y):
 def ledge_indices(top, bottom):
     """Indices whose nominal upper surface is within the world-space interval."""
     return range(bisect_left(_ELEVATIONS, -bottom), bisect_right(_ELEVATIONS, -top))
+
+
+def obstacle_indices(top, bottom):
+    """Also include solids whose roofs are above the interval and whose walls reach it."""
+    return ledge_indices(top - MAX_SOLID_REACH, bottom)

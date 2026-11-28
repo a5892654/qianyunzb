@@ -13,8 +13,10 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
 
 from climb import (FOLLOW_EFFECTS, HEIGHT, HELP_GIFTS, LEDGES, NITRO_BURN, POWER_GIFTS,
                    ROCKET_BURN, SABOTAGE_GIFTS, TITLE, WIDTH, clamp)
-from climb_course import BASE_Y, CHAPTERS, CHECKPOINTS, LANDMARKS, WATER_Y, chapter_at, ledge_indices
+from climb_course import (BASE_Y, CHAPTERS, CHECKPOINTS, CONSTRUCTION_MODELS, CONSTRUCTION_PROFILE,
+                          DOCK_SECTION_END, LANDMARKS, WATER_Y, chapter_at, ledge_indices)
 from climb_landmarks import architecture_faces, ledge_faces
+from climb_objects import CLIMB_OBJECTS
 from live_capture import OUT_H, OUT_W
 
 
@@ -82,12 +84,15 @@ class ClimbScene:
         self._ready = False
 
     def _load(self):
-        self.background = Image.open(self.assets / "landscape.webp").convert("RGB").resize((1440, 810))
         terrain = self.assets / "terrain"
+        construction = terrain / "construction"
+        dock = Image.open(construction / "dock.webp").convert("RGB")
+        paths = [terrain / f"background-{number}.webp" for number in range(6)]
+        paths[3] = construction / "quarry.webp"
         self.backdrops = [
-            ImageOps.fit(Image.open(terrain / f"background-{number}.webp").convert("RGB"),
+            ImageOps.fit(Image.open(path).convert("RGB"),
                          (1440, 810), Image.Resampling.LANCZOS, centering=(0.5, 0.49))
-            for number in range(6)
+            for path in paths
         ]
         self.fog_banks = ((self._fog_bank(271, 1520, 340, 46), 48, 9),
                           (self._fog_bank(613, 1520, 300, 38), 236, 15),
@@ -102,7 +107,8 @@ class ClimbScene:
         self.snowflakes = {2: self._flake(2, 120, 0.8), 3: self._flake(3, 150, 1.1),
                            5: self._flake(5, 135, 1.8), 8: self._flake(8, 125, 3.2),
                            12: self._flake(12, 85, 5.2)}
-        self.backdrop_edges = [(40.0, self.background, self.backdrops[0])]
+        dock_end = (BASE_Y - LEDGES[DOCK_SECTION_END].y) / 25
+        self.backdrop_edges = [(dock_end, dock, self.backdrops[0])]
         for index in range(1, len(CHAPTERS)):
             if CHAPTERS[index].backdrop != CHAPTERS[index - 1].backdrop:
                 self.backdrop_edges.append(
@@ -110,6 +116,12 @@ class ClimbScene:
                      self.backdrops[CHAPTERS[index].backdrop]))
         types = {ledge.material for ledge in LEDGES}
         self.material = {name: Image.open(terrain / f"{name}.webp").convert("RGBA") for name in types}
+        self.construction = {name: Image.open(construction / f"{name}.webp").convert("RGBA")
+                             for name in CONSTRUCTION_MODELS}
+        self.construction.update({
+            name: Image.open(terrain / "objects" / f"{name}.webp").convert("RGBA")
+            for name in CLIMB_OBJECTS
+        })
         self.recesses = {
             name: ImageEnhance.Brightness(value).enhance(0.46).resize((220, 630), Image.Resampling.LANCZOS)
             for name, value in self.material.items() if name not in {"steel", "wood", "scaffold"}
@@ -492,6 +504,27 @@ class ClimbScene:
         return self._decorate_ledge(rendered, material, width, depth, slope,
                                     ledge_top + (pad if slope else 0), seed)
 
+    @lru_cache(maxsize=96)
+    def _construction_bitmap(self, name, width, depth, slope):
+        source = self.construction[name]
+        prop = CLIMB_OBJECTS.get(name)
+        left, rim, span, thickness = prop.projection if prop else CONSTRUCTION_PROFILE
+        sx, sy = width / span, depth / thickness
+        grade = slope / width
+        min_x, min_y, max_x, max_y = source.getbbox()
+        x0 = math.floor((min_x - left) * sx) - 2
+        x1 = math.ceil((max_x - left) * sx) + 2
+        tilt = max(abs(x0 - width / 2), abs(x1 - width / 2)) * abs(grade)
+        y0 = math.floor((min_y - rim) * sy - tilt) - 2
+        y1 = math.ceil((max_y - rim) * sy + tilt) + 2
+        image = source.transform(
+            (x1 - x0, y1 - y0), Image.Transform.AFFINE,
+            (1 / sx, 0, left + x0 / sx,
+             -grade / sy, 1 / sy, rim + (y0 - (x0 - width / 2) * grade) / sy),
+            Image.Resampling.BICUBIC,
+        )
+        return image, x0, y0
+
     def _decorate_ledge(self, image, material, width, depth, slope, surface, seed):
         rng = random.Random((seed + 1) * 7919 + width * 31 + depth * 17 + sum(map(ord, material)))
         alpha = np.array(image)[..., 3]
@@ -659,15 +692,20 @@ class ClimbScene:
         visible = ledge_indices(cy - 405, cy + HEIGHT + 25)
         for index in visible:
             ledge = LEDGES[index]
-            if not ledge.piece and index % 5 == 2 and ledge.material in self.recesses:
+            if not (ledge.piece or ledge.model) and index % 5 == 2 and ledge.material in self.recesses:
                 toward = ledge.x - 152 if ledge.center < WIDTH / 2 else ledge.right - 58
                 _paste(frame, self.recesses[ledge.material], toward - cx, ledge.y - cy - 24)
         for index in reversed(visible):
             ledge = LEDGES[index]
             if ledge.piece:
                 continue
-            texture, top = self._ledge_bitmap(ledge.material, ledge.width, ledge.depth, ledge.slope, index)
-            x, y = ledge.x - cx - 6, ledge.y - cy - top
+            if ledge.model:
+                depth = ledge.underside(ledge.y) - ledge.y
+                texture, left, top = self._construction_bitmap(ledge.model, ledge.width, depth, ledge.slope)
+            else:
+                texture, top = self._ledge_bitmap(ledge.material, ledge.width, ledge.depth, ledge.slope, index)
+                left, top = -6, -top
+            x, y = ledge.x - cx + left, ledge.y - cy + top
             if y < HEIGHT and y + texture.height > 0:
                 _paste(frame, texture, x, y)
         draw = ImageDraw.Draw(frame)

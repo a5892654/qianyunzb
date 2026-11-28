@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 import math
 
-from climb_course import LEDGES, Ledge, ledge_indices
+from climb_course import LEDGES, Ledge, obstacle_indices
 
 
 CUP_RADIUS = 6
@@ -68,7 +68,7 @@ def cup_contact(start, end, *, extra=None, nearby=None):
     x1, y1 = end
     dx, dy = x1 - x0, y1 - y0
     if nearby is None:
-        close = ledge_indices(min(y0, y1) - 137, max(y0, y1) + 29)
+        close = obstacle_indices(min(y0, y1) - CUP_RADIUS, max(y0, y1) + 29)
         nearby = (LEDGES[index] for index in close)
     low_x, high_x = sorted((x0, x1))
     low_y, high_y = sorted((y0, y1))

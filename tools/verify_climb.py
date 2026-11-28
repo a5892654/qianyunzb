@@ -231,6 +231,22 @@ class ClimbTests(unittest.TestCase):
                 self.assertIs(underside.ledge, ledge)
                 self.assertGreater(underside.ny, 0.9)
 
+    def test_house_roof_and_lower_wall_are_solid(self):
+        house = LEDGES[1]
+        self.assertEqual(house.model, "weigh_house")
+        y = house.y + 175
+        self.assertLess(y, house.underside(house.y))
+        roof = cup_contact((house.center, house.y - 32), (house.center, house.y + 8))
+        self.assertIs(roof.ledge, house)
+        self.assertLess(roof.ny, -0.99)
+        wall = cup_contact((house.x - 32, y), (house.x + 8, y))
+        self.assertIs(wall.ledge, house)
+        self.assertLess(wall.nx, -0.99)
+        self.game.x, self.game.y, self.game.vx = house.x + 12, y + 31, 180
+        self.game._rock_impact(house.x - 12, self.game.y)
+        self.assertLess(self.game.vx, 0)
+        self.assertLess(self.game.x, house.x + 7)
+
     def test_new_follower_fires_a_short_nitro_burst(self):
         follow = {"type": "follow", "uid": 7, "name": "新观众小满", "room_id": 9}
         self.assertTrue(self.game.on_event(follow))

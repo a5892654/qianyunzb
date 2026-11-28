@@ -14,8 +14,9 @@ OUTPUT = ROOT / "outputs" / "climb" / "blender"
 OUTPUT.mkdir(parents=True, exist_ok=True)
 sys.path.insert(0, str(ROOT))
 
-from climb_course import BASE_Y, CHAPTERS, LANDMARKS, LEDGES
+from climb_course import BASE_Y, CHAPTERS, CONSTRUCTION_PROFILE, LANDMARKS, LEDGES
 from climb_landmarks import architecture_faces, ledge_faces, ledge_outline
+from climb_objects import CLIMB_OBJECTS
 
 
 def material(name, dark, light, *, grain=8.0, roughness=0.8, metal=0.0):
@@ -171,6 +172,10 @@ def assemble_course(kits, key, fill):
         for item in objects:
             kit.objects.link(item)
         variants[name] = kit
+    for filename in ("cliff-construction.blend", "cliff-objects.blend"):
+        with bpy.data.libraries.load(str(ROOT / "docs" / filename)) as (source, target):
+            target.collections = source.collections
+        variants.update({kit["game_asset"]: kit for kit in target.collections if "game_asset" in kit})
     chapters = []
     for index, spec in enumerate(CHAPTERS, start=1):
         collection = bpy.data.collections.new(f"{index:02d} {spec.name}")
@@ -187,11 +192,21 @@ def assemble_course(kits, key, fill):
             item["landmark"] = ledge.landmark
             item["piece"] = ledge.piece
         else:
-            item = bpy.data.objects.new(f"{index:04d} {ledge.material}", None)
+            name = ledge.model or ledge.material
+            item = bpy.data.objects.new(f"{index:04d} {name}", None)
             item.instance_type = "COLLECTION"
-            item.instance_collection = variants[ledge.material]
+            item.instance_collection = variants[name]
             item.location = (ledge.center / 100, 0, (BASE_Y - ledge.y) / 100)
-            item.scale = (ledge.width / 550, 0.83, ledge.depth / 238)
+            prop = CLIMB_OBJECTS.get(name)
+            if prop:
+                span = math.hypot(ledge.width, ledge.slope) / (100 * prop.width)
+                item.scale = (span, span, ledge.underside(0) / (100 * prop.height))
+            elif ledge.model:
+                span = math.hypot(ledge.width, ledge.slope)
+                depth = ledge.underside(ledge.y) - ledge.y
+                item.scale = (span / CONSTRUCTION_PROFILE[2], 1, depth / 150)
+            else:
+                item.scale = (ledge.width / 550, 0.83, ledge.depth / 238)
             item.rotation_euler.y = math.atan2(ledge.slope, ledge.width)
         item["terrain"] = ledge.terrain
         item["slick"] = ledge.slick
