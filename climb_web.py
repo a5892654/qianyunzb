@@ -8,6 +8,7 @@ from aiohttp import WSMsgType, web
 
 from climb import COMMANDS, FOLLOW_EFFECTS, GIFTS
 from climb_voice import ClimbPresenter
+from climb_weather import WEATHERS
 
 
 def bind_climb(routes, app, page):
@@ -42,7 +43,7 @@ def bind_climb(routes, app, page):
         return web.json_response({
             **{key: game[key] for key in ("auto", "finished", "round", "result_left", "height",
                                           "best", "turns", "zone", "jets", "misses", "slips",
-                                          "comebacks", "terrain", "landmark")},
+                                          "comebacks", "terrain", "landmark", "weather")},
             "active": active, "voice": voice,
             "warming_up": active and voice and app._engine_booting,
             "ai_status": getattr(app, "climb_ai_status", "") if active and voice else "",
@@ -80,6 +81,11 @@ def _control(game, payload):
         if (type(viewer) is int and 0 <= viewer < 20 and isinstance(label, str)
                 and (label in COMMANDS or label in GIFTS or label in FOLLOW_EFFECTS)):
             game.simulate(label, viewer)
+    elif action == "weather":
+        kind, turns = payload.get("kind"), payload.get("turns")
+        if isinstance(kind, str) and kind in WEATHERS and (turns is None or
+                                                           (type(turns) is int and 1 <= turns <= 60)):
+            game.set_weather(kind, turns)
 
 
 def _narration_enabled(app):

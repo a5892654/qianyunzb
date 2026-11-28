@@ -3,11 +3,14 @@
 from collections import deque
 from dataclasses import dataclass
 import math
+import random
 import time
 from threading import RLock
 
 from climb_contact import Contact, carry_blend, carry_tip, cup_contact
 from climb_course import BASE_Y, CHAPTERS, CHECKPOINTS, LEDGES, WATER_Y, Ledge, chapter_at, ledge_indices
+from climb_weather import (CLEAR, FIRST_WEATHER_SECONDS, FIRST_WEATHER_TURN, WEATHERS,
+                           WEATHER_BLEND, WEATHER_SECONDS, WEATHER_TURNS, pick_weather)
 
 
 TITLE = "大肥鱼爬出海"
@@ -44,7 +47,7 @@ ROCKET_LIFT = 1180
 ROCKET_RISE = 720
 MAGNET_JUMPS = 3
 FALL_REACH = 220
-DEFAULTS = {"guidance": 1, "air": 2, "net": 3, "narrate": True,
+DEFAULTS = {"guidance": 1, "air": 2, "net": 3, "narrate": True, "weather": True,
             "avatar_enabled": True, "avatar_x": 0.16, "avatar_y": 0.88,
             "avatar_size": 0.42, "avatar_zoom": 2.0,
             **{kind + "_gift": "" for kind in GIFTS}}
@@ -96,6 +99,8 @@ def validate_settings(values):
         raise ValueError("每种攀爬效果需配置不同的礼物")
     if "narrate" in values and type(values["narrate"]) is not bool:
         raise ValueError("攀爬语音开关无效")
+    if "weather" in values and type(values["weather"]) is not bool:
+        raise ValueError("攀爬天气开关无效")
     if "avatar_enabled" in values and type(values["avatar_enabled"]) is not bool:
         raise ValueError("皮套显示开关无效")
     for key, low, high in (("avatar_x", 0.0, 1.0), ("avatar_y", 0.0, 1.0),
@@ -177,6 +182,8 @@ class Climb:
             self.gust = self.planned_gust = 0
             self.gift_wind = 0
             self.flight_steps = 0
+            self.flight_since = 0.0
+            self.stuck_tries = 0
             self.seen_gusts = set()
             self.misses = 0
             self.slips = 0
@@ -199,10 +206,56 @@ class Climb:
             self.voice = None
             self.opening_voice = True
             self.last_operation_voice = None
+            self.weather = CLEAR
+            self.weather_prev = CLEAR
+            self.weather_since = 0.0
+            self.weather_until = FIRST_WEATHER_TURN
+            self.weather_until_clock = FIRST_WEATHER_SECONDS
+            self.weather_rng = random.Random(20261127 + self.round_number * 7919)
 
     def set_auto(self, enabled):
         with self.lock:
             self.auto = bool(enabled)
+
+    def weather_enabled(self):
+        return self.settings().get("weather", DEFAULTS["weather"]) is not False
+
+    def _active_weather(self):
+        return self.weather if self.weather_enabled() else CLEAR
+
+    def set_weather(self, key, turns=None):
+        with self.lock:
+            weather = WEATHERS.get(key)
+            if weather is None:
+                return False
+            self._apply_weather(weather, turns=turns)
+            return True
+
+    def _apply_weather(self, weather, *, turns=None, announce=True):
+        if weather.key != self.weather.key:
+            self.weather_prev = self.weather
+        else:
+            self.weather_prev = weather
+        self.weather = weather
+        self.weather_since = self.run_clock
+        self.weather_until = self.turns + (turns if turns is not None
+                                           else self.weather_rng.randint(*WEATHER_TURNS))
+        self.weather_until_clock = self.run_clock + self.weather_rng.randint(*WEATHER_SECONDS)
+        if announce and not self.finished:
+            self._notice(weather.notice)
+            self._cue(weather.fact, weather.emotion)
+
+    def _rotate_weather(self):
+        if self.finished or not self.weather_enabled() or self.turns < self.weather_until:
+            return
+        self._apply_weather(pick_weather(self.weather_rng, LEDGES[self.last_ledge].chapter,
+                                         exclude=self.weather.key))
+
+    def _expire_weather(self):
+        if self.finished or not self.weather_enabled() or self.run_clock < self.weather_until_clock:
+            return
+        self._apply_weather(pick_weather(self.weather_rng, LEDGES[self.last_ledge].chapter,
+                                         exclude=self.weather.key))
 
     def _power(self):
         if self.charge_at is None:
@@ -233,6 +286,8 @@ class Climb:
         self.brace = None
         self.on_ledge = None
         self.flight_steps = 0
+        self.flight_since = self.run_clock
+        self.stuck_tries = 0
         self.charge_at = None
         self.jets = 1 + int(self.effects.pop("air", None) is not None)
         self.boost_at = self.run_clock + 0.36
@@ -252,17 +307,33 @@ class Climb:
         natural_slip = not magnet and hit.ledge.slick and self.last_ledge not in self.learned_grips
         if natural_slip:
             self.learned_grips.add(self.last_ledge)
+        weather = self._active_weather()
+        slipped = False
         if prank == "oil":
             by = self.effects.pop(prank)["by"]
             self._slip(hit, 0.39, f"{by} 的礼物让吸盘打滑", "观众的捣乱礼物让吸盘打滑，刚离开岩面就几乎失去了向上的力")
+            slipped = True
         elif natural_slip and "guidance" not in self.effects:
             self._slip(hit, 0.34, "吸盘打滑 · 落点偏离", "吸盘在湿岩上打滑，起跳偏离预定落点")
+            slipped = True
+        elif (weather.slip and not magnet and "guidance" not in self.effects
+                and self.last_ledge not in self.learned_grips
+                and self.weather_rng.random() < weather.slip):
+            self.learned_grips.add(self.last_ledge)
+            self._slip(hit, weather.slip_lift, f"{weather.name}打滑 · 落点偏离", weather.slip_fact)
+            slipped = True
         else:
             if natural_slip:
                 self._notice("弹幕指路 · 稳住湿滑支点")
                 self._cue("观众的指路灯帮忙避开了湿滑支点，安全起跳", "开心")
             if prank == "squall":
                 self.gift_wind = math.copysign(470, -aim[0])
+        if weather.drift and not slipped and self.flight_target is not None:
+            drift = self.weather_rng.uniform(-weather.drift, weather.drift)
+            self.vx += drift
+            if abs(drift) >= weather.drift * 0.35:
+                self.replan = True
+                self._notice("雾里看偏了 · 落点需要修正")
         self.turns += 1
         if self.effects.get("school", {}).get("jumps", 0) == 0:
             self.effects.pop("school", None)
@@ -358,7 +429,11 @@ class Climb:
             hold = OPENING_BRACE_TIME
         elif ledge.material in ("snow", "steel"):
             hold += 0.28
+        if self.weather_enabled():
+            hold = max(0.9, hold + self._active_weather().brace)
         self.auto_at = self.run_clock + hold
+        self.flight_since = 0.0
+        self.stuck_tries = 0
         self.brace = None
         self.rim_grab = None
         self.cup_at = None
@@ -391,6 +466,7 @@ class Climb:
                 self.finished = True
                 self.result_left = ROUND_BREAK
                 self._cue("已经站上峰顶并通关", "开心")
+        self._rotate_weather()
 
     def _cue(self, fact, emotion):
         self.voice = VoiceCue("reaction", fact, emotion, self.run_clock + REACTION_LIFETIME, self.voice_epoch)
@@ -477,6 +553,8 @@ class Climb:
 
     def _fall(self):
         self.comeback_at = self.record_ledge
+        self.flight_since = 0.0
+        self.stuck_tries = 0
         self.y = WATER_Y
         self.vx = self.vy = 0.0
         self.recover_at = self.run_clock + 1.45
@@ -514,7 +592,8 @@ class Climb:
             if plank and not plank.get("used") and "ledge" in plank and self.y > plank["ledge"].y + 32:
                 target = plank["ledge"]
                 landing_x = target.center
-            self.planned_gust = (self.gust if self.last_ledge in self.seen_gusts
+            weather = self._active_weather()
+            self.planned_gust = (self.gust if weather.gust or self.last_ledge in self.seen_gusts
                                  or "guidance" in self.effects else 0)
             shot = self._select_shot(target, landing_x)
             if shot is None and target is not route_target:
@@ -696,8 +775,11 @@ class Climb:
                 return
             climate = CHAPTERS[ledge.chapter]
             phase = math.sin(self.last_ledge * 1.39 + 1)
-            self.wind = climate.wind * phase
-            self.gust = math.copysign(climate.gust, phase) if ledge.exposed else 0
+            weather = self._active_weather()
+            self.wind = climate.wind * phase + weather.wind * self.facing
+            gust = climate.gust if ledge.exposed else 0
+            gust = max(gust, weather.gust) * weather.gust_scale
+            self.gust = math.copysign(gust, phase) if gust else 0
         brace = self.brace
         blend = clamp((self.run_clock - brace.held_from) / max(0.25, self.auto_at - brace.held_from), 0, 1)
         blend = blend * blend * (3 - 2 * blend)
@@ -798,6 +880,9 @@ class Climb:
                 self.recover_at = 0.0
                 self.boat_riding = False
         elif not self.finished:
+            if (self.on_ledge is not None and self.run_clock >= self.weather_until_clock
+                    and (self.brace is None or self.reposition_to is not None)):
+                self._expire_weather()
             if self.on_ledge is not None:
                 ledge = self._rock_underfoot()
                 if ledge is None:
@@ -811,9 +896,13 @@ class Climb:
             if self.rim_grab is not None:
                 self._pull_up()
             elif self.on_ledge is None:
-                self._steer()
-                if self.on_ledge is None and self.rim_grab is None:
-                    self._flight()
+                if (self.flight_since and self.run_clock - self.flight_since > 6
+                        and math.hypot(self.vx, self.vy) < 90):
+                    self._break_free()
+                if not self.recover_at:
+                    self._steer()
+                    if self.on_ledge is None and self.rim_grab is None:
+                        self._flight()
         target_x = clamp(self.x - 430, -90, 142)
         target_y = min(0.0, self.y - 548)
         if self.recover_at:
@@ -840,6 +929,26 @@ class Climb:
                     self._notice("磁力吸盘吸住了下层岩沿")
                     return True
         return False
+
+    def _break_free(self):
+        self.stuck_tries += 1
+        self.flight_since = self.run_clock
+        if self.stuck_tries > 3:
+            self._notice("半空脱困失败 · 落水重爬")
+            self._fall()
+            return
+        hit = self.last_impact[1] if self.last_impact and self.run_clock - self.last_impact[0] < 1.2 else None
+        if hit is not None:
+            self.vx += hit.nx * 520
+            self.vy += hit.ny * 520
+        else:
+            side = 1 if self.flight_target is not None and self.flight_target.center >= self.x else -1
+            self.vx += side * 260
+            self.vy -= 260
+        self.jets = max(self.jets, 1)
+        self.replan = True
+        self.boost_at = self.run_clock
+        self._notice("半空卡住 · 撑杆脱困")
 
     def _flight(self):
         before_x, before_y = self.x, self.y
@@ -1034,6 +1143,8 @@ class Climb:
             self.rim_grab = None
             self.on_ledge = None
             self.flight_steps = 0
+            self.flight_since = self.run_clock
+            self.stuck_tries = 0
             self.charge_at = None
             self.auto_plan = None
             self.flight_target = None
@@ -1080,6 +1191,8 @@ class Climb:
             self.rim_grab = None
             self.on_ledge = None
             self.flight_steps = 0
+            self.flight_since = self.run_clock
+            self.stuck_tries = 0
             self.charge_at = None
             self.auto_plan = None
             self.flight_target = None
@@ -1112,6 +1225,7 @@ class Climb:
         with self.lock:
             now = self.run_clock
             settings = self.settings()
+            weather = self._active_weather()
             chapter = LEDGES[self.last_ledge].chapter if self.on_ledge is not None else chapter_at(self.y)
             visible_ledge = LEDGES[self.last_ledge]
             if self.recover_at or visible_ledge.chapter != chapter:
@@ -1130,6 +1244,12 @@ class Climb:
                 "record": self.record_ledge, "turns": self.turns, "clock": now, "misses": self.misses,
                 "slips": self.slips, "comebacks": self.comebacks, "terrain": visible_ledge.terrain,
                 "landmark": visible_ledge.landmark,
+                "weather": {"kind": weather.key, "name": weather.name, "hint": weather.hint,
+                            "since": self.weather_since, "enabled": self.weather_enabled(),
+                            "prev": self.weather_prev.key if self.weather_enabled() else "clear",
+                            "mix": (clamp((now - self.weather_since) / WEATHER_BLEND, 0, 1)
+                                    if self.weather_enabled() and weather.key != self.weather_prev.key
+                                    else 1)},
                 "power": self._power(), "charging": self.charge_at is not None, "jets": self.jets,
                 "nitro": max(0.0, self.nitro_until - now),
                 "rocket": max(0.0, self.rocket_until - now),

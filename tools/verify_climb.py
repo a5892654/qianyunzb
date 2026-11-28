@@ -2,6 +2,7 @@
 
 import asyncio
 import copy
+from dataclasses import replace
 from pathlib import Path
 import sys
 import unittest
@@ -15,6 +16,7 @@ from climb import BASE_Y, CARRY_POSES, CHAPTERS, Climb, DEFAULTS, HEIGHT, LEDGES
 from climb_contact import cup_contact
 from climb_course import CHECKPOINTS, LANDMARKS, WATER_Y, Ledge
 from climb_voice import ClimbPresenter
+from climb_weather import WEATHERS
 from live_climb import ClimbScene
 import config
 import main
@@ -48,6 +50,7 @@ class ClimbTests(unittest.TestCase):
         self.assertEqual(self.game.turns, 2)
 
     def test_forecast_waits_for_the_matching_landing_and_expires_on_reset(self):
+        self.config["weather"] = False
         for _ in range(900):
             self.game.advance(0.125)
             if self.game.on_ledge == 20:
@@ -103,7 +106,7 @@ class ClimbTests(unittest.TestCase):
         target = CHECKPOINTS[7]
         seen, passed_landmarks = set(), set()
         worst_reposition = 0
-        for frame in range(8 * 5 * 3600):
+        for frame in range(8 * 6 * 3600):
             self.game.advance(0.125)
             worst_reposition = max(worst_reposition, self.game.reposition_attempt)
             if LEDGES[self.game.last_ledge].landmark:
@@ -144,6 +147,64 @@ class ClimbTests(unittest.TestCase):
         steady_left, steady_right = ice.landing_bounds(0)
         fast_left, fast_right = ice.landing_bounds(300)
         self.assertLess(fast_right - fast_left, steady_right - steady_left)
+
+    def test_weather_rotates_after_the_intro_and_announces_its_effect(self):
+        self.game.take_voice()
+        for _ in range(60 * 150):
+            self.game.advance(1 / 60)
+            if self.game.snapshot()["weather"]["kind"] != "clear":
+                break
+        state = self.game.snapshot()
+        self.assertTrue(state["weather"]["enabled"])
+        self.assertNotEqual(state["weather"]["kind"], "clear")
+        self.assertGreater(state["weather"]["since"], 0)
+        cue = self.game.take_voice()
+        self.assertIn(cue.fact, {weather.fact for weather in WEATHERS.values()})
+
+    def test_weather_switch_changes_wind_and_disabled_weather_stays_clear(self):
+        scenarios = {}
+        for kind in ("head", "tail"):
+            game = Climb(lambda: DEFAULTS)
+            game.take_voice()
+            game.set_weather(kind)
+            first = game.snapshot()
+            self.assertEqual(first["weather"]["prev"], "clear")
+            self.assertLess(first["weather"]["mix"], 1)
+            for _ in range(60 * 3):
+                game.advance(1 / 60)
+            scenarios[kind] = game.snapshot()
+            self.assertEqual(scenarios[kind]["weather"]["mix"], 1)
+        self.assertLess(scenarios["head"]["wind"] * scenarios["head"]["facing"], 0)
+        self.assertGreater(scenarios["tail"]["wind"] * scenarios["tail"]["facing"], 0)
+        self.assertEqual(scenarios["head"]["weather"]["kind"], "head")
+        self.assertEqual(scenarios["tail"]["weather"]["kind"], "tail")
+        self.config["weather"] = False
+        self.game.set_weather("storm")
+        state = self.game.snapshot()
+        self.assertFalse(state["weather"]["enabled"])
+        self.assertEqual(state["weather"]["kind"], "clear")
+
+    def test_storm_adds_launch_slips(self):
+        self.game.weather = replace(WEATHERS["storm"], slip=1.0)
+        self.game.weather_until = 10 ** 9
+        self.game.weather_until_clock = 10 ** 9
+        while self.game.turns < 2:
+            self.game.advance(1 / 60)
+        self.assertGreater(self.game.snapshot()["slips"], 0)
+
+    def test_fog_drifts_the_launch_sideways(self):
+        clear, fog = Climb(lambda: DEFAULTS), Climb(lambda: DEFAULTS)
+        for game in (clear, fog):
+            game.take_voice()
+            for _ in range(57):
+                game.advance(1 / 60)
+            self.assertIsNotNone(game.brace)
+            game.flight_target = LEDGES[1]
+        fog.set_weather("fog")
+        shot = ((0.5, -0.866), 0.8, CARRY_POSES[0])
+        clear._launch(*shot)
+        fog._launch(*shot)
+        self.assertNotEqual(fog.vx, clear.vx)
 
     def test_course_uses_distinct_transfer_lengths_and_ledge_shapes(self):
         profiles = {}
@@ -511,6 +572,9 @@ class RoutesTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(b"--frame", await stream.content.readuntil(b"\r\n"))
             self.app.on_event({"type": "danmaku", "uid": 3, "text": "指路"})
             self.assertIn("guidance", self.app.climb.snapshot()["effects"])
+            await socket.send_json({"action": "weather", "kind": "fog"})
+            await asyncio.sleep(0.05)
+            self.assertEqual(self.app.climb.snapshot()["weather"]["kind"], "fog")
             self.app.on_event({"type": "follow", "uid": 9, "name": "新观众"})
             self.assertGreater(self.app.climb.snapshot()["nitro"], 0)
             for _ in range(45):

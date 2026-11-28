@@ -64,6 +64,16 @@
       </optgroup>
     </select>
     <button id="simulate" type="button">模拟一次</button>
+    <label class="simulation" for="weather">天气</label>
+    <select id="weather">
+      <option value="clear">晴朗 · 风稳</option>
+      <option value="tail">顺风 · 跳更远</option>
+      <option value="head">逆风 · 跳距缩水</option>
+      <option value="gusty">阵风 · 半空横推</option>
+      <option value="storm">雷雨 · 岩面湿滑</option>
+      <option value="fog">浓雾 · 落点看不清</option>
+      <option value="blizzard">暴风雪 · 横风夹雪</option>
+    </select>
   </div>
   <p class="settings">设为当前节目后，语音解说、房间弹幕和礼物会接入。礼物映射在 AI 设置中配置，强力道具同样可绑定礼物；新关注会自动触发一次短暂的氮气上升。<a href="/climb?view=1" target="_blank" rel="noopener">打开干净画面</a></p>
   <p class="settings" id="activate-error" role="alert" hidden></p>
@@ -77,6 +87,7 @@
   const activate = document.getElementById('activate');
   const activateError = document.getElementById('activate-error');
   const simulate = document.getElementById('simulate');
+  const weather = document.getElementById('weather');
   let socket, autoEnabled = false, guest = 0;
   document.body.classList.toggle('view', isolated);
   function loadImage() { game.src = '/api/climb/stream.mjpg?t=' + Date.now(); }
@@ -87,10 +98,10 @@
   }
   function connect() {
     socket = new WebSocket('ws://' + location.host + '/api/climb/control');
-    socket.onopen = () => { refresh(); simulate.disabled = restart.disabled = false; };
+    socket.onopen = () => { refresh(); simulate.disabled = restart.disabled = weather.disabled = false; };
     socket.onclose = () => {
       status.textContent = '正在重连';
-      auto.disabled = simulate.disabled = restart.disabled = true;
+      auto.disabled = simulate.disabled = restart.disabled = weather.disabled = true;
       activate.hidden = true;
       setTimeout(connect, 1300);
     };
@@ -105,11 +116,13 @@
       auto.disabled = false;
       auto.setAttribute('aria-pressed', String(!autoEnabled));
       activate.hidden = state.active;
+      if (state.weather?.kind && document.activeElement !== weather) weather.value = state.weather.kind;
       const climbing = !state.auto ? '已暂停' : state.finished
         ? `已登顶 · ${state.result_left} 秒后续局` : `自动攀爬 · 第 ${state.round} 局`;
+      const sky = state.weather?.name ? `天气 ${state.weather.name} · ` : '';
       const voice = !state.active ? '当前节目未选中' : !state.voice ? '语音已关闭'
         : state.warming_up ? '语音引擎预热中' : state.ai_status;
-      status.textContent = voice ? `${climbing} · ${voice}` : climbing;
+      status.textContent = voice ? `${sky}${climbing} · ${voice}` : `${sky}${climbing}`;
     } catch (_) {}
   }
   if (!isolated) {
@@ -118,6 +131,7 @@
     auto.onclick = () => send('auto', {enabled:!autoEnabled});
     restart.onclick = () => { if (window.confirm('重新开始本局攀爬？')) send('reset'); };
     simulate.onclick = () => send('simulate', {label:document.getElementById('effect').value, viewer:guest++ % 20});
+    weather.onchange = () => send('weather', {kind:weather.value});
     activate.onclick = async () => {
       activate.disabled = true;
       activateError.hidden = true;

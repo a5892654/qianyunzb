@@ -9,7 +9,7 @@ from threading import Lock
 
 import cv2
 import numpy as np
-from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps
 
 from climb import (FOLLOW_EFFECTS, HEIGHT, HELP_GIFTS, LEDGES, NITRO_BURN, POWER_GIFTS,
                    ROCKET_BURN, SABOTAGE_GIFTS, TITLE, WIDTH, clamp)
@@ -25,6 +25,10 @@ SAGE = (169, 212, 186)
 CORAL = (247, 166, 143)
 ICE = (157, 205, 231)
 INK = (48, 47, 43)
+WEATHER_COLORS = {"clear": SAGE, "tail": GOLD, "head": CORAL, "gusty": GOLD,
+                  "storm": ICE, "fog": SOFT, "blizzard": ICE}
+WIND_COLORS = {"tail": (198, 214, 190), "head": (232, 188, 168), "gusty": (216, 218, 208),
+               "storm": (180, 198, 210), "blizzard": (232, 240, 244)}
 ICON_SIZE = 18
 GIFT_ROW_H = 22
 BACKDROP_BLEND = 20.0
@@ -85,6 +89,19 @@ class ClimbScene:
                          (1440, 810), Image.Resampling.LANCZOS, centering=(0.5, 0.49))
             for number in range(6)
         ]
+        self.fog_banks = ((self._fog_bank(271, 1520, 340, 46), 48, 9),
+                          (self._fog_bank(613, 1520, 300, 38), 236, 15),
+                          (self._fog_bank(947, 1520, 260, 30), 408, 23))
+        self.storm_vignette = self._vignette((8, 15, 23), 62, 62, 26)
+        self.storm_base = self._stack(self._storm_shade(),
+                                      self._bottom_mist((98, 119, 134), 55, 240))
+        self.fog_base = self._stack(self._bottom_mist((207, 212, 207), 56, 300),
+                                    self._vignette((46, 52, 49), 30, 72, 30))
+        self.blizzard_base = self._stack(self._bottom_mist((236, 243, 247), 56, 250),
+                                         self._frost_edge())
+        self.snowflakes = {2: self._flake(2, 120, 0.8), 3: self._flake(3, 150, 1.1),
+                           5: self._flake(5, 135, 1.8), 8: self._flake(8, 125, 3.2),
+                           12: self._flake(12, 85, 5.2)}
         self.backdrop_edges = [(40.0, self.background, self.backdrops[0])]
         for index in range(1, len(CHAPTERS)):
             if CHAPTERS[index].backdrop != CHAPTERS[index - 1].backdrop:
@@ -129,6 +146,322 @@ class ClimbScene:
         if blend is not None and 0 < weight < 1:
             frame = Image.blend(blend.crop(box), frame, weight)
         return frame
+
+    @staticmethod
+    def _fog_bank(seed, width, height, count):
+        rng = random.Random(seed)
+        layer = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(layer)
+        for _ in range(count):
+            center_x = rng.uniform(0, width)
+            center_y = rng.uniform(height * 0.25, height * 0.75)
+            spread = rng.uniform(150, 520)
+            tall = rng.uniform(36, 130)
+            draw.ellipse((center_x - spread / 2, center_y - tall / 2,
+                          center_x + spread / 2, center_y + tall / 2),
+                         fill=(219, 224, 220, rng.randint(18, 42)))
+        pixels = np.array(layer.filter(ImageFilter.GaussianBlur(20)))
+        fade_x = np.ones(width)
+        fade_x[:70] = np.linspace(0, 1, 70)
+        fade_x[-70:] = np.linspace(1, 0, 70)
+        fade_y = np.ones(height)
+        fade_y[:60] = np.linspace(0, 1, 60)
+        fade_y[-60:] = np.linspace(1, 0, 60)
+        pixels[..., 3] = (pixels[..., 3] * fade_x[None, :] * fade_y[:, None]).astype(np.uint8)
+        return Image.fromarray(pixels)
+
+    @staticmethod
+    def _storm_shade():
+        layer = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(layer)
+        for y in range(0, 380, 4):
+            alpha = int(52 * (1 - y / 380) ** 1.35)
+            if alpha:
+                draw.rectangle((0, y, WIDTH, y + 4), fill=(22, 30, 38, alpha))
+        return layer.filter(ImageFilter.GaussianBlur(7))
+
+    @staticmethod
+    def _stack(*layers):
+        image = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+        for layer in layers:
+            image = Image.alpha_composite(image, layer)
+        return image
+
+    @staticmethod
+    def _vignette(color, alpha, width, blur):
+        layer = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+        ImageDraw.Draw(layer).rectangle((0, 0, WIDTH - 1, HEIGHT - 1),
+                                        outline=(*color, alpha), width=width)
+        return layer.filter(ImageFilter.GaussianBlur(blur))
+
+    @staticmethod
+    def _bottom_mist(color, alpha, height):
+        layer = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(layer)
+        for step in range(height):
+            draw.line((0, HEIGHT - height + step, WIDTH, HEIGHT - height + step),
+                      fill=(*color, int(alpha * (step / height) ** 2)))
+        return layer.filter(ImageFilter.GaussianBlur(18))
+
+    @staticmethod
+    def _frost_edge():
+        layer = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+        ImageDraw.Draw(layer).rectangle((3, 3, WIDTH - 4, HEIGHT - 4),
+                                        outline=(239, 247, 251, 104), width=34)
+        return layer.filter(ImageFilter.GaussianBlur(17))
+
+    @staticmethod
+    def _flake(radius, alpha, blur):
+        size = radius * 2 + 10
+        layer = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+        ImageDraw.Draw(layer).ellipse((5, 5, size - 5, size - 5), fill=(246, 249, 251, alpha))
+        return layer.filter(ImageFilter.GaussianBlur(blur))
+
+    def _weather_grade(self, frame, kind, prev, mix):
+        grades = {"storm": (0.78, 0.84, (52, 64, 74), 0.18),
+                  "blizzard": (0.88, 0.94, (228, 235, 238), 0.16),
+                  "fog": (0.72, 1.0, (208, 212, 207), 0.26),
+                  "head": (0.88, 0.93, None, 0),
+                  "gusty": (0.94, 1.0, None, 0)}
+        start = grades.get(prev, (1.0, 1.0, None, 0))
+        end = grades.get(kind, (1.0, 1.0, None, 0))
+        blend = mix if prev != kind and mix < 1 else 1
+        saturation = start[0] + (end[0] - start[0]) * blend
+        brightness = start[1] + (end[1] - start[1]) * blend
+        if saturation != 1:
+            frame = ImageEnhance.Color(frame).enhance(saturation)
+        if brightness != 1:
+            frame = ImageEnhance.Brightness(frame).enhance(brightness)
+        if start[2] and end[2]:
+            tint = tuple(round(a + (b - a) * blend) for a, b in zip(start[2], end[2]))
+            alpha = start[3] + (end[3] - start[3]) * blend
+        elif end[2]:
+            tint, alpha = end[2], end[3] * blend
+        elif start[2]:
+            tint, alpha = start[2], start[3] * (1 - blend)
+        else:
+            tint = alpha = 0
+        if tint and alpha > 0:
+            frame = Image.blend(frame, Image.new("RGB", frame.size, tint), alpha)
+        return frame
+
+    def _weather_layer(self, state, kind, density=1):
+        if kind == "clear":
+            if abs(state["wind"]) < 70:
+                return None
+            overlay = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+            self._wind_streaks(ImageDraw.Draw(overlay), state, kind, density)
+            return overlay
+        overlay = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(overlay)
+        if kind == "storm":
+            overlay.paste(self.storm_base, (0, 0), self.storm_base)
+            self._rain(draw, state, density)
+            self._wet_rock(draw, state, density)
+            self._wind_streaks(draw, state, kind, density)
+            overlay.paste(self.storm_vignette, (0, 0), self.storm_vignette)
+            self._lightning(draw, state)
+        elif kind == "fog":
+            self._fog_banks(overlay, state, density)
+            overlay.paste(self.fog_base, (0, 0), self.fog_base)
+            self._fog_haze(draw)
+        elif kind == "blizzard":
+            self._snow(overlay, state, density)
+            self._snow_streaks(draw, state, density)
+            self._wind_streaks(draw, state, kind, density)
+            self._snow_rock(draw, state, density)
+            overlay.paste(self.blizzard_base, (0, 0), self.blizzard_base)
+        else:
+            self._wind_streaks(draw, state, kind, density)
+            if kind in ("tail", "head", "gusty"):
+                self._wind_dust(draw, state, kind, density)
+        return overlay
+
+    def _weather_overlay(self, frame, state, kind, prev, mix):
+        layers = []
+        if prev != kind and mix < 1:
+            layers.append((prev, 1 - mix))
+        layers.append((kind, mix if prev != kind and mix < 1 else 1))
+        for key, strength in layers:
+            if strength <= 0:
+                continue
+            layer = self._weather_layer(state, key, strength)
+            if layer is None:
+                continue
+            if strength < 0.999:
+                layer.putalpha(layer.getchannel("A").point(
+                    lambda value, ratio=strength: round(value * ratio)))
+            frame.paste(layer, (0, 0), layer)
+        return frame
+
+    def _wind_streaks(self, draw, state, kind, density=1):
+        clock, wind = state["clock"], state["wind"]
+        direction = 1 if wind >= 0 else -1
+        color = WIND_COLORS.get(kind, (206, 215, 211))
+        fade = 0.72 if kind == "storm" else 0.85 if kind == "clear" else 1
+        bands = ((22, 28, 72, round(68 * fade), 0.6),
+                 (12, 80, 170, round(105 * fade), 0.9),
+                 (5, 150, 260, round(40 * fade), 1.3))
+        for band, (count, low, high, alpha, speed) in enumerate(bands):
+            for index in range(round(count * density)):
+                seed = (index * 2654435761 + band * 2246822519) & 0xFFFFFFFF
+                y = 80 + (seed >> 5) % 1000 / 1000 * (HEIGHT - 190)
+                length = low + (seed >> 15) % (high - low)
+                x = (seed % (WIDTH + 260) - 130 + clock * direction
+                     * (150 + abs(wind)) * speed) % (WIDTH + 300) - 150
+                wobble = math.sin(clock * 1.2 + (seed >> 9) % 9) * (2 + band * 2)
+                points = ((x, y), (x + length * 0.35, y + wobble * 0.4),
+                          (x + length * 0.7, y - wobble * 0.3), (x + length, y))
+                if band == 2:
+                    draw.line(points, fill=(*color, 24), width=6)
+                draw.line(points, fill=(*color, alpha), width=1 + band)
+                if band == 2 and kind in ("tail", "head"):
+                    draw.line((x + length, y, x + length - direction * 7, y - 3),
+                              fill=(*color, alpha), width=1)
+                    draw.line((x + length, y, x + length - direction * 7, y + 3),
+                              fill=(*color, alpha), width=1)
+
+    def _wind_dust(self, draw, state, kind, density=1):
+        clock, wind = state["clock"], state["wind"]
+        direction = 1 if wind >= 0 else -1
+        color = {"tail": (214, 201, 156), "head": (224, 184, 166),
+                 "gusty": (178, 174, 156)}[kind]
+        for index in range(round(26 * density)):
+            seed = (index * 1103515245 + 12345) & 0x7FFFFFFF
+            x = (seed % (WIDTH + 40) - 20 + clock * direction * (120 + (seed >> 8) % 160)) % (WIDTH + 60) - 30
+            y = 120 + (seed >> 13) % 1000 / 1000 * (HEIGHT - 220) + math.sin(clock + index) * 5
+            radius = 1 + (seed >> 20) % 2
+            draw.ellipse((x - radius, y - radius, x + radius, y + radius),
+                         fill=(*color, 80 + (seed >> 22) % 50))
+        if kind == "gusty":
+            for index in range(round(7 * density)):
+                seed = (index * 2246822519 + 13) & 0xFFFFFFFF
+                x = (seed % (WIDTH + 40) - 20 + clock * direction
+                     * (150 + (seed >> 7) % 120)) % (WIDTH + 60) - 30
+                y = 140 + (seed >> 15) % 1000 / 1000 * (HEIGHT - 260)
+                angle = clock * 3.6 + index * 1.7
+                dx, dy = 4.5 * math.cos(angle), 3 * math.sin(angle)
+                draw.polygon(((x, y), (x + dx, y + dy), (x + dx * 2, y), (x + dx, y - dy)),
+                             fill=(110, 100, 72, 165))
+
+    def _rain(self, draw, state, density=1):
+        clock, direction = state["clock"], 1 if state["wind"] >= 0 else -1
+        for band, (count, speed, length, width, alpha, color) in enumerate((
+                (54, 780, 9, 1, 55, (171, 193, 208)),
+                (42, 1320, 17, 1, 95, (182, 203, 216)),
+                (26, 1950, 29, 2, 140, (190, 212, 224)))):
+            for index in range(round(count * density)):
+                seed = (index * 2654435761 + band * 40503) & 0xFFFFFFFF
+                x = seed % (WIDTH + 100) - 50
+                y = ((seed >> 7) % 1000 / 1000 * (HEIGHT + 80) + clock * speed) % (HEIGHT + length + 80) - length
+                slant = direction * (length * 0.2 + abs(state["wind"]) * 0.02)
+                draw.line((x, y, x + slant, y + length), fill=(*color, alpha), width=width)
+
+    def _wet_rock(self, draw, state, density=1):
+        cx, cy = state["camera"]
+        clock = state["clock"]
+        for index in ledge_indices(cy - 60, cy + HEIGHT + 40):
+            ledge = LEDGES[index]
+            for step in range(2 if density >= 0.5 else 1):
+                seed = index * 97 + step * 211
+                x = ledge.x + 14 + seed % max(14, ledge.width - 28)
+                y = ledge.surface(x) - cy + 2
+                if not -16 < y < HEIGHT + 16:
+                    continue
+                half = 4 + int(5 * ((clock * 0.7 + index * 0.23 + step * 0.41) % 1))
+                draw.line((x - cx - half, y, x - cx + half, y),
+                          fill=(151, 196, 206, 65), width=1)
+                phase = (clock * 1.6 + index * 0.31 + step * 0.47) % 1
+                if phase < 0.22:
+                    rise = 2 + int(5 * (1 - phase / 0.22))
+                    draw.line((x - cx - 2, y, x - cx, y - rise), fill=(190, 215, 225, 140), width=1)
+                    draw.line((x - cx + 2, y, x - cx, y - rise), fill=(190, 215, 225, 140), width=1)
+                ripple = (clock * 0.75 + index * 0.27 + step * 0.39) % 1
+                if ripple < 0.6:
+                    radius = 1 + int(10 * ripple / 0.6)
+                    alpha = int(52 * (1 - ripple / 0.6))
+                    draw.arc((x - cx - radius, y - radius // 2, x - cx + radius, y + radius // 2),
+                             0, 360, fill=(181, 214, 223, alpha), width=1)
+            if density >= 0.35:
+                seed = index * 131 + 7
+                x = ledge.x + 12 + seed % max(12, ledge.width - 24)
+                under = ledge.underside(ledge.surface(x)) - cy + 4
+                drop = 2 + int(6 * ((clock * 0.8 + index * 0.63) % 1))
+                if 0 < under < HEIGHT:
+                    draw.line((x - cx, under, x - cx, under + drop), fill=(169, 204, 215, 110), width=1)
+
+    def _snow(self, overlay, state, density=1):
+        clock, direction = state["clock"], 1 if state["wind"] >= 0 else -1
+        for band, (count, radius, speed) in enumerate(((52, 2, 55), (34, 3, 100),
+                                                       (12, 8, 155), (5, 12, 195))):
+            sprite = self.snowflakes[radius]
+            for index in range(round(count * density)):
+                seed = (index * 2654435761 + band * 977) & 0xFFFFFFFF
+                x = (seed % (WIDTH + 60) - 30 + clock * direction * speed * 0.55
+                     + math.sin(clock * 0.9 + seed) * (6 + band * 7)) % (WIDTH + 80) - 40
+                y = ((seed >> 9) % 1000 / 1000 * (HEIGHT + 60) + clock * speed) % (HEIGHT + 80) - 40
+                overlay.paste(sprite, (int(x), int(y)), sprite)
+
+    def _snow_streaks(self, draw, state, density=1):
+        clock, direction = state["clock"], 1 if state["wind"] >= 0 else -1
+        for index in range(round(18 * density)):
+            seed = (index * 40503 + 977) & 0xFFFFFFFF
+            x = (seed % (WIDTH + 60) - 30 + clock * direction * 760) % (WIDTH + 90) - 40
+            y = ((seed >> 8) % 1000 / 1000 * (HEIGHT + 60) + clock * 680) % (HEIGHT + 80) - 40
+            length = 10 + (seed >> 18) % 14
+            draw.line((x, y, x + direction * (3 + length * 0.25), y + length),
+                      fill=(244, 248, 251, 95), width=1)
+
+    def _snow_rock(self, draw, state, density=1):
+        cx, cy = state["camera"]
+        for index in ledge_indices(cy - 40, cy + HEIGHT + 30):
+            ledge = LEDGES[index]
+            left, right = ledge.x + 10, ledge.right - 10
+            draw.line((left - cx, ledge.surface(left) - cy,
+                       right - cx, ledge.surface(right) - cy),
+                      fill=(238, 246, 249, 75), width=2)
+            for step in range(2 if density >= 0.45 else 1):
+                x = ledge.x + 18 + (index * 79 + step * 157) % max(16, ledge.width - 36)
+                y = ledge.surface(x) - cy
+                draw.ellipse((x - cx - 9, y - 2, x - cx + 9, y + 3),
+                             fill=(242, 248, 250, 95))
+
+    def _fog_banks(self, overlay, state, density=1):
+        clock, direction = state["clock"], 1 if state["wind"] >= 0 else -1
+        banks = self.fog_banks[:1] if density < 0.35 else self.fog_banks[:2] if density < 0.7 else self.fog_banks
+        for bank, y, speed in banks:
+            x = -int((clock * speed * direction) % bank.width)
+            overlay.paste(bank, (x, y), bank)
+            overlay.paste(bank, (x + bank.width, y), bank)
+
+    @staticmethod
+    def _fog_haze(draw):
+        draw.rectangle((0, 0, WIDTH, 74), fill=(220, 225, 221, 16))
+        draw.rectangle((0, HEIGHT - 118, WIDTH, HEIGHT), fill=(218, 224, 220, 24))
+
+    def _lightning(self, draw, state):
+        elapsed = state["clock"] - state["weather"].get("since", 0)
+        phase = (elapsed + 1.7) % 8.8
+        if phase >= 0.38:
+            return
+        strength = 96 if phase < 0.07 else 60 if phase < 0.15 else 26 if phase < 0.26 else 10
+        for y in range(0, HEIGHT, 4):
+            alpha = int(strength * (0.12 + 0.88 * (1 - y / HEIGHT) ** 1.7))
+            draw.line((0, y, WIDTH, y), fill=(236, 244, 255, alpha), width=4)
+        if phase < 0.12:
+            rng = random.Random(int((elapsed + 1.7) // 8.8) * 977 + 19)
+            x = rng.randint(210, WIDTH - 210)
+            points = [(x, 0)]
+            for step in range(1, 4):
+                x += rng.randint(-64, 64)
+                points.append((x, step * 52 + rng.randint(-14, 14)))
+            origin = points[0]
+            draw.ellipse((origin[0] - 150, -82, origin[0] + 150, 92), fill=(202, 222, 255, 34))
+            draw.line(points, fill=(188, 214, 255, 45), width=5)
+            draw.line(points, fill=(248, 251, 255, 175), width=1)
+            fork = points[2]
+            draw.line((fork, (fork[0] + rng.randint(-54, 54), fork[1] + rng.randint(24, 52))),
+                      fill=(196, 220, 255, 125), width=1)
 
     def render(self):
         state = self.game.snapshot()
@@ -313,7 +646,12 @@ class ClimbScene:
         cx, cy = state["camera"]
         offset = round(clamp(78 + cx * 0.23, 0, 160))
         down = round(clamp(75 + 16 * math.sin(cy / 680), 0, 90))
-        frame = self._background(state, offset, down)
+        weather = state.get("weather") or {}
+        enabled = weather.get("enabled", True)
+        kind = weather.get("kind", "clear") if enabled else "clear"
+        prev = weather.get("prev", "clear") if enabled else "clear"
+        mix = float(weather.get("mix", 1)) if enabled else 1
+        frame = self._weather_grade(self._background(state, offset, down), kind, prev, mix)
         for landmark in LANDMARKS:
             if LEDGES[landmark.last].y - 230 < cy + HEIGHT and LEDGES[landmark.first].y + 380 > cy:
                 art, x, y = _landmark_bitmap(landmark)
@@ -351,7 +689,8 @@ class ClimbScene:
             self._rescue(draw, state, x, cy)
         else:
             self._player(frame, draw, state, x, y)
-        self._hud(draw, frame, state)
+        frame = self._weather_overlay(frame, state, kind, prev, mix)
+        self._hud(ImageDraw.Draw(frame), frame, state)
         return frame
 
     def _world_details(self, draw, state, cx, cy):
@@ -594,6 +933,44 @@ class ClimbScene:
                     _text(draw, (right, center), status, 11, status_color, "rm")
                 y += GIFT_ROW_H
 
+    def _weather_icon(self, draw, x, y, kind, color):
+        cx, cy = x + 8, y + 8
+        if kind == "clear":
+            draw.ellipse((cx - 3, cy - 3, cx + 3, cy + 3), outline=color, width=1)
+            for dx, dy in ((0, -1), (1, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1)):
+                draw.line((cx + dx * 5, cy + dy * 5, cx + dx * 7, cy + dy * 7), fill=color)
+        elif kind in ("tail", "head"):
+            direction = 1 if kind == "tail" else -1
+            for offset in (4, 8, 12):
+                start, end = (x + 2, x + 12) if direction > 0 else (x + 12, x + 2)
+                draw.line((start, y + offset, end, y + offset), fill=color)
+                draw.line((end, y + offset, end - direction * 3, y + offset - 2), fill=color)
+                draw.line((end, y + offset, end - direction * 3, y + offset + 2), fill=color)
+        elif kind == "gusty":
+            for offset in (5, 9, 13):
+                draw.line(((x + 1, y + offset), (x + 5, y + offset - 2),
+                           (x + 9, y + offset + 1), (x + 13, y + offset - 1)),
+                          fill=color, joint="curve")
+        elif kind == "storm":
+            draw.arc((x + 1, y + 1, x + 13, y + 10), 180, 360, fill=color)
+            draw.line((x + 1, y + 6, x + 13, y + 6), fill=color)
+            draw.line((x + 8, y + 7, x + 5, y + 12, x + 9, y + 12, x + 7, y + 16), fill=color)
+        elif kind == "fog":
+            for offset in (4, 8, 12):
+                draw.line(((x + 1, y + offset), (x + 5, y + offset - 1),
+                           (x + 9, y + offset + 1), (x + 14, y + offset)),
+                          fill=color, joint="curve")
+        elif kind == "blizzard":
+            for angle in (0, math.pi / 3, 2 * math.pi / 3):
+                dx, dy = math.cos(angle) * 6, math.sin(angle) * 6
+                draw.line((cx - dx, cy - dy, cx + dx, cy + dy), fill=color)
+                for side in (-1, 1):
+                    tip_x, tip_y = cx + dx * side, cy + dy * side
+                    draw.line((tip_x, tip_y, tip_x - dx * 0.35 - dy * 0.25,
+                               tip_y - dy * 0.35 + dx * 0.25), fill=color)
+                    draw.line((tip_x, tip_y, tip_x - dx * 0.35 + dy * 0.25,
+                               tip_y - dy * 0.35 - dx * 0.25), fill=color)
+
     def _hud(self, draw, frame, state):
         _text(draw, (31, 27), TITLE, 25)
         _text(draw, (33, 60), f"{state['chapter'] + 1:02d}/{len(CHAPTERS)}  {state['zone']}", 16, SOFT)
@@ -603,6 +980,12 @@ class ClimbScene:
         _text(draw, (33, 85), elapsed, 16, SOFT)
         _text(draw, (33, 107), state["landmark"] or state["terrain"], 17, GOLD)
         _text(draw, (33, 130), f"失手 {state['misses']}   翻回 {state['comebacks']}", 16, SOFT)
+        weather = state.get("weather") or {}
+        if weather.get("enabled"):
+            color = WEATHER_COLORS.get(weather.get("kind"), SOFT)
+            self._weather_icon(draw, 33, 152, weather.get("kind", "clear"), color)
+            _text(draw, (57, 152), f"天气 {weather.get('name', '')} · {weather.get('hint', '')}",
+                  15, color)
         _text(draw, (1247, 30), f"当前 {state['height']:02d} m   最高 {state['best']:02d} m", 19, PALE, "rt")
         guidance, air, net = (state["votes"][name] for name in ("指路", "打气", "接住"))
         effects = state["effects"]
